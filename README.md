@@ -1,61 +1,44 @@
-# GPU Driver Diagnostics & Downgrade Prevention Tool
+﻿# Automated Game & System Crash Diagnostic Suite (`drivercheck`)
 
-A Windows utility designed to diagnose display adapter driver health, detect automatic version downgrades, and resolve system crashes (such as **DRIVER_POWER_STATE_FAILURE / BugCheck 0x9F**) on dual-GPU configurations—especially systems running both an AMD Ryzen CPU with integrated graphics and a discrete AMD Radeon graphics card.
+`drivercheck` is a zero-prompt, **100% read-only** PowerShell and batch diagnostic suite for Windows gaming PCs.
 
----
-
-## The Problem
-
-On Windows systems with dual graphics processors (e.g., AMD Ryzen Integrated Graphics + AMD Radeon Discrete GPU), Windows Update will often silently overwrite or downgrade the driver of the integrated GPU to an older OEM-approved branch in the background. 
-
-Because AMD drivers share background system services (like `atieclxx.exe` and `amducsi.sys`), this version mismatch conflicts during power transitions (such as system sleep, hibernation, restart, or shutdown), causing a 5-minute timeout hang that results in a Blue Screen of Death (BSOD) `0x0000009F`.
+It runs an automatic post-crash analysis across system telemetry, Windows Event logs, Steam crash dumps, minidump binary exception streams, and game logs to identify the exact root cause of game crashes and provide evidence-based guidance on what to check—preventing users from blindly blaming GPU drivers.
 
 ---
 
-## Features
+## 🚀 How to Run
 
-* **Dual-GPU Alignment Scan:** Queries active display adapters and cross-references them against the Windows Driver Store to find driver version mismatches.
-* **Smart Device ID Checking:** Maps device Hardware IDs (`DEV_xxxx`) to staged INF files to prevent false-positive warnings across different GPU architectures.
-* **Windows Update Prevention:** Offers to apply registry exclusions (`ExcludeWUDriversInQualityUpdate = 1` and `SearchOrderConfig = 0`) to permanently block Windows Update from replacing your official GPU drivers.
-* **Local Package Scan (`C:\AMD`):** Recursively searches your local `C:\AMD` directory for extracted driver folders. If a mismatch or generic driver is found, the tool points you to the exact local directory to perform a manual update using Device Manager.
+Simply double-click **`Run-Diagnostics.bat`** or run:
 
----
-
-## How to Run
-
-### Option 1: Double-Click Launcher (Recommended)
-1. Right-click the **[Run-Diagnostics.bat](file:///c:/Users/naoki/Development/drivercheck/Run-Diagnostics.bat)** file in the root directory.
-2. Select **Run as Administrator**.
-3. The launcher will automatically request elevation, bypass PowerShell execution policies, and run the script in interactive mode.
-
-### Option 2: PowerShell (Manual)
-1. Open PowerShell as Administrator.
-2. Navigate to the project directory:
-   ```powershell
-   Set-Location -Path "C:\Users\naoki\Development\drivercheck"
-   ```
-3. Run the script in safe diagnostic mode (read-only):
-   ```powershell
-   Powershell.exe -ExecutionPolicy Bypass -File .\Get-GPUDriverDiagnostics.ps1
-   ```
-4. Run the script in interactive fix mode (applies registry fixes and stages drivers):
-   ```powershell
-   Powershell.exe -ExecutionPolicy Bypass -File .\Get-GPUDriverDiagnostics.ps1 -ApplyFix
-   ```
-
----
-
-## Verifying Success
-
-When your system is successfully aligned and protected, running the diagnostics script will report:
-
-```text
-=== Checking Windows Update & Driver Search policies...
-  1. Driver Searching Setting (SearchOrderConfig):
-[INFO] Disabled (0) - Windows Update will NOT search for drivers.
-  2. Driver Exclusion Policy (ExcludeWUDriversInQualityUpdate):
-[INFO] Enabled (1) - Drivers are excluded from Quality Updates.
-
-=== Analyzing Driver Health & Generating Recommendations...
-[ OK ] No active GPU driver problems (such as generic adapters or downgrades) were detected on this system.
+```powershell
+PowerShell.exe -ExecutionPolicy Bypass -File .\Analyze-LatestCrash.ps1
 ```
+
+The tool runs completely automatically without any menus or modifying commands, analyzes the past 48 hours of crash telemetry, and outputs a structured diagnostic report.
+
+---
+
+## 🔍 What the Tool Analyzes
+
+1. **Graphics Hardware & Driver Stack**
+   * Enumerates active GPUs (AMD, NVIDIA, Intel), driver versions, release dates, and detects dual-GPU driver branch conflicts (e.g. Discrete GPU vs. CPU Integrated Graphics).
+
+2. **Windows Updates & Background Activity**
+   * Audits recently installed Windows Quality Updates and Microsoft Defender signature updates (`KB2267602`) that coincide with crash timestamps.
+
+3. **Network Connectivity & Link Drops**
+   * Inspects all active network adapters (Ethernet, Wi-Fi) for link drops, auto-negotiation retraining events, and Steam network device state bounces (`OnNetworkDeviceStateChange`).
+
+4. **System Logs & LiveKernel Telemetry**
+   * Correlates GPU driver TDR timeouts (`LiveKernelEvent 141` / `VIDEO_ENGINE_TIMEOUT_DETECTED`), user-mode driver crashes (`AMD_REPORT_UM`), and dirty shutdowns (`Kernel-Power 41`).
+
+5. **Deep Crash Dump & Binary Minidump Inspector**
+   * Scans Steam dumps, `%LOCALAPPDATA%\CrashDumps`, Unreal Engine crash folders, and Sentry logs.
+   * Parses binary minidump streams to extract exact Exception Codes (`0xC0000005`, `0x887A0006`, `0x00000000`), Steam IPC assertion callstacks (`pipes.cpp`, `steamengine.cpp`), and active Vulkan hook layers.
+
+6. **Game Engine Console & Log Analysis**
+   * Inspects game logs (e.g. idTech `qconsole.log`, Unreal Engine `cef3.log`) for vertex buffer pool limits, streaming timeouts, and clean vs. abrupt exits.
+
+7. **Executive Root Cause Summary & Actionable Guidance**
+   * Tells the user in plain English **what actually caused the crash** (e.g., *Network Drop -> Steam IPC Pipe Kill*, *GPU TDR / Display Driver Reset*, *Background Defender Update Lock*, *In-Engine Buffer Exhaustion*).
+   * Provides concrete, actionable recommendations on what settings or hardware to look at.
