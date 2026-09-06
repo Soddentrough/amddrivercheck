@@ -178,7 +178,10 @@ function Export-DcHtmlReport {
     $gpuNamesStr = if ($hw -and $hw.Gpus) { ($hw.Gpus.Name -join ' | ') } else { 'None' }
     $pnpCountStr = if ($hw -and $hw.PnpIssues) { $hw.PnpIssues.Count } else { 0 }
     $dispSummaryStr = if ($hw -and $hw.Displays) {
-        ($hw.Displays | ForEach-Object { "$($_.Name) ($($_.ActiveResolution)@$($_.ActiveRefreshRate)Hz" + (if ($_.HasTimingRisk) { " [HAZARD: Scaler/EDID Timing Risk]" } else { "" }) }) -join '; '
+        ($hw.Displays | ForEach-Object {
+            $riskNotice = if ($_.HasTimingRisk) { " [HAZARD: Scaler/EDID Timing Risk]" } else { "" }
+            "$($_.Name) ($($_.ActiveResolution)@$($_.ActiveRefreshRate)Hz)$riskNotice"
+        }) -join '; '
     } else { 'None' }
 
     $discordText = "=== DriverCheck Diagnostic Summary ===`n" +
