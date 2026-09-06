@@ -1,404 +1,503 @@
-﻿<#
+<#
 .SYNOPSIS
-    Automated Game & System Crash Diagnostic Suite
+    Automated Game & System Crash Diagnostic Suite (Unified Engine)
 .DESCRIPTION
-    Fully automated, read-only diagnostic tool that analyzes recent game crashes,
-    correlates system and hardware telemetry, and produces a clear root-cause report
-    with actionable troubleshooting guidance.
+    A hierarchical, evidence-based diagnostic tool following strict analysis precedence:
+      1. Tier 1 (Primary Ground Truth): Crash Dumps & Exceptions (BSOD, WER, Steam, Unreal, Unity).
+      2. Tier 2 (Secondary Evidence):   Application & Game Logs (Engine logs, Steam overlay/IPC, asserts).
+      3. Tier 3 (Tertiary Telemetry):  System Event Logs (WHEA errors, GPU TDR resets, BugChecks, Fast Startup).
+      4. Tier 4 (Contextual Audit):     Hardware Health & Configuration (PnP errors, GPU drivers, Dual-GPU alignment, Network).
 .PARAMETER Hours
-    Number of hours back to scan for events and crash telemetry (default: 48).
-.EXAMPLE
-    .\Analyze-LatestCrash.ps1
+    Hours back to scan for crash telemetry (default: 48).
+.PARAMETER DeepScan
+    Extend scan window to 7 days (168 hours).
+.PARAMETER ExportHtml
+    Generate a self-contained, responsive dark-mode HTML diagnostic report.
+.PARAMETER ExportJson
+    Export structured telemetry data as JSON.
+.PARAMETER ExportZip
+    Create a complete diagnostic support bundle (HTML report + logs) for sharing.
+.PARAMETER OpenReport
+    Automatically open the generated HTML report in the default web browser.
+.PARAMETER AuditPower
+    Run dedicated deep audit of Windows Power, Fast Startup, and sleep/wake transitions.
+.PARAMETER AuditDevices
+    Run dedicated deep audit of Plug and Play (PnP) hardware health and missing drivers.
+.PARAMETER AuditBluetooth
+    Run dedicated deep audit of Bluetooth controllers, audio devices, and radio health.
+.PARAMETER FixDrivers
+    Inspect Windows Driver Store for GPU driver downgrades and lock Windows Update driver policies.
+.PARAMETER RepairNetwork
+    (Admin) Apply stability settings to Ethernet adapters (Speed/Duplex lock, VLAN disable).
+.PARAMETER Speed
+    Target speed when using -RepairNetwork: "2.5G" (default), "1.0G", or "Auto".
+.PARAMETER CleanConfig
+    Clean stale game configuration files and shader caches (with automatic .bak backup).
+.PARAMETER Game
+    Target game when using -CleanConfig: "TheGreatCircle", "DOOMEternal", "DOOMTheDarkAges", "All" (default).
+.PARAMETER CleanSteamCache
+    Purge Steam CEF HTML browser cache (%LOCALAPPDATA%\Steam\htmlcache).
+.PARAMETER KillHungSteam
+    Terminate lingering headless or zombie Steam processes blocking relaunch.
+.PARAMETER Quiet
+    Suppress interactive banner output and return only the structured report object.
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
-    [int]$Hours = 48
+    [int]$Hours = 48,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$DeepScan,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$ExportHtml,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$ExportJson,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$ExportZip,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$OpenReport,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$AuditPower,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$AuditDevices,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$AuditBluetooth,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$FixDrivers,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$RepairNetwork,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateSet("2.5G", "1.0G", "Auto")]
+    [string]$Speed = "2.5G",
+
+    [Parameter(Mandatory = $false)]
+    [switch]$CleanConfig,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateSet("TheGreatCircle", "DOOMEternal", "DOOMTheDarkAges", "All")]
+    [string]$Game = "All",
+
+    [Parameter(Mandatory = $false)]
+    [switch]$CleanSteamCache,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$KillHungSteam,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$Quiet
 )
 
 $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-function Write-Header {
-    param([string]$Title)
-    Write-Host ""
-    Write-Host "========================================================================" -ForegroundColor Magenta
-    Write-Host "  $Title" -ForegroundColor Magenta
-    Write-Host "========================================================================" -ForegroundColor Magenta
-    Write-Host ""
-}
+# Import Modular Engine
+$modulesDir = Join-Path $PSScriptRoot "scripts\modules"
+Import-Module (Join-Path $modulesDir "DcCrashDump.psm1") -Force
+Import-Module (Join-Path $modulesDir "DcEngineLogs.psm1") -Force
+Import-Module (Join-Path $modulesDir "DcSystemTelemetry.psm1") -Force
+Import-Module (Join-Path $modulesDir "DcHardwareHealth.psm1") -Force
+Import-Module (Join-Path $modulesDir "DcRemediation.psm1") -Force
+Import-Module (Join-Path $modulesDir "DcReportGenerator.psm1") -Force
 
-# Header Banner
-Write-Host ""
-Write-Host "  +------------------------------------------------------------------------+" -ForegroundColor Cyan
-Write-Host "  |          AUTOMATED SYSTEM & GAME CRASH DIAGNOSTIC SUITE               |" -ForegroundColor Cyan
-Write-Host "  +------------------------------------------------------------------------+" -ForegroundColor Cyan
+# Apply -DeepScan override
+if ($DeepScan) { $Hours = 168 }
 $cutoff = (Get-Date).AddHours(-$Hours)
-Write-Host "  Analyzing logs, telemetry, and crash dumps from the past $Hours hours." -ForegroundColor DarkGray
-Write-Host "  Time Window: $($cutoff.ToString('yyyy-MM-dd HH:mm')) to $((Get-Date).ToString('yyyy-MM-dd HH:mm'))" -ForegroundColor DarkGray
-Write-Host ""
 
-# State tracking for Root Cause Classification
-$report = [PSCustomObject]@{
-    GPUs = @()
-    DualGPUConflict = $false
-    NetworkAdapters = @()
-    NetworkDrops = @()
-    SteamDeviceBounces = @()
-    RecentUpdates = @()
-    RecentDefenderUpdates = @()
-    TdrEvents = @()
-    LiveKernelEvents = @()
-    KernelReboots = @()
-    CrashDumps = @()
-    SteamStallAssertions = @()
-    SteamPipeAssertions = @()
-    EngineMemoryWarnings = @()
-    IdentifiedCauses = @()
-    TroubleshootingGuidance = @()
+# =========================================================================
+# DEDICATED ACTION / REMEDIATION SWITCHES
+# =========================================================================
+
+if ($RepairNetwork) {
+    Write-Host "`n=== NETWORK ADAPTER STABILITY OPTIMIZER ===" -ForegroundColor Magenta
+    Repair-DcEthernetSettings -Speed $Speed
+    exit 0
 }
 
-# -------------------------------------------------------------------------
-# 1. GPU & Display Hardware Stack
-# -------------------------------------------------------------------------
-Write-Header "1. GRAPHICS HARDWARE & DRIVER STACK"
+if ($CleanConfig) {
+    Write-Host "`n=== GAME CONFIGURATION & CACHE CLEANER (WITH BACKUPS) ===" -ForegroundColor Magenta
+    Clear-DcGameConfig -Game $Game -Backup
+    Write-Host "`n[DONE] Game configuration cleaning complete." -ForegroundColor Green
+    exit 0
+}
 
-$videoControllers = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue
-$signedDrivers = Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue
+if ($CleanSteamCache) {
+    Write-Host "`n=== STEAM CEF HTML BROWSER CACHE CLEANER ===" -ForegroundColor Magenta
+    Clear-DcSteamCache -KillRunningSteam:$KillHungSteam
+    exit 0
+}
 
-foreach ($vc in $videoControllers) {
-    $sd = $signedDrivers | Where-Object { $_.DeviceClass -eq 'DISPLAY' -and ($_.DeviceID -eq $vc.PNPDeviceID -or $_.DeviceName -eq $vc.Name) } | Select-Object -First 1
-    $ver = if ($sd -and $sd.DriverVersion) { $sd.DriverVersion } else { $vc.DriverVersion }
-    $rawDate = if ($sd -and $sd.DriverDate) { $sd.DriverDate } else { $vc.DriverDate }
-    
-    $formattedDate = "Unknown"
-    if ($rawDate) {
-        if ($rawDate -is [DateTime]) { $formattedDate = $rawDate.ToString("yyyy-MM-dd") }
-        elseif ($rawDate -match '^(\d{4})(\d{2})(\d{2})') { $formattedDate = "$($Matches[1])-$($Matches[2])-$($Matches[3])" }
-        else { $formattedDate = $rawDate.ToString() }
-    }
-    
-    $prov = if ($sd -and $sd.DriverProviderName) { $sd.DriverProviderName } else { $vc.AdapterCompatibility }
-    $report.GPUs += [PSCustomObject]@{ Name = $vc.Name; Version = $ver; Date = $formattedDate; Provider = $prov; Status = $vc.Status }
-    
-    Write-Host "  GPU: " -NoNewline -ForegroundColor White
-    Write-Host $vc.Name -ForegroundColor Yellow
-    Write-Host "    +- Driver Version: " -NoNewline -ForegroundColor DarkGray
-    Write-Host $ver -ForegroundColor White
-    Write-Host "    +- Driver Date:    " -NoNewline -ForegroundColor DarkGray
-    Write-Host $formattedDate -ForegroundColor White
-    Write-Host "    +- Provider:       " -NoNewline -ForegroundColor DarkGray
-    Write-Host $prov -ForegroundColor White
-    Write-Host "    +- Status:         " -NoNewline -ForegroundColor DarkGray
-    if ($vc.Status -eq "OK") { Write-Host "OK" -ForegroundColor Green } else { Write-Host $vc.Status -ForegroundColor Red }
+if ($KillHungSteam) {
+    Write-Host "`n=== HUNG / ZOMBIE PROCESS TERMINATOR ===" -ForegroundColor Magenta
+    Stop-DcZombieProcesses
+    Write-Host "`n[DONE] Process termination routine complete." -ForegroundColor Green
+    exit 0
+}
+
+if ($FixDrivers) {
+    Write-Host "`n=== GPU DRIVER STORE ALIGNMENT & DOWNGRADE PROTECTION ===" -ForegroundColor Magenta
+    Repair-DcAmdDriverAlignment -BlockWindowsUpdateDrivers
+    exit 0
+}
+
+# =========================================================================
+# SPECIALIZED AUDIT MODES
+# =========================================================================
+
+if ($AuditPower) {
+    & (Join-Path $PSScriptRoot "scripts\Get-PowerAndSleepDiagnostics.ps1") -Hours $Hours
+    exit 0
+}
+
+if ($AuditDevices) {
+    & (Join-Path $PSScriptRoot "scripts\Get-PnpDeviceDiagnostics.ps1")
+    exit 0
+}
+
+if ($AuditBluetooth) {
+    & (Join-Path $PSScriptRoot "scripts\Get-BluetoothDiagnostics.ps1")
+    exit 0
+}
+
+# =========================================================================
+# MAIN UNIFIED 4-TIER DIAGNOSTIC FLOW
+# =========================================================================
+
+if (-not $Quiet) {
+    Write-Host ""
+    Write-Host "  +------------------------------------------------------------------------+" -ForegroundColor Cyan
+    Write-Host "  |          AUTOMATED SYSTEM & GAME CRASH DIAGNOSTIC SUITE               |" -ForegroundColor Cyan
+    Write-Host "  |             4-Tier Evidence Hierarchy Engine v4.0                     |" -ForegroundColor Cyan
+    Write-Host "  +------------------------------------------------------------------------+" -ForegroundColor Cyan
+    Write-Host "  Scan Window: $($cutoff.ToString('yyyy-MM-dd HH:mm')) to $((Get-Date).ToString('yyyy-MM-dd HH:mm')) ($Hours hours)" -ForegroundColor DarkGray
+    Write-Host "  Precedence:  [1] Crash Dumps -> [2] App Logs -> [3] System Logs -> [4] System Config" -ForegroundColor DarkGray
     Write-Host ""
 }
 
-# Check for Dual-GPU mismatch (e.g., discrete card vs CPU integrated graphics)
-if ($report.GPUs.Count -gt 1) {
-    $uniqueVersions = $report.GPUs | Select-Object -ExpandProperty Version -Unique
-    if ($uniqueVersions.Count -gt 1) {
-        $report.DualGPUConflict = $true
-        Write-Host "  [!] NOTICE: Multiple active GPUs detected on different driver versions." -ForegroundColor Yellow
-        Write-Host "      (Having discrete GPU and integrated CPU graphics on mismatched driver stacks can cause handle leaks)." -ForegroundColor DarkGray
-        Write-Host ""
-    }
-}
-
 # -------------------------------------------------------------------------
-# 2. Windows Updates & Background Activity
+# TIER 1: CRASH DUMPS & BINARY THREAD INSPECTION
 # -------------------------------------------------------------------------
-Write-Header "2. WINDOWS UPDATES & BACKGROUND SYSTEM ACTIVITY"
-
-$wuEvents = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-WindowsUpdateClient'; StartTime=$cutoff} -ErrorAction SilentlyContinue |
-    Where-Object { $_.Message -match 'Installation Successful' }
-
-if ($wuEvents) {
-    Write-Host "  Recent Windows & Component Updates (Past $Hours Hours):" -ForegroundColor White
-    foreach ($wue in ($wuEvents | Select-Object -First 8)) {
-        $cleanMsg = ($wue.Message -split "`r`n")[0].Trim()
-        $report.RecentUpdates += [PSCustomObject]@{ Time = $wue.TimeCreated; Message = $cleanMsg }
-        if ($cleanMsg -match 'KB2267602|Defender|Antivirus') { $report.RecentDefenderUpdates += $wue }
-        Write-Host "    * [$($wue.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss'))] $cleanMsg" -ForegroundColor DarkCyan
-    }
-} else {
-    Write-Host "  [ OK ] No Windows Updates or Defender signature installations recorded in this window." -ForegroundColor Green
-}
-Write-Host ""
-
-# -------------------------------------------------------------------------
-# 3. Network Connectivity & Link State Drops
-# -------------------------------------------------------------------------
-Write-Header "3. NETWORK CONNECTIVITY & ADAPTER LINK STATUS"
-
-$adapters = Get-NetAdapter -ErrorAction SilentlyContinue
-foreach ($a in $adapters) {
-    $speedDuplex = Get-NetAdapterAdvancedProperty -Name $a.Name -DisplayName "Speed & Duplex" -ErrorAction SilentlyContinue
-    $sdVal = if ($speedDuplex) { $speedDuplex.DisplayValue } else { "N/A" }
-    
-    $report.NetworkAdapters += [PSCustomObject]@{ Name = $a.Name; Desc = $a.InterfaceDescription; Status = $a.Status; Speed = $a.LinkSpeed; SpeedDuplex = $sdVal }
-    Write-Host "  Adapter: $($a.Name) ($($a.InterfaceDescription))" -ForegroundColor White
-    Write-Host "    +- Status: $($a.Status) | Link Speed: $($a.LinkSpeed) | Duplex: $sdVal" -ForegroundColor DarkGray
-}
-
-# Scan Event Log for any network adapter link drops
-$netEvents = Get-WinEvent -FilterHashtable @{LogName='System'; StartTime=$cutoff} -ErrorAction SilentlyContinue |
-    Where-Object { $_.Message -match 'disconnected|link is down|reset|timed out' -and $_.ProviderName -notmatch 'Kernel|Service Control' }
-
-if ($netEvents) {
-    $report.NetworkDrops = $netEvents
+if (-not $Quiet) {
+    Write-Host "========================================================================" -ForegroundColor Magenta
+    Write-Host "  TIER 1: CRASH DUMPS & BINARY THREAD INSPECTOR (PRIMARY GROUND TRUTH)" -ForegroundColor Magenta
+    Write-Host "========================================================================" -ForegroundColor Magenta
     Write-Host ""
-    Write-Host "  [!] WARNING: Detected $($netEvents.Count) network adapter disconnection/drop event(s):" -ForegroundColor Yellow
-    foreach ($ne in ($netEvents | Select-Object -First 5)) {
-        Write-Host "    * [$($ne.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss'))] ($($ne.ProviderName)): $($ne.Message.Trim())" -ForegroundColor Red
+}
+
+$dumpFiles = Get-DcCrashDumps -Cutoff $cutoff
+$parsedDumps = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+if ($dumpFiles.Count -gt 0) {
+    foreach ($df in $dumpFiles) {
+        $dumpObj = Read-DcMinidump -Path $df.FullName
+        if ($dumpObj) {
+            $parsedDumps.Add($dumpObj)
+            if (-not $Quiet) {
+                Write-Host "------------------------------------------------------------------------" -ForegroundColor Gray
+                Write-Host "Dump File:     $($dumpObj.FileName)" -ForegroundColor Yellow
+                Write-Host "Location:      $($dumpObj.FullName)" -ForegroundColor White
+                Write-Host "Timestamp:     $($dumpObj.Timestamp.ToString('yyyy-MM-dd HH:mm:ss')) | $($dumpObj.SizeMb) MB | $($dumpObj.Architecture)" -ForegroundColor DarkGray
+                if ($dumpObj.ExceptionCode) {
+                    Write-Host "  +- Exception:        $($dumpObj.ExceptionCode) ($($dumpObj.ExceptionMeaning))" -ForegroundColor Red
+                    Write-Host "  +- Faulting Module:  $($dumpObj.FaultingIP)" -ForegroundColor White
+                }
+                if ($dumpObj.Assertions.Count -gt 0) {
+                    Write-Host "  +- Assertions / Error Strings Found:" -ForegroundColor Red
+                    foreach ($a in $dumpObj.Assertions) {
+                        Write-Host "       * $a" -ForegroundColor Red
+                    }
+                }
+            }
+        }
     }
 } else {
-    Write-Host "  [ OK ] No physical network link disconnects recorded in system event logs." -ForegroundColor Green
-}
-
-# Scan Steam logs for network state changes
-$steamConnLog = "C:\Program Files (x86)\Steam\logs\connection_log.txt"
-if (Test-Path $steamConnLog) {
-    $bounces = Get-Content $steamConnLog -Tail 250 -ErrorAction SilentlyContinue |
-        Where-Object { $_ -match 'OnNetworkDeviceStateChange|Connectivity test: result=Failed' }
-    if ($bounces) {
-        $report.SteamDeviceBounces = $bounces
-        Write-Host "  [!] Steam Connection Log: Recorded network interface state changes / reconnects." -ForegroundColor Yellow
+    if (-not $Quiet) {
+        Write-Host "  [ OK ] No crash dump files found in monitored directories." -ForegroundColor Green
     }
 }
-Write-Host ""
 
-# -------------------------------------------------------------------------
-# 4. System Event Logs & Hardware Crash Telemetry
-# -------------------------------------------------------------------------
-Write-Header "4. SYSTEM LOGS & HARDWARE CRASH TELEMETRY"
-
-$sysEvents = Get-WinEvent -FilterHashtable @{LogName=@('System','Application'); StartTime=$cutoff} -ErrorAction SilentlyContinue
-
-if ($sysEvents) {
-    foreach ($e in $sysEvents) {
-        # GPU TDRs / Display Driver Resets
-        if ($e.Id -eq 4101 -or ($e.ProviderName -match 'Display|amdkmdag|nvlddmkm|igfx' -and $e.Message -match 'stopped responding')) {
-            $report.TdrEvents += $e
-            Write-Host "  [!] GPU Driver TDR Event [$($e.TimeCreated)]: $($e.Message.Trim())" -ForegroundColor Red
-        }
-        # Kernel Power 41 (Unexpected Reboot)
-        if ($e.Id -eq 41 -and $e.ProviderName -match 'Kernel-Power') {
-            $report.KernelReboots += $e
-            Write-Host "  [!] Unexpected System Reboot (Kernel-Power Event 41) [$($e.TimeCreated)]" -ForegroundColor Red
-        }
-        # Windows Error Reporting LiveKernel Events
-        if ($e.ProviderName -match 'Windows Error Reporting' -and $e.Message -match 'LiveKernelEvent') {
-            $report.LiveKernelEvents += $e
-            if ($e.Message -match 'P1:\s*141') {
-                Write-Host "  [!] LiveKernelEvent 0x141 (VIDEO_ENGINE_TIMEOUT_DETECTED) [$($e.TimeCreated)]" -ForegroundColor Red
-            } elseif ($e.Message -match 'P1:\s*a1000001') {
-                Write-Host "  [!] LiveKernelEvent AMD_WATCHDOG (a1000001) [$($e.TimeCreated)]" -ForegroundColor Red
-            } elseif ($e.Message -match 'P1:\s*a2000002') {
-                Write-Host "  [!] LiveKernelEvent AMD_REPORT_UM (a2000002 - User Mode Driver Crash) [$($e.TimeCreated)]" -ForegroundColor Red
-            } else {
-                Write-Host "  [!] LiveKernelEvent Recorded [$($e.TimeCreated)]" -ForegroundColor Red
+# Check Live Steam Zombie Processes
+$zombieProcesses = [System.Collections.Generic.List[PSCustomObject]]::new()
+$liveSteam = Get-Process -Name steam -ErrorAction SilentlyContinue
+if ($liveSteam) {
+    foreach ($sp in $liveSteam) {
+        $hasWindow = ($sp.MainWindowHandle -ne [IntPtr]::Zero)
+        $isHung = ($sp.Responding -eq $false)
+        $isHeadlessStall = ($sp.Threads.Count -le 3 -and -not $hasWindow)
+        if ($isHung -or $isHeadlessStall) {
+            $zombieProcesses.Add([PSCustomObject]@{
+                ProcessName = $sp.ProcessName
+                PID         = $sp.Id
+                StartTime   = $sp.StartTime
+                Threads     = $sp.Threads.Count
+                Responding  = $sp.Responding
+            })
+            if (-not $Quiet) {
+                Write-Host "`n  [!] LIVE PROCESS ZOMBIE DETECTED: $($sp.ProcessName) (PID: $($sp.Id))" -ForegroundColor Red
+                Write-Host "      Process is headless or not responding, blocking single-instance relaunch mutex." -ForegroundColor DarkYellow
             }
         }
     }
 }
+if (-not $Quiet) { Write-Host "" }
 
-if ($report.TdrEvents.Count -eq 0 -and $report.LiveKernelEvents.Count -eq 0 -and $report.KernelReboots.Count -eq 0) {
-    Write-Host "  [ OK ] No GPU driver TDR timeouts, live kernel resets, or dirty reboots detected." -ForegroundColor Green
+# -------------------------------------------------------------------------
+# TIER 2: APPLICATION & GAME ENGINE LOGS
+# -------------------------------------------------------------------------
+if (-not $Quiet) {
+    Write-Host "========================================================================" -ForegroundColor Magenta
+    Write-Host "  TIER 2: APPLICATION & GAME ENGINE LOGS (SECONDARY EVIDENCE)" -ForegroundColor Magenta
+    Write-Host "========================================================================" -ForegroundColor Magenta
+    Write-Host ""
 }
-Write-Host ""
 
-# -------------------------------------------------------------------------
-# 5. Deep Crash Dump & Binary Minidump Inspector
-# -------------------------------------------------------------------------
-Write-Header "5. CRASH DUMPS & BINARY ASSERTION INSPECTOR"
+$engineLogs = Get-DcEngineLogs -Cutoff $cutoff
+$steamLogs = Get-DcSteamLogs -Cutoff $cutoff
 
-$dumpDirs = @(
-    "C:\Program Files (x86)\Steam\dumps",
-    "$env:LOCALAPPDATA\CrashDumps",
-    "$env:LOCALAPPDATA\Pearl Abyss\DumpCache",
-    "$env:LOCALAPPDATA\BeamNG.drive"
-)
-
-# Auto-discover Unreal Engine Saved\Crashes directories
-$ueDirs = Get-ChildItem "$env:LOCALAPPDATA" -Directory -ErrorAction SilentlyContinue |
-    ForEach-Object { "$($_.FullName)\Saved\Crashes" } |
-    Where-Object { Test-Path $_ }
-if ($ueDirs) { $dumpDirs += $ueDirs }
-
-$foundDumps = 0
-foreach ($dir in $dumpDirs) {
-    if (Test-Path $dir) {
-        $files = Get-ChildItem -Path $dir -Recurse -Include "*.dmp", "__sentry-event" -ErrorAction SilentlyContinue |
-            Where-Object { $_.LastWriteTime -gt $cutoff }
-        
-        foreach ($f in $files) {
-            $foundDumps++
-            $report.CrashDumps += $f
-            $sizeMb = [math]::Round($f.Length / 1MB, 2)
-            Write-Host "------------------------------------------------------------------------" -ForegroundColor Gray
-            Write-Host "Dump File:     $($f.Name)" -ForegroundColor Yellow
-            Write-Host "Location:      $($f.FullName)" -ForegroundColor White
-            Write-Host "Timestamp:     $($f.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')) | Size: $sizeMb MB" -ForegroundColor DarkGray
-            
-            # Parse Minidump structure
-            if ($f.Name -match '\.dmp$') {
-                try {
-                    $fs = [System.IO.File]::OpenRead($f.FullName)
-                    $br = New-Object System.IO.BinaryReader($fs)
-                    $sig = $br.ReadUInt32()
-                    
-                    if ($sig -eq 0x504D444D) {
-                        $version = $br.ReadUInt32()
-                        $numStreams = $br.ReadUInt32()
-                        $streamDirRva = $br.ReadUInt32()
-                        $fs.Position = $streamDirRva
-                        $streams = @()
-                        for ($i = 0; $i -lt $numStreams; $i++) {
-                            $type = $br.ReadUInt32()
-                            $size = $br.ReadUInt32()
-                            $rva = $br.ReadUInt32()
-                            $streams += [PSCustomObject]@{ Type = $type; Size = $size; Rva = $rva }
-                        }
-                        
-                        $excStream = $streams | Where-Object { $_.Type -eq 6 }
-                        if ($excStream) {
-                            $fs.Position = $excStream.Rva
-                            $threadId = $br.ReadUInt32()
-                            $alignment = $br.ReadUInt32()
-                            $excCode = $br.ReadUInt32()
-                            $codeHex = "0x{0:X8}" -f $excCode
-                            $meaning = switch ($codeHex) {
-                                "0xC0000005" { "Access Violation (Invalid Memory Access)" }
-                                "0xC0000409" { "Stack Buffer Overrun / Fast Fail" }
-                                "0x887A0006" { "DXGI Device Hung (GPU Timeout / TDR)" }
-                                "0x887A0005" { "DXGI Device Removed (GPU Driver Reset)" }
-                                "0x00000000" { "Internal Assertion / Handled Process Termination" }
-                                default      { "Unhandled Exception" }
-                            }
-                            Write-Host "  +- Exception Code:   $codeHex ($meaning)" -ForegroundColor Red
-                        }
-                    }
-                    $fs.Close()
-                } catch { if ($fs) { $fs.Close() } }
-                
-                # String inspection for Steam Assertions & Vulkan Layers
-                try {
-                    $bytes = [System.IO.File]::ReadAllBytes($f.FullName)
-                    $asciiText = [System.Text.Encoding]::ASCII.GetString($bytes)
-                    $assertions = [regex]::Matches($asciiText, 'Assert\([^\r\n]{5,220}\)') | Select-Object -ExpandProperty Value -Unique
-                    if ($assertions) {
-                        Write-Host "  +- Assertions Found:" -ForegroundColor Red
-                        foreach ($am in ($assertions | Select-Object -First 4)) {
-                            Write-Host "       * $am" -ForegroundColor Red
-                            if ($am -match 'BMainLoop appears to have stalled') { $report.SteamStallAssertions += $am }
-                            if ($am -match 'stalled.*pipe') { $report.SteamPipeAssertions += $am }
-                        }
-                    }
-                } catch {}
+if ($engineLogs.Count -gt 0 -or $steamLogs.Count -gt 0) {
+    if (-not $Quiet) {
+        foreach ($el in $engineLogs) {
+            Write-Host "  [$($el.Engine)] Log: $($el.FullName)" -ForegroundColor Yellow
+            foreach ($err in ($el.ErrorLines | Select-Object -Last 4)) {
+                Write-Host "    * $err" -ForegroundColor Red
+            }
+        }
+        foreach ($sl in $steamLogs) {
+            Write-Host "  [Steam Telemetry] Log: $($sl.FullName)" -ForegroundColor Yellow
+            foreach ($err in ($sl.ErrorLines | Select-Object -Last 4)) {
+                Write-Host "    * $err" -ForegroundColor DarkYellow
             }
         }
     }
-}
-
-if ($foundDumps -eq 0) {
-    Write-Host "  [ OK ] No crash dump files found in searched directories." -ForegroundColor Green
-}
-Write-Host ""
-
-# -------------------------------------------------------------------------
-# 6. Game Console & Engine Logs
-# -------------------------------------------------------------------------
-Write-Header "6. GAME CONSOLE & ENGINE LOG ANALYSIS"
-
-$savedGamesDir = "$env:USERPROFILE\Saved Games"
-if (Test-Path $savedGamesDir) {
-    $qconsoleLogs = Get-ChildItem -Path $savedGamesDir -Recurse -Filter "qconsole.log" -ErrorAction SilentlyContinue |
-        Where-Object { $_.LastWriteTime -gt $cutoff }
-    
-    foreach ($ql in $qconsoleLogs) {
-        Write-Host "  idTech Console Log: $($ql.FullName)" -ForegroundColor White
-        Write-Host "    +- Modified: $($ql.LastWriteTime) | Size: $([math]::Round($ql.Length/1MB, 2)) MB" -ForegroundColor DarkGray
-        
-        $allocFails = (Select-String -Path $ql.FullName -Pattern "Failed to allocate.*material env modification" -ErrorAction SilentlyContinue).Count
-        if ($allocFails -gt 0) {
-            $report.EngineMemoryWarnings += "$($ql.FullName): $allocFails vertex allocation failures"
-            Write-Host "    +- [!] Detected $allocFails material vertex buffer allocation failures." -ForegroundColor Red
-        }
-        
-        $cleanExit = Select-String -Path $ql.FullName -Pattern "Game Shutdown|Shutting down at" -ErrorAction SilentlyContinue
-        if ($cleanExit) {
-            Write-Host "    +- [ OK ] Clean engine shutdown sequence recorded at end of session." -ForegroundColor Green
-        } else {
-            Write-Host "    +- [!] Abrupt engine termination (no shutdown sequence)." -ForegroundColor Red
-        }
+} else {
+    if (-not $Quiet) {
+        Write-Host "  [ OK ] No application or game engine log errors recorded in this timeframe." -ForegroundColor Green
     }
 }
-Write-Host ""
+if (-not $Quiet) { Write-Host "" }
 
 # -------------------------------------------------------------------------
-# 7. AUTOMATED ROOT CAUSE DIAGNOSIS & GUIDANCE
+# TIER 3: SYSTEM LOGS & HARDWARE TELEMETRY
 # -------------------------------------------------------------------------
-Write-Header "7. EXECUTIVE ROOT CAUSE SUMMARY & ACTIONABLE GUIDANCE"
-
-$causes = @()
-$guidance = @()
-
-# 1. Network Disconnect IPC Kill
-if ($report.SteamPipeAssertions.Count -gt 0 -or ($report.NetworkDrops.Count -gt 0 -and $report.SteamStallAssertions.Count -gt 0)) {
-    $causes += "NETWORK ADAPTER DROP -> GAME IPC PIPE KILL: A physical network adapter link drop or connection state bounce caused the Steam client main loop to stall during socket reconnection. This timed out the cross-thread IPC pipe (pipes.cpp) between Steam and the running game, causing the game to suddenly exit to desktop."
-    $guidance += "Check Device Manager -> Network adapters -> Properties -> Advanced: Lock 'Speed & Duplex' to your router's speed (e.g. 1.0 Gbps or 2.5 Gbps Full Duplex) instead of Auto-Negotiation to stop PHY retraining drops."
-    $guidance += "In Network adapter Properties -> Power Management, uncheck 'Allow the computer to turn off this device to save power'."
+if (-not $Quiet) {
+    Write-Host "========================================================================" -ForegroundColor Magenta
+    Write-Host "  TIER 3: SYSTEM LOGS & HARDWARE TELEMETRY (TERTIARY TELEMETRY)" -ForegroundColor Magenta
+    Write-Host "========================================================================" -ForegroundColor Magenta
+    Write-Host ""
 }
 
-# 2. GPU Driver TDR Timeout / User Mode Crash
-if ($report.TdrEvents.Count -gt 0 -or $report.LiveKernelEvents.Count -gt 0) {
-    $causes += "GPU DRIVER TIMEOUT (TDR 0x141 / DRIVER RESET): The graphics driver took longer than the 2-second Windows timeout to execute a shader/rendering pass, or crashed in user-mode. Windows reset the display driver, invalidating the game's DirectX/Vulkan render context."
-    $guidance += "Check if recent Windows Quality Updates (e.g. KB5101684) coincided with the crash start date. Rolling back problematic cumulative updates restores display driver stability."
-    $guidance += "Disable the Steam Overlay for heavy Vulkan titles in Steam Game Properties to prevent overlay hook deadlocks during device resets."
-    $guidance += "Consider increasing Windows GPU timeout (TdrDelay) from 2 to 8 seconds in registry (HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers)."
-}
+$telemetry = Get-DcSystemTelemetry -Cutoff $cutoff
+if (-not $Quiet) {
+    if ($telemetry.FastStartup.FastStartupEnabled) {
+        Write-Host "  [!] Power Configuration: Windows Fast Startup is ENABLED (HiberbootEnabled = 1)" -ForegroundColor Yellow
+        Write-Host "      Notice: Fast Startup persists kernel power states and can cause 0x9F power loop crashes." -ForegroundColor DarkYellow
+    } else {
+        Write-Host "  [ OK ] Power Configuration: Fast Startup is Disabled (Clean Cold Boot Enabled)." -ForegroundColor Green
+    }
 
-# 3. Windows Update / Background Defender Activity
-if ($report.RecentDefenderUpdates.Count -gt 0 -and ($report.LiveKernelEvents.Count -gt 0 -or $report.TdrEvents.Count -gt 0)) {
-    $causes += "BACKGROUND UPDATE / DEFENDER INTERACTION: A background Defender signature update (KB2267602) or Windows Update occurred within minutes of a graphics driver reset. Process memory inspection during 3D rendering can interrupt graphics driver threads."
-    $guidance += "Add your Steam game installation directory to Windows Defender Exclusions (Windows Security -> Virus & threat protection -> Manage settings -> Exclusions)."
-    $guidance += "Pause Windows Updates temporarily while playing long single-player or competitive gaming sessions."
-}
+    if ($telemetry.WheaErrors.Count -gt 0) {
+        foreach ($w in $telemetry.WheaErrors) {
+            Write-Host "  [!] WHEA Hardware Error [$($w.TimeCreated)]: $($w.Message)" -ForegroundColor Red
+        }
+    }
+    if ($telemetry.TdrEvents.Count -gt 0) {
+        foreach ($tdr in $telemetry.TdrEvents) {
+            Write-Host "  [!] GPU Driver TDR Reset [$($tdr.TimeCreated)]: $($tdr.Message)" -ForegroundColor Red
+        }
+    }
+    if ($telemetry.KernelBugChecks.Count -gt 0) {
+        foreach ($bc in $telemetry.KernelBugChecks) {
+            Write-Host "  [!] Kernel BugCheck (BSOD) [$($bc.TimeCreated)]: $($bc.Code) - $($bc.Meaning)" -ForegroundColor Red
+        }
+    }
+    if ($telemetry.AbruptReboots.Count -gt 0) {
+        foreach ($ar in $telemetry.AbruptReboots) {
+            Write-Host "  [!] Kernel-Power Event 41 (Abrupt Reboot) [$($ar.TimeCreated)]" -ForegroundColor Red
+        }
+    }
+    if ($telemetry.UnexpectedShutdowns.Count -gt 0) {
+        foreach ($us in $telemetry.UnexpectedShutdowns) {
+            Write-Host "  [!] Unexpected Shutdown (Event 6008) [$($us.TimeCreated)]" -ForegroundColor Red
+        }
+    }
 
-# 4. Dual-GPU Driver Conflict
-if ($report.DualGPUConflict) {
-    $causes += "DUAL-GPU DRIVER VERSION MISMATCH: Your system has both a Discrete GPU and a CPU Integrated GPU active running different driver versions. Mismatched driver stacks can lead to shared memory corruption over extended sessions."
-    $guidance += "Disable the CPU Integrated Graphics (iGPU) in Motherboard BIOS if not using motherboard display outputs, or use Display Driver Uninstaller (DDU) to align both GPUs to the same driver package."
-}
-
-# 5. In-Engine Memory Buffer Pool Exhaustion
-if ($report.EngineMemoryWarnings.Count -gt 0) {
-    $causes += "IN-ENGINE VERTEX BUFFER EXHAUSTION: The game engine exhausted its dynamic vertex buffer pool, resulting in repeated allocation failures."
-    $guidance += "Delete corrupt local configuration files (.local / .cfg) in '%USERPROFILE%\Saved Games\<Game>\base' to let the game rebuild fresh configuration and shader cache pools."
-}
-
-if ($causes.Count -eq 0) {
-    Write-Host "  [ STATUS ]: SYSTEM HEALTHY - No critical hardware faults, GPU TDRs, or crashes detected." -ForegroundColor Green
-} else {
-    Write-Host "  +--- IDENTIFIED ROOT CAUSES ---+" -ForegroundColor Red
-    $cIdx = 1
-    foreach ($c in $causes) {
-        Write-Host "  [$cIdx] $c" -ForegroundColor Yellow
-        $cIdx++
+    if ($telemetry.WheaErrors.Count -eq 0 -and $telemetry.TdrEvents.Count -eq 0 -and $telemetry.KernelBugChecks.Count -eq 0 -and $telemetry.AbruptReboots.Count -eq 0) {
+        Write-Host "  [ OK ] No GPU driver TDR resets, Kernel BugChecks, or hardware errors in event telemetry." -ForegroundColor Green
     }
     Write-Host ""
-    Write-Host "  +--- WHAT YOU SHOULD LOOK AT / TROUBLESHOOTING GUIDANCE ---+" -ForegroundColor Green
-    $gIdx = 1
-    foreach ($g in ($guidance | Select-Object -Unique)) {
-        Write-Host "  ($gIdx) $g" -ForegroundColor White
-        $gIdx++
+}
+
+# -------------------------------------------------------------------------
+# TIER 4: SYSTEM HARDWARE & CONFIGURATION
+# -------------------------------------------------------------------------
+if (-not $Quiet) {
+    Write-Host "========================================================================" -ForegroundColor Magenta
+    Write-Host "  TIER 4: SYSTEM CONFIGURATION & HARDWARE INVENTORY (CONTEXTUAL AUDIT)" -ForegroundColor Magenta
+    Write-Host "========================================================================" -ForegroundColor Magenta
+    Write-Host ""
+}
+
+$pnpIssues = Get-DcPnpHealth
+$gpuHealth = Get-DcGpuDriverHealth
+$netHealth = Get-DcNetworkHealth
+
+if (-not $Quiet) {
+    if ($pnpIssues.Count -gt 0) {
+        Write-Host "  [!] PnP Hardware Health Warning: Detected $($pnpIssues.Count) device(s) with errors/missing drivers:" -ForegroundColor Red
+        foreach ($pi in $pnpIssues) {
+            Write-Host "      * [$($pi.Status)] $($pi.FriendlyName): $($pi.Explanation)" -ForegroundColor Red
+        }
+    } else {
+        Write-Host "  [ OK ] PnP Hardware Health: All present devices are reporting HEALTHY (Status: OK)." -ForegroundColor Green
+    }
+
+    foreach ($g in $gpuHealth.Gpus) {
+        Write-Host "  GPU: $($g.Name) ($($g.Vendor))" -ForegroundColor Yellow
+        Write-Host "    +- Driver Version: $($g.DriverVersion) | Date: $($g.DriverDate)" -ForegroundColor DarkGray
+        Write-Host "    +- Provider:       $($g.Provider) | Status: $($g.Status)" -ForegroundColor DarkGray
+    }
+
+    if ($gpuHealth.DualGpuConflict) {
+        Write-Host "  [!] WARNING: $($gpuHealth.DualGpuDetails)" -ForegroundColor Red
+    }
+
+    foreach ($net in $netHealth) {
+        Write-Host "  Adapter: $($net.Name) ($($net.InterfaceDescription))" -ForegroundColor White
+        Write-Host "    +- Status: $($net.Status) | Speed/Duplex: $($net.SpeedDuplex) | VLAN: $($net.PriorityVLAN)" -ForegroundColor DarkGray
+    }
+    Write-Host ""
+}
+
+# -------------------------------------------------------------------------
+# EXECUTIVE ROOT CAUSE DETERMINATION (EVALUATED BY PRECEDENCE TIER)
+# -------------------------------------------------------------------------
+$rootCauseTitle = "SYSTEM HEALTHY"
+$rootCauseDesc = "No critical hardware faults, GPU driver crashes, or unhandled exceptions detected in the scan window."
+$rootCauseGuidance = "Your system is reporting normal stability telemetry. If you experienced a game crash, it may have terminated cleanly without writing a dump or occurred outside the $Hours-hour scan window."
+$rootCauseSeverity = "Healthy"
+
+if ($zombieProcesses.Count -gt 0) {
+    $rootCauseTitle = "ACTIVE ZOMBIE / HUNG STEAM PROCESS"
+    $rootCauseDesc = "steam.exe (PID: $($zombieProcesses[0].PID)) is lingering headless in background, blocking the single-instance mutex and preventing relaunch."
+    $rootCauseGuidance = "Run '.\Analyze-LatestCrash.ps1 -KillHungSteam' or terminate steam.exe in Task Manager."
+    $rootCauseSeverity = "Warning"
+} elseif ($parsedDumps.Count -gt 0 -and ($parsedDumps | Where-Object { $_.ExceptionCode })) {
+    $firstCrash = $parsedDumps | Where-Object { $_.ExceptionCode } | Select-Object -First 1
+    $rootCauseTitle = "UNHANDLED APPLICATION CRASH (Tier 1 Crash Dump)"
+    $rootCauseDesc = "Exception $($firstCrash.ExceptionCode): $($firstCrash.ExceptionMeaning) in $($firstCrash.FaultingModule) ($($firstCrash.FileName))."
+    if ($firstCrash.ExceptionCode -match '0xC0000005') {
+        $rootCauseGuidance = "Memory access violation / native application bug in $($firstCrash.FaultingModule). Ensure the game and Visual C++ Redistributables are fully updated. If overclocked, test with stock memory/XMP timings."
+    } elseif ($firstCrash.ExceptionCode -match '0x887A0006|0x887A0005') {
+        $rootCauseGuidance = "Graphics device hang/removed error. The display driver crashed or timed out during a render pass. Check GPU temperatures and lower in-game ray tracing or texture memory settings."
+    } else {
+        $rootCauseGuidance = "Verify game integrity via Steam/Launcher and report the faulting module ($($firstCrash.FaultingModule)) to the game developer."
+    }
+    $rootCauseSeverity = "Critical"
+} elseif ($gpuHealth.DualGpuConflict) {
+    $rootCauseTitle = "DUAL-GPU DRIVER VERSION MISMATCH"
+    $rootCauseDesc = $gpuHealth.DualGpuDetails
+    $rootCauseGuidance = "Align both AMD display drivers using '.\Analyze-LatestCrash.ps1 -FixDrivers' or disable CPU Integrated Graphics in Motherboard BIOS if not using motherboard display ports."
+    $rootCauseSeverity = "Warning"
+} elseif ($telemetry.TdrEvents.Count -gt 0) {
+    $rootCauseTitle = "GPU DISPLAY DRIVER TIMEOUT (TDR / 0x141)"
+    $rootCauseDesc = "The GPU display driver stopped responding and was recovered by Windows ($($telemetry.TdrEvents.Count) incident(s))."
+    $rootCauseGuidance = "Clean reinstall your graphics driver using AMD Clean Utility or DDU. Disable GPU hardware scheduling or aggressive overclocks if crashes persist."
+    $rootCauseSeverity = "Critical"
+} elseif ($telemetry.KernelBugChecks.Count -gt 0) {
+    $firstBc = $telemetry.KernelBugChecks[0]
+    $rootCauseTitle = "KERNEL BUGCHECK BSOD ($($firstBc.Code))"
+    $rootCauseDesc = "$($firstBc.Meaning) - $($firstBc.Message)"
+    $rootCauseGuidance = "A kernel driver caused a fatal system fault. Check Tier 4 hardware devices for missing or uninstalled drivers."
+    $rootCauseSeverity = "Critical"
+} elseif ($pnpIssues.Count -gt 0) {
+    $rootCauseTitle = "HARDWARE DEVICE ERRORS / MISSING DRIVERS"
+    $rootCauseDesc = "$($pnpIssues.Count) device(s) are reporting errors or missing drivers in Windows Device Manager."
+    $rootCauseGuidance = "Install official motherboard chipset drivers and check Device Manager for yellow exclamation marks."
+    $rootCauseSeverity = "Warning"
+} elseif ($telemetry.FastStartup.FastStartupEnabled -and $telemetry.AbruptReboots.Count -gt 0) {
+    $rootCauseTitle = "ABRUPT REBOOT WITH FAST STARTUP ENABLED"
+    $rootCauseDesc = "The system experienced unexpected reboots while Windows Fast Startup was enabled."
+    $rootCauseGuidance = "Disable Windows Fast Startup (Control Panel -> Power Options -> Choose what the power buttons do -> Turn off Fast Startup) to ensure clean cold reboots."
+    $rootCauseSeverity = "Warning"
+}
+
+if (-not $Quiet) {
+    Write-Host "========================================================================" -ForegroundColor Cyan
+    Write-Host "  EXECUTIVE ROOT CAUSE SUMMARY & GUIDANCE" -ForegroundColor Cyan
+    Write-Host "========================================================================" -ForegroundColor Cyan
+    Write-Host ""
+    $color = if ($rootCauseSeverity -eq "Critical") { [ConsoleColor]::Red } elseif ($rootCauseSeverity -eq "Warning") { [ConsoleColor]::Yellow } else { [ConsoleColor]::Green }
+    Write-Host "  [ $rootCauseTitle ]" -ForegroundColor $color
+    Write-Host "  $rootCauseDesc" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  [ ACTIONABLE GUIDANCE ]:" -ForegroundColor Green
+    Write-Host "  * $rootCauseGuidance" -ForegroundColor White
+    Write-Host ""
+    Write-Host "========================================================================" -ForegroundColor Cyan
+    Write-Host "  DIAGNOSTIC REPORT COMPLETE" -ForegroundColor Cyan
+    Write-Host "========================================================================" -ForegroundColor Cyan
+    Write-Host ""
+}
+
+# Compile Report Object
+$reportObject = [PSCustomObject]@{
+    GeneratedAt          = Get-Date
+    HoursScanned         = $Hours
+    RootCauseTitle       = $rootCauseTitle
+    RootCauseDescription = $rootCauseDesc
+    RootCauseGuidance    = $rootCauseGuidance
+    RootCauseSeverity    = $rootCauseSeverity
+    Dumps                = @($parsedDumps)
+    ZombieProcesses      = @($zombieProcesses)
+    EngineLogs           = @($engineLogs)
+    SteamLogs            = @($steamLogs)
+    SystemTelemetry      = $telemetry
+    HardwareHealth       = [PSCustomObject]@{
+        Gpus             = @($gpuHealth.Gpus)
+        DualGpuConflict  = $gpuHealth.DualGpuConflict
+        PnpIssues        = @($pnpIssues)
+        NetworkAdapters  = @($netHealth)
     }
 }
 
-Write-Host ""
-Write-Host "========================================================================" -ForegroundColor Cyan
-Write-Host "  DIAGNOSTIC REPORT COMPLETE" -ForegroundColor Cyan
-Write-Host "========================================================================" -ForegroundColor Cyan
-Write-Host ""
+# Export HTML if requested
+$htmlFile = $null
+if ($ExportHtml -or $OpenReport) {
+    $htmlFile = Export-DcHtmlReport -ReportData $reportObject
+    if (-not $Quiet) {
+        Write-Host "  [HTML REPORT] Saved to: $htmlFile" -ForegroundColor Cyan
+    }
+    if ($OpenReport) {
+        Start-Process $htmlFile
+    }
+}
+
+# Export JSON if requested
+if ($ExportJson) {
+    $jsonFile = Join-Path $PWD ("CrashReport_" + (Get-Date).ToString("yyyyMMdd_HHmmss") + ".json")
+    $reportObject | ConvertTo-Json -Depth 6 | Set-Content -Path $jsonFile -Encoding UTF8
+    if (-not $Quiet) {
+        Write-Host "  [JSON REPORT] Saved to: $jsonFile" -ForegroundColor Cyan
+    }
+}
+
+# Export Support Bundle ZIP if requested
+if ($ExportZip) {
+    $zipFile = Export-DcSupportBundle -ReportData $reportObject
+    if (-not $Quiet) {
+        Write-Host "  [SUPPORT BUNDLE] Saved to: $zipFile" -ForegroundColor Green
+    }
+}
+
+return $reportObject

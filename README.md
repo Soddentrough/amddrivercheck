@@ -1,44 +1,115 @@
-﻿# Automated Game & System Crash Diagnostic Suite (`drivercheck`)
+# Automated Game & System Crash Diagnostic Suite (`drivercheck`)
 
-`drivercheck` is a zero-prompt, **100% read-only** PowerShell and batch diagnostic suite for Windows gaming PCs.
+`drivercheck` is an evidence-based diagnostic toolkit and distributable diagnostic engine designed to identify the exact root cause of Windows PC gaming crashes, Blue Screens of Death (BSOD), and driver hangs.
 
-It runs an automatic post-crash analysis across system telemetry, Windows Event logs, Steam crash dumps, minidump binary exception streams, and game logs to identify the exact root cause of game crashes and provide evidence-based guidance on what to check—preventing users from blindly blaming GPU drivers.
+It strictly adheres to a **4-Tier Diagnostic Hierarchy**, prioritizing binary crash artifacts over generalized system logs to provide accurate root-cause determinations without speculative guesses or unnecessary system modifications.
+
+---
+
+## 🏛️ The 4-Tier Diagnostic Hierarchy
+
+1. **Tier 1: Crash Dumps & Binary Thread Inspector (Primary Ground Truth)**
+   * Inspects binary minidump streams (`MDMP`) across Windows Kernel BSODs (`C:\Windows\Minidump`), Windows Error Reporting (`%LOCALAPPDATA%\CrashDumps`), Steam dumps, Unreal Engine (`Saved\Crashes`), and Unity dumps.
+   * Architecture-aware parsing across **64-bit (x64)** and **32-bit (x86)** processes.
+   * Extracts exact Exception Codes (`0xC0000005`, `0x887A0006`, `0xC0000409`, `0x80000003`, `0xC000001D`, `0x00000000`), faulting module addresses, and in-binary assertion callouts.
+   * Audits live processes for **zombie / deadlocked background processes** (e.g. headless `steam.exe` instances blocking relaunch mutexes).
+
+2. **Tier 2: Application & Game Engine Logs (Secondary Evidence)**
+   * Discovers and analyzes engine logs across **Unreal Engine**, **Unity** (`Player.log`), **idTech** (`qconsole.log`), **Source 2**, and **Godot**.
+   * Inspects Steam Overlay, CEF WebHelper, and IPC pipe logs (`gameoverlay_ui.txt`, `webhelper.txt`, `connection_log.txt`) while intelligently suppressing clean game exit teardown events (`GameOverlayRenderer.dll detaching`).
+
+3. **Tier 3: System Logs & Hardware Telemetry (Tertiary Telemetry)**
+   * Correlates Windows Event Logs timestamp-aligned to crash incidents:
+     * `WHEA-Logger` CPU, bus, and PCIe hardware errors.
+     * GPU driver TDR timeouts (Event `4101` / `0x141` / `VIDEO_TDR_ERROR`).
+     * Kernel BugChecks (`WER-SystemErrorReporting` BSOD codes).
+     * Unexpected shutdowns (Event `6008`) and dirty reboots (Kernel-Power Event `41`).
+     * Driver load failures (Kernel-PnP Event `219`) and storage/NVMe timeouts (`stornvme`, `disk`).
+   * Audits Windows **Fast Startup** configuration (`HiberbootEnabled`), which frequently causes recurring `0x9F` driver power state crashes.
+
+4. **Tier 4: System Hardware & Configuration (Contextual Audit)**
+   * Audits **Plug and Play (PnP) Hardware Health** across all system devices for missing drivers (Code 28 `CM_PROB_FAILED_INSTALL`), failed devices (Code 43), and uninitialized chipset devices.
+   * Audits active graphics hardware (`Win32_VideoController`), detects **Dual-GPU driver version conflicts** (e.g. AMD Ryzen integrated graphics vs. discrete Radeon graphics), and checks Windows Update driver overwrite policies (`SearchOrderConfig`, `ExcludeWUDriversInQualityUpdate`).
+   * Audits Bluetooth gaming controllers (DualSense, Xbox, VR, Stadia) and network adapter stability.
 
 ---
 
 ## 🚀 How to Run
 
-Simply double-click **`Run-Diagnostics.bat`** or run:
+### 1. Interactive Launcher (Recommended for Gamers)
+Simply double-click **`Run-Diagnostics.bat`** in the project folder. It launches an interactive menu:
 
-```powershell
-PowerShell.exe -ExecutionPolicy Bypass -File .\Analyze-LatestCrash.ps1
+```text
+========================================================================
+  AUTOMATED GAME & SYSTEM CRASH DIAGNOSTIC SUITE (v4.0)
+  Evidence-Based Engine (Crash Dumps, Logs, Telemetry, Hardware)
+========================================================================
+
+  [1] Full Crash Diagnostics + Open HTML Report (Recommended)
+  [2] Quick Scan (Past 24 Hours)
+  [3] Deep Scan (Past 7 Days)
+  [4] Export Support Bundle (HTML Report + ZIP for Discord/Support)
+  [5] Hardware Health & Missing Drivers Audit (PnP)
+  [6] GPU Driver Health & Downgrade Prevention
+  [7] Power, Fast Startup & Sleep Transition Audit
+  [8] Maintenance Tools (Clean Cache, Terminate Zombies)
+  [0] Exit
 ```
 
-The tool runs completely automatically without any menus or modifying commands, analyzes the past 48 hours of crash telemetry, and outputs a structured diagnostic report.
+Selecting Option **`[1]`** automatically executes the full 4-tier scan and generates a responsive, dark-mode **HTML Report** (`CrashReport_<timestamp>.html`), automatically opening it in your default web browser.
 
 ---
 
-## 🔍 What the Tool Analyzes
+### 2. PowerShell CLI (Power Users & Tech Support)
 
-1. **Graphics Hardware & Driver Stack**
-   * Enumerates active GPUs (AMD, NVIDIA, Intel), driver versions, release dates, and detects dual-GPU driver branch conflicts (e.g. Discrete GPU vs. CPU Integrated Graphics).
+Run the unified engine directly via PowerShell:
 
-2. **Windows Updates & Background Activity**
-   * Audits recently installed Windows Quality Updates and Microsoft Defender signature updates (`KB2267602`) that coincide with crash timestamps.
+```powershell
+# Standard 48-Hour Diagnostic Scan with HTML Report
+PowerShell.exe -ExecutionPolicy Bypass -File .\Analyze-LatestCrash.ps1 -ExportHtml -OpenReport
 
-3. **Network Connectivity & Link Drops**
-   * Inspects all active network adapters (Ethernet, Wi-Fi) for link drops, auto-negotiation retraining events, and Steam network device state bounces (`OnNetworkDeviceStateChange`).
+# Deep Scan (Past 7 Days)
+PowerShell.exe -ExecutionPolicy Bypass -File .\Analyze-LatestCrash.ps1 -DeepScan -ExportHtml
 
-4. **System Logs & LiveKernel Telemetry**
-   * Correlates GPU driver TDR timeouts (`LiveKernelEvent 141` / `VIDEO_ENGINE_TIMEOUT_DETECTED`), user-mode driver crashes (`AMD_REPORT_UM`), and dirty shutdowns (`Kernel-Power 41`).
+# Create Support Bundle ZIP (HTML report + logs for Discord/Reddit)
+PowerShell.exe -ExecutionPolicy Bypass -File .\Analyze-LatestCrash.ps1 -ExportZip
 
-5. **Deep Crash Dump & Binary Minidump Inspector**
-   * Scans Steam dumps, `%LOCALAPPDATA%\CrashDumps`, Unreal Engine crash folders, and Sentry logs.
-   * Parses binary minidump streams to extract exact Exception Codes (`0xC0000005`, `0x887A0006`, `0x00000000`), Steam IPC assertion callstacks (`pipes.cpp`, `steamengine.cpp`), and active Vulkan hook layers.
+# JSON Export for automated pipelines or scripting
+PowerShell.exe -ExecutionPolicy Bypass -File .\Analyze-LatestCrash.ps1 -ExportJson -Quiet
+```
 
-6. **Game Engine Console & Log Analysis**
-   * Inspects game logs (e.g. idTech `qconsole.log`, Unreal Engine `cef3.log`) for vertex buffer pool limits, streaming timeouts, and clean vs. abrupt exits.
+---
 
-7. **Executive Root Cause Summary & Actionable Guidance**
-   * Tells the user in plain English **what actually caused the crash** (e.g., *Network Drop -> Steam IPC Pipe Kill*, *GPU TDR / Display Driver Reset*, *Background Defender Update Lock*, *In-Engine Buffer Exhaustion*).
-   * Provides concrete, actionable recommendations on what settings or hardware to look at.
+## 🛠️ Modular Tools (`scripts/`)
+
+Each tool in the `scripts/` directory can also be executed individually as an isolated, standalone diagnostic:
+
+| Script | Description |
+| :--- | :--- |
+| **`Inspect-CrashDumps.ps1`** | Direct binary inspector for BSOD, WER, Steam, Unreal, and Unity minidumps. |
+| **`Inspect-GameLogs.ps1`** | Scans Unreal, Unity, idTech, Source 2, and Godot logs for fatal errors and asserts. |
+| **`Inspect-SteamLogs.ps1`** | Analyzes Steam IPC pipes, CEF browser errors, and sleep/wake crashes. |
+| **`Get-PnpDeviceDiagnostics.ps1`** | Scans all active hardware for missing drivers (Code 28) and device errors (Code 43). |
+| **`Get-GPUDriverDiagnostics.ps1`** | Audits display adapters, detects driver downgrades, and locks Windows Update driver policies. |
+| **`Get-PowerAndSleepDiagnostics.ps1`** | Audits Windows Fast Startup, unexpected shutdowns (6008), and sleep/wake transitions. |
+| **`Get-BluetoothDiagnostics.ps1`** | Audits Bluetooth radios, gaming controllers, and connection reset errors. |
+| **`Get-NetworkDiagnostics.ps1`** | Audits network adapter link speed, duplex negotiation, and link flapping events. |
+| **`Get-WindowsUpdateHistory.ps1`** | Audits recently installed Windows Quality Updates and driver packages. |
+| **`Clean-GameConfig.ps1`** | Purges stale game configs and shader caches (**creates automatic `.bak` backups**). |
+| **`Clean-SteamCache.ps1`** | Purges the Steam CEF HTML browser cache (`%LOCALAPPDATA%\Steam\htmlcache`). |
+| **`Repair-EthernetSettings.ps1`** | Applies stability settings to Intel/Realtek Ethernet adapters (disables VLAN/Priority). |
+
+---
+
+## 🛡️ Safe Remediation
+
+Remediation features are strictly separated from read-only scans:
+* **Safe Configuration Cleaner:** Before deleting any `.cfg` or `.local` files, `Clean-GameConfig.ps1` creates an exact `.bak` copy in the same directory, ensuring custom keybinds and sensitivities are never lost.
+* **Downgrade Protection:** `Get-GPUDriverDiagnostics.ps1 -ApplyFix` sets registry policies (`SearchOrderConfig = 0`, `ExcludeWUDriversInQualityUpdate = 1`) to permanently prevent Windows Update from silently replacing your official graphics drivers with older OEM builds.
+
+---
+
+## 📋 System Requirements
+* **Operating System:** Windows 10 or Windows 11 (64-bit or 32-bit).
+* **PowerShell:** Windows PowerShell 5.1 or PowerShell Core (7.x+).
+* **Privileges:** Administrator privileges are only required when modifying network properties or writing system registry policies; all diagnostic scans run smoothly under standard user privileges.
