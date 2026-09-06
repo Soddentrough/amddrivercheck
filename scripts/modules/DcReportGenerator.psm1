@@ -90,9 +90,23 @@ function Export-DcHtmlReport {
             $hasTelemIssue = $true
             $telemRows.Add("<div class='alert-card alert-warning'><strong>&#x26A1; Power Configuration:</strong> Windows Fast Startup is ENABLED. Fast Startup saves hybrid kernel session states across shutdowns, frequently causing 0x9F power transition crashes on dual-GPU or updated systems.</div>")
         }
-        foreach ($whea in $telem.WheaErrors) {
+        if ($telem.GraphicsDriverSettings) {
+            $gfx = $telem.GraphicsDriverSettings
+            $tdrInfo = if ($gfx.TdrDelay) { "TdrDelay: $($gfx.TdrDelay)s" } else { "TdrDelay: Default (2s)" }
+            $hagsInfo = "HAGS: $($gfx.HAGSStatus)"
+            $telemRows.Add("<div class='alert-card' style='background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.3);'><strong>&#x1F3AE; Graphics Driver Subsystem:</strong> $hagsInfo | $tdrInfo</div>")
+        }
+        foreach ($pcie in $telem.PcieWheaErrors) {
+            $hasTelemIssue = $true
+            $telemRows.Add("<div class='alert-card alert-critical'><strong>&#x26A0; PCIe Bus / Riser Error (WHEA Event 17) [$($pcie.TimeCreated)]:</strong> PCI Express Root Port link error detected! Verify GPU PCIe slot seating, disable PCIe power management (ASPM), or bypass PCIe riser cables.</div>")
+        }
+        foreach ($whea in ($telem.WheaErrors | Where-Object { -not $_.IsPcieError })) {
             $hasTelemIssue = $true
             $telemRows.Add("<div class='alert-card alert-critical'><strong>&#x26A0; WHEA Hardware Error [$($whea.TimeCreated)]:</strong> $($whea.Message)</div>")
+        }
+        foreach ($mem in $telem.MemoryExhaustion) {
+            $hasTelemIssue = $true
+            $telemRows.Add("<div class='alert-card alert-critical'><strong>&#x1F4BE; Out-of-Memory / Commit Limit Exhaustion (Event 2004) [$($mem.TimeCreated)]:</strong> Windows diagnosed low virtual memory. Ensure Paging File (Pagefile) is enabled and set to System-Managed.</div>")
         }
         foreach ($tdr in $telem.TdrEvents) {
             $hasTelemIssue = $true
@@ -104,7 +118,8 @@ function Export-DcHtmlReport {
         }
         foreach ($reb in $telem.AbruptReboots) {
             $hasTelemIssue = $true
-            $telemRows.Add("<div class='alert-card alert-warning'><strong>&#x1F50C; Kernel-Power Event 41 [$($reb.TimeCreated)]:</strong> Dirty reboot / system shut down without clean shutdown.</div>")
+            $rebDetail = if ($reb.BugcheckCode -eq 0) { "Instant Power Cut / PSU Trip / Freeze (BugcheckCode: 0 - No BSOD dump recorded)" } else { "Dirty reboot following BugCheck 0x{0:X}" -f $reb.BugcheckCode }
+            $telemRows.Add("<div class='alert-card alert-warning'><strong>&#x1F50C; Kernel-Power Event 41 [$($reb.TimeCreated)]:</strong> $rebDetail</div>")
         }
         foreach ($us in $telem.UnexpectedShutdowns) {
             $hasTelemIssue = $true

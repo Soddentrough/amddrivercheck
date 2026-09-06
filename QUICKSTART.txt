@@ -1,0 +1,55 @@
+========================================================================
+  DRIVERCHECK - GPU & SYSTEM CRASH DIAGNOSTIC SUITE
+========================================================================
+
+QUICK START GUIDE:
+1. Extract all contents of this ZIP file to a folder.
+2. Double-click "Run-Diagnostics.bat"
+3. Select Option [1] "Full Crash Diagnostics + Open HTML Report".
+4. An interactive dark-mode HTML report (CrashReport_<timestamp>.html)
+   will automatically generate and open in your default browser.
+
+------------------------------------------------------------------------
+WHAT THIS TOOL DIAGNOSES:
+------------------------------------------------------------------------
+1. GPU Driver Timeouts (TDR / Event 4101 / 0x141)
+   - Checks if the display driver hung or stopped responding.
+   - Diagnoses TdrDelay, TdrLevel, and Hardware Accelerated Scheduling.
+
+2. Shader Compilation Crashes & Shader Timeouts
+   - Identifies crashes in shader compiler DLLs (amdxc64.dll, amdxx64.dll,
+     nvwgf2umx.dll, oo2core_*.dll).
+   - Distinguishes between corrupt shader caches and CPU/RAM instability
+     during heavy AVX2/AVX-512 shader compilation.
+
+3. Black Screens & Instant Reboots
+   - Correlates Kernel-Power Event 41 (BugcheckCode 0), unexpected shutdowns
+     (Event 6008), and PSU transient spike power trips.
+
+4. PCIe Bus & Riser Cable Errors (WHEA Event 17)
+   - Scans WHEA-Logger for PCIe root port link communication errors caused
+     by PCIe 4.0/5.0 riser cables or loose GPU slot seating.
+
+5. Out-of-Memory / Pagefile Exhaustion (Event 2004)
+   - Flags when games crash due to Windows running out of commit limit or
+     disabled/insufficient Windows Paging File.
+
+6. Dual-GPU Driver Desync & Downgrade Prevention
+   - Detects driver version conflicts between AMD discrete Radeon GPUs and
+     integrated CPU graphics.
+   - Provides 1-click protection against Windows Update silently replacing
+     official graphics drivers with older OEM drivers.
+
+7. Game Engine Logs & Minidumps
+   - Inspects Unreal Engine (D3D device lost), Unity, idTech, Godot, and
+     binary crash minidumps (0xC0000005, 0x887A0006 DXGI device lost).
+
+------------------------------------------------------------------------
+HOW TO SHARE FOR TECHNICAL SUPPORT (DISCORD / REDDIT):
+------------------------------------------------------------------------
+- Run Option [4] in "Run-Diagnostics.bat" to generate a Support Bundle ZIP
+  containing your HTML report and sanitized engine logs.
+- Or copy the pre-formatted summary text directly from the bottom of your
+  HTML report!
+
+For more details, refer to README.md.
