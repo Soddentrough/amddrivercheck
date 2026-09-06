@@ -65,7 +65,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: dist/*.zip
-          name: DriverCheck v${{ github.ref_name }}
+          name: DriverCheck ${{ github.ref_name }}
           body: |
             ## Automated Game & System Crash Diagnostic Suite
 
