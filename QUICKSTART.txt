@@ -50,6 +50,21 @@ WHAT THIS TOOL DIAGNOSES:
      saturating budget monitor scalers and causing periodic 2-3s blackouts
      (HPD renegotiations) with NO Windows TDRs or crash dumps.
 
+9. PCIe Link State Power Management (ASPM) Timeouts
+   - Detects when aggressive PCIe ASPM power saving states (Moderate/Maximum)
+     cause high bus resumption latencies on PCIe 4.0/5.0 motherboards,
+     triggering GPU display driver timeouts (TDR 4101 / 0x141) during low-load
+     scenarios (web browsing, YouTube, Discord).
+   - Provides 1-click remediation via "Run-Diagnostics.bat" -> Maintenance [6].
+
+10. Rogue Kernel Port I/O Drivers & INVALID_KERNEL_HANDLE (0x93)
+   - Audits legacy/rogue direct hardware port I/O drivers (inpoutx64.sys,
+     WinRing0, ene.sys, AsrOmgDrv.sys, gdrv.sys) left behind by RGB/fan tools.
+   - Diagnoses anti-cheat collisions (Easy Anti-Cheat, BattlEye, Vanguard)
+     that cause full-system game freezes (where audio keeps playing) or
+     instant BugCheck 0x93 BSODs.
+   - Provides 1-click disabling via "Run-Diagnostics.bat" -> Maintenance [7].
+
 ------------------------------------------------------------------------
 HOW TO SHARE FOR TECHNICAL SUPPORT (DISCORD / REDDIT):
 ------------------------------------------------------------------------

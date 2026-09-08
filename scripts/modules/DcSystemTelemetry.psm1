@@ -22,6 +22,7 @@ function Get-DcBugCheckMeaning {
         '0x0*139' { "KERNEL_SECURITY_CHECK_FAILURE (Kernel Data Structure Corruption)" }
         '0x0*1E'  { "KMODE_EXCEPTION_NOT_HANDLED (Kernel Mode Fault)" }
         '0x0*A'   { "IRQL_NOT_LESS_OR_EQUAL (Kernel Routine Paged Memory Violation)" }
+        '0x0*93'  { "INVALID_KERNEL_HANDLE (Driver Passed or Closed an Invalid Kernel Handle)" }
         default   { "Kernel BugCheck ($CodeHex)" }
     }
 }
@@ -42,6 +43,83 @@ function Get-DcFastStartupStatus {
             "Fast Startup is DISABLED (Clean cold boots enabled)."
         }
     }
+}
+
+function Get-DcPciePowerManagementStatus {
+    [CmdletBinding()]
+    param()
+
+    $result = [PSCustomObject]@{
+        SchemeName      = "Unknown"
+        SchemeGuid      = $null
+        ACSettingIndex  = $null
+        DCSettingIndex  = $null
+        ACSettingName   = "Unknown"
+        DCSettingName   = "Unknown"
+        IsEnabled       = $false
+        IsHighRisk      = $false
+        RiskExplanation = $null
+    }
+
+    try {
+        $pcfg = & powercfg /query SCHEME_CURRENT 501a4d13-42af-4429-9e56-9d9c20330821 ee12f906-d277-404b-b6da-e5fa1a576df5 2>$null
+        if ($pcfg) {
+            foreach ($line in $pcfg) {
+                if ($line -match 'Power Scheme GUID:\s*([a-f0-9\-]+)\s*\((.*?)\)') {
+                    $result.SchemeGuid = $matches[1]
+                    $result.SchemeName = $matches[2]
+                }
+                if ($line -match 'Current AC Power Setting Index:\s*0x([0-9a-fA-F]+)') {
+                    $result.ACSettingIndex = [convert]::ToInt32($matches[1], 16)
+                }
+                if ($line -match 'Current DC Power Setting Index:\s*0x([0-9a-fA-F]+)') {
+                    $result.DCSettingIndex = [convert]::ToInt32($matches[1], 16)
+                }
+            }
+        }
+    } catch { }
+
+    # Fallback to Registry if powercfg CLI was unavailable or returned nothing
+    if ($null -eq $result.ACSettingIndex) {
+        try {
+            $schemesReg = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes" -ErrorAction SilentlyContinue
+            if ($schemesReg -and $schemesReg.ActivePowerScheme) {
+                $result.SchemeGuid = $schemesReg.ActivePowerScheme
+                $aspmPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes\$($result.SchemeGuid)\501a4d13-42af-4429-9e56-9d9c20330821\ee12f906-d277-404b-b6da-e5fa1a576df5"
+                if (Test-Path $aspmPath) {
+                    $aspmReg = Get-ItemProperty -Path $aspmPath -ErrorAction SilentlyContinue
+                    if ($aspmReg) {
+                        $result.ACSettingIndex = $aspmReg.ACSettingIndex
+                        $result.DCSettingIndex = $aspmReg.DCSettingIndex
+                    }
+                }
+            }
+        } catch { }
+    }
+
+    # Map indices to friendly names (0 = Off, 1 = Moderate, 2 = Maximum)
+    $indexMap = @{
+        0 = "Off"
+        1 = "Moderate power savings"
+        2 = "Maximum power savings"
+    }
+
+    if ($null -ne $result.ACSettingIndex) {
+        $result.ACSettingName = if ($indexMap.ContainsKey($result.ACSettingIndex)) { $indexMap[$result.ACSettingIndex] } else { "Setting $($result.ACSettingIndex)" }
+    }
+    if ($null -ne $result.DCSettingIndex) {
+        $result.DCSettingName = if ($indexMap.ContainsKey($result.DCSettingIndex)) { $indexMap[$result.DCSettingIndex] } else { "Setting $($result.DCSettingIndex)" }
+    }
+
+    # Moderate (1) or Maximum (2) enables PCIe low power states (L0s/L1) on AC power
+    if ($result.ACSettingIndex -in @(1, 2)) {
+        $result.IsEnabled = $true
+        $result.IsHighRisk = $true
+        $settingText = $result.ACSettingName
+        $result.RiskExplanation = "PCI Express Link State Power Management (ASPM) is set to '$settingText' in the active '$($result.SchemeName)' power plan. When enabled, Windows puts the PCIe link between the CPU and GPU into low-power states (L0s/L1) during idle or light load. High-power modern GPUs (especially PCIe Gen 4/5) frequently suffer latency spikes or fail to wake, causing random GPU driver timeouts (TDR Event 4101 / 0x141), sleep-wake freezes, or blackouts."
+    }
+
+    return $result
 }
 
 function Get-DcGraphicsDriverSettings {
@@ -89,6 +167,7 @@ function Get-DcSystemTelemetry {
     $results = [PSCustomObject]@{
         CutoffTime             = $Cutoff
         FastStartup            = Get-DcFastStartupStatus
+        PciePowerManagement    = Get-DcPciePowerManagementStatus
         GraphicsDriverSettings = Get-DcGraphicsDriverSettings
         WheaErrors             = [System.Collections.Generic.List[PSCustomObject]]::new()
         PcieWheaErrors         = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -260,4 +339,4 @@ function Get-DcSystemTelemetry {
     return $results
 }
 
-Export-ModuleMember -Function Get-DcFastStartupStatus, Get-DcSystemTelemetry, Get-DcBugCheckMeaning, Get-DcGraphicsDriverSettings
+Export-ModuleMember -Function Get-DcFastStartupStatus, Get-DcSystemTelemetry, Get-DcBugCheckMeaning, Get-DcGraphicsDriverSettings, Get-DcPciePowerManagementStatus

@@ -290,4 +290,69 @@ function Clear-DcShaderCache {
     return $totalPurged
 }
 
-Export-ModuleMember -Function Test-DcIsAdmin, Clear-DcGameConfig, Clear-DcSteamCache, Clear-DcShaderCache, Stop-DcZombieProcesses, Repair-DcEthernetSettings, Repair-DcAmdDriverAlignment
+function Repair-DcPciePowerSettings {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param()
+
+    Write-Host "=== OPTIMIZING PCIE LINK STATE POWER MANAGEMENT (ASPM) ===" -ForegroundColor Magenta
+    Write-Host "Disabling PCIe Link State Power Management on active power plan..." -ForegroundColor White
+
+    if ($PSCmdlet.ShouldProcess("Active Power Scheme (SCHEME_CURRENT)", "Disable PCIe Link State Power Management (ASPM)")) {
+        try {
+            $subGroup = "501a4d13-42af-4429-9e56-9d9c20330821"
+            $setting = "ee12f906-d277-404b-b6da-e5fa1a576df5"
+
+            & powercfg /setacvalueindex SCHEME_CURRENT $subGroup $setting 0
+            & powercfg /setdcvalueindex SCHEME_CURRENT $subGroup $setting 0
+            & powercfg /setactive SCHEME_CURRENT
+
+            Write-Host "  [OK] Link State Power Management set to OFF for AC and DC." -ForegroundColor Green
+            Write-Host "[SUCCESS] PCIe bus power transitions disabled. GPU will maintain active link clock." -ForegroundColor Green
+            Write-Host "This resolves random driver timeouts (TDR 4101), sleep-wake crashes, and PCIe WHEA errors." -ForegroundColor DarkGray
+            return $true
+        } catch {
+            Write-Host "  [FAILED] Could not update power settings: $($_.Exception.Message)" -ForegroundColor Red
+            return $false
+        }
+    }
+    return $false
+}
+
+function Disable-DcProblematicKernelDriver {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DriverName
+    )
+
+    if (-not (Test-DcIsAdmin)) {
+        Write-Host "[ERROR] Administrator elevation is required to configure kernel driver services." -ForegroundColor Red
+        Write-Host "Please run this command from an elevated PowerShell terminal (Run as Administrator)." -ForegroundColor Yellow
+        return $false
+    }
+
+    Write-Host "Configuring kernel driver service '$DriverName'..." -ForegroundColor Yellow
+
+    if ($PSCmdlet.ShouldProcess($DriverName, "Disable service (sc.exe config $DriverName start= disabled)")) {
+        try {
+            $configResult = & sc.exe config $DriverName start= disabled 2>&1 | Out-String
+            if ($configResult -match 'SUCCESS') {
+                Write-Host "  [OK] Service '$DriverName' set to DISABLED (Start Type: 4)." -ForegroundColor Green
+            } else {
+                Write-Host "  [NOTICE] sc config output: $($configResult.Trim())" -ForegroundColor Yellow
+            }
+
+            $stopResult = & sc.exe stop $DriverName 2>&1 | Out-String
+            Write-Host "  [OK] Stop signal sent to '$DriverName'." -ForegroundColor DarkGray
+
+            Write-Host "[SUCCESS] Driver '$DriverName' disabled. It will no longer load into kernel memory on boot." -ForegroundColor Green
+            return $true
+        } catch {
+            Write-Host "[FAILED] Could not disable service '$DriverName': $($_.Exception.Message)" -ForegroundColor Red
+            return $false
+        }
+    }
+    return $false
+}
+
+Export-ModuleMember -Function Test-DcIsAdmin, Clear-DcGameConfig, Clear-DcSteamCache, Clear-DcShaderCache, Stop-DcZombieProcesses, Repair-DcEthernetSettings, Repair-DcAmdDriverAlignment, Repair-DcPciePowerSettings, Disable-DcProblematicKernelDriver

@@ -90,6 +90,10 @@ function Export-DcHtmlReport {
             $hasTelemIssue = $true
             $telemRows.Add("<div class='alert-card alert-warning'><strong>&#x26A1; Power Configuration:</strong> Windows Fast Startup is ENABLED. Fast Startup saves hybrid kernel session states across shutdowns, frequently causing 0x9F power transition crashes on dual-GPU or updated systems.</div>")
         }
+        if ($telem.PciePowerManagement -and $telem.PciePowerManagement.IsEnabled) {
+            $hasTelemIssue = $true
+            $telemRows.Add("<div class='alert-card alert-warning'><strong>&#x26A1; PCIe Power Configuration:</strong> PCI Express Link State Power Management is <strong>ENABLED ($($telem.PciePowerManagement.ACSettingName))</strong> in plan '$($telem.PciePowerManagement.SchemeName)'. Low-power L0s/L1 bus states during idle or video load cause driver timeouts (TDR 4101) and sleep-wake crashes on PCIe 4.0/5.0 GPUs. Recommendation: Set to <strong>Off</strong>.</div>")
+        }
         if ($telem.GraphicsDriverSettings) {
             $gfx = $telem.GraphicsDriverSettings
             $tdrInfo = if ($gfx.TdrDelay) { "TdrDelay: $($gfx.TdrDelay)s" } else { "TdrDelay: Default (2s)" }
@@ -174,7 +178,22 @@ function Export-DcHtmlReport {
         $displayRows.Add("<div class='empty-state'>&#x2705; Connected displays report standard compliant timings.</div>")
     }
 
+    # Build Rogue Drivers HTML
+    $driverRows = [System.Collections.Generic.List[string]]::new()
+    if ($hw -and $hw.KernelDrivers -and $hw.KernelDrivers.Count -gt 0) {
+        foreach ($kd in $hw.KernelDrivers) {
+            $badge = if ($kd.IsDisabled) { "<span class='badge-healthy'>DISABLED</span>" } elseif ($kd.IsActive) { "<span class='badge-critical'>HAZARD (AUTO-START)</span>" } else { "<span class='badge-warning'>PRESENT</span>" }
+            $alert = if ($kd.IsActive -and -not $kd.IsDisabled) {
+                "<div class='alert-card alert-critical' style='margin-top: 8px;'><strong>&#x26A0; Conflict Hazard:</strong> $($kd.RiskReason)<br><span style='font-size: 0.85rem;'>Fix: Run <code>.\scripts\Disable-RogueKernelDrivers.ps1</code> or <code>$($kd.FixCommand)</code></span></div>"
+            } else { "" }
+            $driverRows.Add("<div class='card-item'><div class='card-header-row'><span class='file-name'>&#x26A0; $($kd.FileName) (Service: $($kd.ServiceName))</span>$badge</div><div>Software: <strong>$($kd.Software)</strong> | Vendor: $($kd.Vendor) | Start Type: <strong>$($kd.StartType)</strong></div>$alert</div>")
+        }
+    } else {
+        $driverRows.Add("<div class='empty-state'>&#x2705; No problematic third-party kernel I/O drivers (inpoutx64/WinRing0/ENE) detected.</div>")
+    }
+
     $fastStartupStatusStr = if ($telem -and $telem.FastStartup.FastStartupEnabled) { 'Enabled (Risk)' } else { 'Disabled (Clean)' }
+    $pcieAspmStr = if ($telem -and $telem.PciePowerManagement) { $telem.PciePowerManagement.ACSettingName } else { 'Unknown' }
     $gpuNamesStr = if ($hw -and $hw.Gpus) { ($hw.Gpus.Name -join ' | ') } else { 'None' }
     $pnpCountStr = if ($hw -and $hw.PnpIssues) { $hw.PnpIssues.Count } else { 0 }
     $dispSummaryStr = if ($hw -and $hw.Displays) {
@@ -183,6 +202,10 @@ function Export-DcHtmlReport {
             "$($_.Name) ($($_.ActiveResolution)@$($_.ActiveRefreshRate)Hz)$riskNotice"
         }) -join '; '
     } else { 'None' }
+    $rogueDriversStr = if ($hw -and $hw.KernelDrivers -and $hw.KernelDrivers.Count -gt 0) {
+        $activeKd = @($hw.KernelDrivers | Where-Object { $_.IsActive -and -not $_.IsDisabled })
+        if ($activeKd.Count -gt 0) { ($activeKd.FileName -join ', ') + " [HAZARD: Auto-Start]" } else { "None Active (Clean)" }
+    } else { 'None (Clean)' }
 
     $discordText = "=== DriverCheck Diagnostic Summary ===`n" +
         "Status:     $($ReportData.RootCauseTitle)`n" +
@@ -190,10 +213,12 @@ function Export-DcHtmlReport {
         "Timestamp:  $((Get-Date).ToString('yyyy-MM-dd HH:mm'))`n" +
         "Scan Range: Past $($ReportData.HoursScanned) Hours`n`n" +
         "[Summary]`n$($ReportData.RootCauseGuidance)`n`n" +
-        "[Hardware]`n" +
+        "[Hardware & Power]`n" +
         "GPUs: $gpuNamesStr`n" +
         "Displays: $dispSummaryStr`n" +
+        "PCIe ASPM: $pcieAspmStr`n" +
         "Fast Startup: $fastStartupStatusStr`n" +
+        "Kernel Drivers: $rogueDriversStr`n" +
         "PnP Issues: $pnpCountStr`n" +
         "Crash Dumps: $($ReportData.Dumps.Count)"
 
@@ -284,6 +309,10 @@ function Export-DcHtmlReport {
     $parts.Add(($displayRows -join "`n"))
     $parts.Add("        </div>")
     $parts.Add("        <div style='margin-top: 12px;'>")
+    $parts.Add("            <strong>Legacy & Third-Party Kernel I/O Driver Security Audit:</strong>")
+    $parts.Add(($driverRows -join "`n"))
+    $parts.Add("        </div>")
+    $parts.Add("        <div style='margin-top: 12px;'>")
     $parts.Add("            <strong>Plug and Play Device Health:</strong>")
     $parts.Add(($pnpRows -join "`n"))
     $parts.Add("        </div>")
@@ -292,7 +321,7 @@ function Export-DcHtmlReport {
     $parts.Add("            <textarea readonly onclick='this.select()'>$discordText</textarea>")
     $parts.Add("        </div>")
     $parts.Add("        <footer>")
-    $parts.Add("            DriverCheck Diagnostic Suite v4.1.0 | Evidence-Based Crash Analysis Engine")
+    $parts.Add("            DriverCheck Diagnostic Suite v4.2.0 | Evidence-Based Crash Analysis Engine")
     $parts.Add("        </footer>")
     $parts.Add("    </div>")
     $parts.Add("</body>")

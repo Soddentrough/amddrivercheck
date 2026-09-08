@@ -324,4 +324,117 @@ function Get-DcDisplayDiagnostics {
     return $results
 }
 
-Export-ModuleMember -Function Get-DcPnpHealth, Get-DcGpuDriverHealth, Get-DcBluetoothHealth, Get-DcNetworkHealth, Get-DcDisplayDiagnostics
+function Get-DcProblematicKernelDrivers {
+    [CmdletBinding()]
+    param()
+
+    $results = [PSCustomObject]@{
+        RogueDriversDetected = $false
+        Drivers              = [System.Collections.Generic.List[PSCustomObject]]::new()
+        RiskSummary          = $null
+        Guidance             = $null
+    }
+
+    $knownRogue = @(
+        @{
+            ServiceName = "inpoutx64"
+            FileName    = "inpoutx64.sys"
+            Vendor      = "Highresolution Enterprises (InpOutx64)"
+            Software    = "SignalRGB / OpenRGB / Legacy RGB Tools"
+            RiskReason  = "Direct I/O port driver. Under anti-cheat (Easy Anti-Cheat, BattlEye) or Memory Integrity, throws INVALID_KERNEL_HANDLE (0x93), causes video freezes with audio continuing, and crashes games."
+            FixCommand  = "sc config inpoutx64 start= disabled"
+        },
+        @{
+            ServiceName = "inpout32"
+            FileName    = "inpout32.sys"
+            Vendor      = "Highresolution Enterprises (InpOut32)"
+            Software    = "Legacy 32-bit RGB / Hardware Utilities"
+            RiskReason  = "Direct I/O port driver. Triggers anti-cheat blocks, DPC latency spikes, and system freezes."
+            FixCommand  = "sc config inpout32 start= disabled"
+        },
+        @{
+            ServiceName = "WinRing0x64"
+            FileName    = "WinRing0x64.sys"
+            Vendor      = "OpenLibSys (WinRing0)"
+            Software    = "EVGA Precision X / OpenRGB / Custom Fan Tools"
+            RiskReason  = "Known vulnerable kernel driver (CVE-2020-14979). Blocked by Windows Memory Integrity and modern game anti-cheats."
+            FixCommand  = "sc config WinRing0x64 start= disabled"
+        },
+        @{
+            ServiceName = "ene"
+            FileName    = "ene.sys"
+            Vendor      = "ENE Technology"
+            Software    = "ENE RGB / Kingston Fury CTRL / MSI Mystic Light"
+            RiskReason  = "Legacy DRAM RGB driver. Causes high DPC latency, thread deadlocks, and random game stutter/freezes."
+            FixCommand  = "sc config ene start= disabled"
+        },
+        @{
+            ServiceName = "AsrOmgDrv"
+            FileName    = "AsrOmgDrv.sys"
+            Vendor      = "ASRock"
+            Software    = "ASRock Polychrome RGB / A-Tuning"
+            RiskReason  = "Legacy motherboard driver. Causes kernel handle exhaustion and random game crashes."
+            FixCommand  = "sc config AsrOmgDrv start= disabled"
+        },
+        @{
+            ServiceName = "gdrv"
+            FileName    = "gdrv.sys"
+            Vendor      = "GIGABYTE"
+            Software    = "GIGABYTE App Center / RGB Fusion"
+            RiskReason  = "Known unstable kernel driver with memory safety defects and anti-cheat incompatibility."
+            FixCommand  = "sc config gdrv start= disabled"
+        }
+    )
+
+    $driversDir = Join-Path $env:SystemRoot "System32\drivers"
+
+    foreach ($entry in $knownRogue) {
+        $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$($entry.ServiceName)"
+        $serviceReg = Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
+        $filePath = Join-Path $driversDir $entry.FileName
+
+        $isInstalled = ($null -ne $serviceReg -or (Test-Path $filePath))
+        if ($isInstalled) {
+            $startType = if ($serviceReg) { $serviceReg.Start } else { $null }
+            $startDesc = switch ($startType) {
+                0 { "Boot" }
+                1 { "System" }
+                2 { "Automatic" }
+                3 { "Manual" }
+                4 { "Disabled" }
+                default { "Unknown" }
+            }
+
+            $isActiveOrAuto = ($startType -in @(0, 1, 2, 3) -or (-not $serviceReg -and (Test-Path $filePath)))
+
+            $driverObj = [PSCustomObject]@{
+                ServiceName = $entry.ServiceName
+                FileName    = $entry.FileName
+                Vendor      = $entry.Vendor
+                Software    = $entry.Software
+                StartType   = $startDesc
+                IsDisabled  = ($startType -eq 4)
+                IsActive    = $isActiveOrAuto
+                FileExists  = (Test-Path $filePath)
+                RiskReason  = $entry.RiskReason
+                FixCommand  = $entry.FixCommand
+            }
+
+            $results.Drivers.Add($driverObj)
+
+            if ($driverObj.IsActive -and -not $driverObj.IsDisabled) {
+                $results.RogueDriversDetected = $true
+            }
+        }
+    }
+
+    if ($results.RogueDriversDetected) {
+        $activeNames = ($results.Drivers | Where-Object { $_.IsActive -and -not $_.IsDisabled } | ForEach-Object { "$($_.FileName) ($($_.ServiceName))" }) -join ", "
+        $results.RiskSummary = "Detected rogue/problematic legacy kernel I/O driver(s) configured to load on boot: $activeNames. These legacy drivers (commonly left behind by RGB or hardware monitoring software) bypass Windows driver safety abstractions. Modern game anti-cheat engines (Easy Anti-Cheat, BattlEye, Vanguard) and Windows Memory Integrity frequently block their handles, causing INVALID_KERNEL_HANDLE (0x93) BSODs, game lockups where audio continues playing, or unexplained freezes."
+        $results.Guidance = "Disable the problematic driver service(s) by running '.\scripts\Disable-RogueKernelDrivers.ps1' or 'sc config <service> start= disabled' in an Administrator terminal. Modern RGB suites (like SignalRGB) continue to work normally without these legacy kernel drivers."
+    }
+
+    return $results
+}
+
+Export-ModuleMember -Function Get-DcPnpHealth, Get-DcGpuDriverHealth, Get-DcBluetoothHealth, Get-DcNetworkHealth, Get-DcDisplayDiagnostics, Get-DcProblematicKernelDrivers

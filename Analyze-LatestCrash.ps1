@@ -27,6 +27,12 @@
     Run dedicated deep audit of Bluetooth controllers, audio devices, and radio health.
 .PARAMETER AuditDisplays
     Run dedicated deep audit of Connected Displays, EDID Detailed Timings, and DisplayPort 1.2a Scaler Saturation risks.
+.PARAMETER AuditKernelDrivers
+    Run dedicated audit for rogue/legacy third-party kernel I/O drivers (inpoutx64.sys, WinRing0, ENE).
+.PARAMETER DisablePciePowerSavings
+    Disable PCI Express Link State Power Management (ASPM) in the active Windows Power Scheme.
+.PARAMETER DisableRogueDrivers
+    (Admin) Disable autostart services for detected rogue kernel I/O drivers (inpoutx64.sys, WinRing0, ENE).
 .PARAMETER FixDrivers
     Inspect Windows Driver Store for GPU driver downgrades and lock Windows Update driver policies.
 .PARAMETER RepairNetwork
@@ -76,6 +82,15 @@ param(
 
     [Parameter(Mandatory = $false)]
     [switch]$AuditDisplays,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$AuditKernelDrivers,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$DisablePciePowerSavings,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$DisableRogueDrivers,
 
     [Parameter(Mandatory = $false)]
     [switch]$FixDrivers,
@@ -170,6 +185,16 @@ if ($FixDrivers) {
     exit 0
 }
 
+if ($DisablePciePowerSavings) {
+    & (Join-Path $PSScriptRoot "scripts\Repair-PciePowerSettings.ps1")
+    exit 0
+}
+
+if ($DisableRogueDrivers) {
+    & (Join-Path $PSScriptRoot "scripts\Disable-RogueKernelDrivers.ps1")
+    exit 0
+}
+
 # =========================================================================
 # SPECIALIZED AUDIT MODES
 # =========================================================================
@@ -194,6 +219,11 @@ if ($AuditDisplays) {
     exit 0
 }
 
+if ($AuditKernelDrivers) {
+    & (Join-Path $PSScriptRoot "scripts\Disable-RogueKernelDrivers.ps1")
+    exit 0
+}
+
 # =========================================================================
 # MAIN UNIFIED 4-TIER DIAGNOSTIC FLOW
 # =========================================================================
@@ -202,7 +232,7 @@ if (-not $Quiet) {
     Write-Host ""
     Write-Host "  +------------------------------------------------------------------------+" -ForegroundColor Cyan
     Write-Host "  |          AUTOMATED SYSTEM & GAME CRASH DIAGNOSTIC SUITE               |" -ForegroundColor Cyan
-    Write-Host "  |             4-Tier Evidence Hierarchy Engine v4.1.0                   |" -ForegroundColor Cyan
+    Write-Host "  |             4-Tier Evidence Hierarchy Engine v4.2.0                   |" -ForegroundColor Cyan
     Write-Host "  +------------------------------------------------------------------------+" -ForegroundColor Cyan
     Write-Host "  Scan Window: $($cutoff.ToString('yyyy-MM-dd HH:mm')) to $((Get-Date).ToString('yyyy-MM-dd HH:mm')) ($Hours hours)" -ForegroundColor DarkGray
     Write-Host "  Precedence:  [1] Crash Dumps -> [2] App Logs -> [3] System Logs -> [4] System Config" -ForegroundColor DarkGray
@@ -330,6 +360,13 @@ if (-not $Quiet) {
         Write-Host "  [ OK ] Power Configuration: Fast Startup is Disabled (Clean Cold Boot Enabled)." -ForegroundColor Green
     }
 
+    if ($telemetry.PciePowerManagement.IsEnabled) {
+        Write-Host "  [!] PCIe Power Configuration: Link State Power Management is ENABLED ($($telemetry.PciePowerManagement.ACSettingName))" -ForegroundColor Yellow
+        Write-Host "      Notice: Low-power L0s/L1 bus states trigger TDR timeouts (4101) on PCIe 4.0/5.0 GPUs." -ForegroundColor DarkYellow
+    } else {
+        Write-Host "  [ OK ] PCIe Power Configuration: Link State Power Management is Disabled (High-Speed Link Maintained)." -ForegroundColor Green
+    }
+
     if ($telemetry.WheaErrors.Count -gt 0) {
         foreach ($w in $telemetry.WheaErrors) {
             Write-Host "  [!] WHEA Hardware Error [$($w.TimeCreated)]: $($w.Message)" -ForegroundColor Red
@@ -376,6 +413,7 @@ $pnpIssues = Get-DcPnpHealth
 $gpuHealth = Get-DcGpuDriverHealth
 $netHealth = Get-DcNetworkHealth
 $displayHealth = Get-DcDisplayDiagnostics
+$kernelDriverHealth = Get-DcProblematicKernelDrivers
 
 if (-not $Quiet) {
     if ($pnpIssues.Count -gt 0) {
@@ -404,6 +442,15 @@ if (-not $Quiet) {
         if ($d.HasTimingRisk) {
             Write-Host "    [!] HAZARD: High-Risk EDID Timings / DP 1.2a Scaler Saturation Detected!" -ForegroundColor Red
         }
+    }
+
+    if ($kernelDriverHealth.RogueDriversDetected) {
+        Write-Host "  [!] Rogue Kernel I/O Driver Warning: Detected legacy port access driver(s) active on boot:" -ForegroundColor Red
+        foreach ($kd in ($kernelDriverHealth.Drivers | Where-Object { $_.IsActive -and -not $_.IsDisabled })) {
+            Write-Host "      * $($kd.FileName) (Service: $($kd.ServiceName), Start: $($kd.StartType)) - $($kd.Software)" -ForegroundColor Red
+        }
+    } else {
+        Write-Host "  [ OK ] Kernel Driver Security: No problematic legacy I/O drivers (inpoutx64/WinRing0/ENE) detected." -ForegroundColor Green
     }
 
     foreach ($net in $netHealth) {
@@ -436,6 +483,10 @@ if ($zombieProcesses.Count -gt 0) {
         $rootCauseTitle = "GRAPHICS DEVICE HUNG / REMOVED (0x887A0006 / 0x887A0005)"
         $rootCauseDesc = "DirectX graphics device lost or timed out ($($firstCrash.ExceptionMeaning)) in $($firstCrash.FaultingModule)."
         $rootCauseGuidance = "The display driver crashed or timed out during a render pass. Check GPU temperatures and power cables, lower in-game ray tracing / VRAM texture settings, or clean reinstall GPU drivers."
+    } elseif ($firstCrash.IsRogueKernelDriver -or ($firstCrash.FaultingModule -match '(?i)inpoutx64|inpout32|winring0|ene\.sys|asromgdrv|gdrv') -or $firstCrash.ExceptionCode -eq '0x00000093') {
+        $rootCauseTitle = "ROGUE KERNEL I/O DRIVER CRASH ($($firstCrash.FaultingModule) / INVALID_KERNEL_HANDLE 0x93)"
+        $rootCauseDesc = "Exception $($firstCrash.ExceptionCode): $($firstCrash.ExceptionMeaning) in legacy kernel driver '$($firstCrash.FaultingModule)' ($($firstCrash.FileName)). This legacy direct-hardware I/O port driver (commonly left behind by RGB or hardware monitoring utilities) bypasses modern Windows driver models. Under game anti-cheat engines (Easy Anti-Cheat, BattlEye, Vanguard) or Windows Memory Integrity, invalid handle usage causes game lockups (with audio continuing) or instant BSODs."
+        $rootCauseGuidance = "Disable the problematic driver service by running '.\Analyze-LatestCrash.ps1 -DisableRogueDrivers' or 'sc config inpoutx64 start= disabled' in an Administrator terminal. Modern lighting software will continue to operate normally without this legacy kernel driver."
     } elseif ($firstCrash.ExceptionCode -match '0xC0000005') {
         $rootCauseTitle = "APPLICATION MEMORY ACCESS VIOLATION (0xC0000005)"
         $rootCauseDesc = "Exception 0xC0000005: Native memory access violation in $($firstCrash.FaultingModule) ($($firstCrash.FileName))."
@@ -455,7 +506,7 @@ if ($zombieProcesses.Count -gt 0) {
     $firstPcie = $telemetry.PcieWheaErrors[0]
     $rootCauseTitle = "PCIe BUS / RISER CABLE INTEGRITY ERROR (WHEA Event 17)"
     $rootCauseDesc = "Windows detected PCIe link communication errors ($($telemetry.PcieWheaErrors.Count) incident(s)). This is frequently caused by PCIe 4.0/5.0 riser cables, loose GPU PCIe slot seating, or motherboard PCIe signal degradation."
-    $rootCauseGuidance = "Reseat your graphics card. If using a vertical GPU mount or PCIe riser cable, test with the GPU plugged directly into the motherboard PCIe slot, or configure PCIe link speed to Gen 3 / Gen 4 in BIOS."
+    $rootCauseGuidance = "Reseat your graphics card. If using a vertical GPU mount or PCIe riser cable, test with the GPU plugged directly into the motherboard PCIe slot, or configure PCIe link speed to Gen 3 / Gen 4 in BIOS. Also ensure PCIe Link State Power Management is Off ('`.\Analyze-LatestCrash.ps1 -DisablePciePowerSavings')."
     $rootCauseSeverity = "Critical"
 } elseif ($telemetry.MemoryExhaustion.Count -gt 0) {
     $rootCauseTitle = "VIRTUAL MEMORY / COMMIT LIMIT EXHAUSTION (Event 2004)"
@@ -463,9 +514,15 @@ if ($zombieProcesses.Count -gt 0) {
     $rootCauseGuidance = "Ensure your Windows Paging File (Pagefile) is set to 'System managed size' on an SSD with at least 20 GB free space. Do not disable or severely restrict pagefile size."
     $rootCauseSeverity = "Critical"
 } elseif ($telemetry.TdrEvents.Count -gt 0) {
-    $rootCauseTitle = "GPU DISPLAY DRIVER TIMEOUT (TDR / 0x141)"
-    $rootCauseDesc = "The GPU display driver stopped responding and was recovered by Windows ($($telemetry.TdrEvents.Count) incident(s))."
-    $rootCauseGuidance = "Clean reinstall your graphics driver using AMD Clean Utility or DDU. Disable GPU hardware scheduling or aggressive overclocks if crashes persist."
+    if ($telemetry.PciePowerManagement.IsEnabled) {
+        $rootCauseTitle = "GPU DISPLAY DRIVER TIMEOUT (TDR / 0x141) - PCIE POWER SAVINGS ACTIVE"
+        $rootCauseDesc = "The GPU display driver stopped responding and was recovered by Windows ($($telemetry.TdrEvents.Count) incident(s)). Windows PCIe Link State Power Management (ASPM) is currently ENABLED ('$($telemetry.PciePowerManagement.ACSettingName)') in power plan '$($telemetry.PciePowerManagement.SchemeName)'. When the PCIe link enters low-power L0s/L1 states during idle or video playback, resumption latency spikes cause the graphics watchdog to timeout."
+        $rootCauseGuidance = "Disable PCIe Link State Power Management using '.\Analyze-LatestCrash.ps1 -DisablePciePowerSavings' or '.\scripts\Repair-PciePowerSettings.ps1'. If timeouts persist, clean reinstall graphics drivers."
+    } else {
+        $rootCauseTitle = "GPU DISPLAY DRIVER TIMEOUT (TDR / 0x141)"
+        $rootCauseDesc = "The GPU display driver stopped responding and was recovered by Windows ($($telemetry.TdrEvents.Count) incident(s))."
+        $rootCauseGuidance = "Clean reinstall your graphics driver using AMD Clean Utility or DDU. Disable GPU hardware scheduling or aggressive overclocks if crashes persist."
+    }
     $rootCauseSeverity = "Critical"
 } elseif ($telemetry.KernelBugChecks.Count -gt 0) {
     $firstBc = $telemetry.KernelBugChecks[0]
@@ -498,6 +555,16 @@ if ($zombieProcesses.Count -gt 0) {
     $rootCauseTitle = "DISPLAYPORT BANDWIDTH / MONITOR SCALER INSTABILITY (EDID OVERCLOCK)"
     $rootCauseDesc = if ($displayHealth.RiskSummary) { $displayHealth.RiskSummary } else { "Connected display has aggressive factory overclock timings exceeding DisplayPort 1.2a / scaler bandwidth thresholds." }
     $rootCauseGuidance = if ($displayHealth.Guidance) { $displayHealth.Guidance } else { "Lower monitor refresh rate (e.g. from 165Hz to 144Hz) in Windows Advanced Display Settings, or configure CVT-Reduced Blanking (CVT-RB) in Custom Resolution Utility (CRU) to reduce pixel clock below 580 MHz." }
+    $rootCauseSeverity = "Warning"
+} elseif ($kernelDriverHealth.RogueDriversDetected) {
+    $rootCauseTitle = "ROGUE KERNEL I/O DRIVER HAZARD (RGB / DIRECT PORT ACCESS)"
+    $rootCauseDesc = $kernelDriverHealth.RiskSummary
+    $rootCauseGuidance = $kernelDriverHealth.Guidance
+    $rootCauseSeverity = "Warning"
+} elseif ($telemetry.PciePowerManagement.IsEnabled -and ($telemetry.AbruptReboots.Count -gt 0 -or $telemetry.UnexpectedShutdowns.Count -gt 0)) {
+    $rootCauseTitle = "PCIE LINK STATE POWER MANAGEMENT (ASPM) INSTABILITY"
+    $rootCauseDesc = "The system experienced unexpected reboots or sleep-wake issues while PCIe Link State Power Management was enabled ($($telemetry.PciePowerManagement.ACSettingName))."
+    $rootCauseGuidance = "Disable PCIe Link State Power Management using '.\Analyze-LatestCrash.ps1 -DisablePciePowerSavings' or '.\scripts\Repair-PciePowerSettings.ps1'."
     $rootCauseSeverity = "Warning"
 }
 
@@ -533,12 +600,14 @@ $reportObject = [PSCustomObject]@{
     SteamLogs            = @($steamLogs)
     SystemTelemetry      = $telemetry
     HardwareHealth       = [PSCustomObject]@{
-        Gpus             = @($gpuHealth.Gpus)
-        DualGpuConflict  = $gpuHealth.DualGpuConflict
-        PnpIssues        = @($pnpIssues)
-        Displays         = @($displayHealth.Displays)
-        HighRiskDisplays = $displayHealth.HighRiskTimingsDetected
-        NetworkAdapters  = @($netHealth)
+        Gpus                       = @($gpuHealth.Gpus)
+        DualGpuConflict            = $gpuHealth.DualGpuConflict
+        PnpIssues                  = @($pnpIssues)
+        Displays                   = @($displayHealth.Displays)
+        HighRiskDisplays           = $displayHealth.HighRiskTimingsDetected
+        KernelDrivers              = @($kernelDriverHealth.Drivers)
+        RogueKernelDriversDetected = $kernelDriverHealth.RogueDriversDetected
+        NetworkAdapters            = @($netHealth)
     }
 }
 
