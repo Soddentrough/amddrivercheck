@@ -65,6 +65,13 @@ WHAT THIS TOOL DIAGNOSES:
      instant BugCheck 0x93 BSODs.
    - Provides 1-click disabling via "Run-Diagnostics.bat" -> Maintenance [7].
 
+11. Motherboard, BIOS & Platform Chipset Driver Health
+   - Audits motherboard model and BIOS release version/date to identify
+     outdated firmware (>3 years) lacking PCIe 4.0/5.0 AGESA stability fixes.
+   - Audits official AMD Chipset Software / Intel Chipset Device Software
+     installations and verifies core platform controllers (AMD GPIO, I2C,
+     PCI Device Driver, PSP, and 3D V-Cache Optimizer).
+
 ------------------------------------------------------------------------
 HOW TO SHARE FOR TECHNICAL SUPPORT (DISCORD / REDDIT):
 ------------------------------------------------------------------------

@@ -59,15 +59,35 @@ function Get-DcGpuDriverHealth {
         $isNvidia = ($prov -match '(?i)NVIDIA' -or $vc.Name -match '(?i)GeForce|RTX|GTX')
         $isIntel = ($prov -match '(?i)Intel' -or $vc.Name -match '(?i)Arc|Iris|UHD|HD Graphics')
 
+        # Detect AMD Software Install Type (Driver Only vs Adrenalin Full Install) and Crash Defender
+        $amdInstallType = $null
+        $crashDefenderActive = $false
+        if ($isAMD) {
+            $progFiles = if ($env:ProgramFiles) { $env:ProgramFiles } else { "C:\Program Files" }
+            $hasRadeonGui = (Test-Path "$progFiles\AMD\CNext\CNext\RadeonSoftware.exe") -or
+                            (Get-Service -Name "AMDRSServ" -ErrorAction SilentlyContinue)
+            $amdInstallType = if ($hasRadeonGui) { "Full (Adrenalin GUI)" } else { "Driver Only" }
+
+            $fendrSvc = Get-Service -Name "AMDFendrSR" -ErrorAction SilentlyContinue
+            if ($fendrSvc -and $fendrSvc.Status -eq "Running") {
+                $crashDefenderActive = $true
+            }
+        }
+
+        $isHighBoost = ($vc.Name -match '(?i)7900\s*(XTX|XT|GRE)|7800\s*XT|6950\s*XT|6900\s*XT|RTX\s*4090|RTX\s*4080')
+
         $gpuList.Add([PSCustomObject]@{
-            Name          = $vc.Name
-            PNPDeviceID   = $vc.PNPDeviceID
-            DriverVersion = $ver
-            DriverDate    = $rawDate
-            Provider      = $prov
-            Status        = $vc.Status
-            IsGeneric     = $isGeneric
-            Vendor        = if ($isAMD) { "AMD" } elseif ($isNvidia) { "NVIDIA" } elseif ($isIntel) { "Intel" } else { "Other" }
+            Name                = $vc.Name
+            PNPDeviceID         = $vc.PNPDeviceID
+            DriverVersion       = $ver
+            DriverDate          = $rawDate
+            Provider            = $prov
+            Status              = $vc.Status
+            IsGeneric           = $isGeneric
+            Vendor              = if ($isAMD) { "AMD" } elseif ($isNvidia) { "NVIDIA" } elseif ($isIntel) { "Intel" } else { "Other" }
+            AmdInstallType      = $amdInstallType
+            CrashDefenderActive = $crashDefenderActive
+            IsHighBoostCard     = $isHighBoost
         })
     }
 
@@ -437,4 +457,207 @@ function Get-DcProblematicKernelDrivers {
     return $results
 }
 
-Export-ModuleMember -Function Get-DcPnpHealth, Get-DcGpuDriverHealth, Get-DcBluetoothHealth, Get-DcNetworkHealth, Get-DcDisplayDiagnostics, Get-DcProblematicKernelDrivers
+function Get-DcMotherboardAndChipsetHealth {
+    [CmdletBinding()]
+    param()
+
+    # 1. BaseBoard / Motherboard Info
+    $bb = Get-CimInstance Win32_BaseBoard -ErrorAction SilentlyContinue | Select-Object -First 1
+    $mbManufacturer = if ($bb -and $bb.Manufacturer) { $bb.Manufacturer.Trim() } else { "Unknown" }
+    $mbProduct = if ($bb -and $bb.Product) { $bb.Product.Trim() } else { "Unknown" }
+    $mbVersion = if ($bb -and $bb.Version) { $bb.Version.Trim() } else { "" }
+
+    # 2. BIOS Info
+    $bios = Get-CimInstance Win32_BIOS -ErrorAction SilentlyContinue | Select-Object -First 1
+    $biosVendor = if ($bios -and $bios.Manufacturer) { $bios.Manufacturer.Trim() } else { "Unknown" }
+    $biosVersion = if ($bios -and $bios.SMBIOSBIOSVersion) { $bios.SMBIOSBIOSVersion.Trim() } else { "Unknown" }
+
+    $biosDateStr = $null
+    $biosAgeDays = $null
+    $biosAgeYears = $null
+    $isBiosOutdated = $false
+
+    if ($bios -and $bios.ReleaseDate) {
+        try {
+            $parsedDate = [datetime]$bios.ReleaseDate
+            $biosDateStr = $parsedDate.ToString("yyyy-MM-dd")
+            $diff = (Get-Date) - $parsedDate
+            $biosAgeDays = [math]::Round($diff.TotalDays)
+            $biosAgeYears = [math]::Round($biosAgeDays / 365.25, 1)
+            # Flag if BIOS is > 3 years old (>1095 days)
+            if ($biosAgeDays -gt 1095) {
+                $isBiosOutdated = $true
+            }
+        } catch {
+            $biosDateStr = "$($bios.ReleaseDate)"
+        }
+    }
+
+    # 3. Detect Platform CPU Vendor to know which Chipset drivers to look for
+    $cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
+    $cpuName = if ($cpu -and $cpu.Name) { $cpu.Name.Trim() } else { "" }
+    $isAmdCpu = ($cpuName -match '(?i)AMD|Ryzen|Threadripper|EPYC' -or $mbProduct -match '(?i)B450|B550|X470|X570|A520|A620|B650|B850|X670|X870|TRX40|WRX80|WRX90')
+    $isIntelCpu = ($cpuName -match '(?i)Intel|Core\(TM\)|Xeon' -or $mbProduct -match '(?i)Z490|Z590|Z690|Z790|Z890|B460|B560|B660|B760|B860|H610|H670|H770')
+
+    # 4. Query Installed Chipset Software from Registry (Uninstall keys)
+    $uninstallPaths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+    $installedApps = @(Get-ItemProperty $uninstallPaths -ErrorAction SilentlyContinue)
+
+    $chipsetSoftware = $null
+    $chipsetVersion = $null
+    $chipsetInstallDate = $null
+
+    $amdChipset = $installedApps | Where-Object { $_.DisplayName -match '(?i)AMD Chipset Software' } | Select-Object -First 1
+    $intelChipset = $installedApps | Where-Object { $_.DisplayName -match '(?i)Intel(\(R\))? Chipset Device Software' } | Select-Object -First 1
+
+    if ($amdChipset) {
+        $chipsetSoftware = $amdChipset.DisplayName
+        $chipsetVersion = $amdChipset.DisplayVersion
+        $chipsetInstallDate = $amdChipset.InstallDate
+    } elseif ($intelChipset) {
+        $chipsetSoftware = $intelChipset.DisplayName
+        $chipsetVersion = $intelChipset.DisplayVersion
+        $chipsetInstallDate = $intelChipset.InstallDate
+    }
+
+    # 5. Audit Core Platform Controller Drivers (PnP)
+    $allDrivers = @(Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue)
+    $allPnp = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue)
+
+    $controllerAudit = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $missingChipsetControllers = [System.Collections.Generic.List[string]]::new()
+
+    if ($isAmdCpu) {
+        # Check AMD GPIO Controller
+        $gpio = $allPnp | Where-Object { $_.FriendlyName -match '(?i)AMD GPIO' -or $_.InstanceId -match '(?i)AMDI0030|AMDI0031|AMD0030' } | Select-Object -First 1
+        $gpioDrv = if ($gpio) { $allDrivers | Where-Object { $_.DeviceID -eq $gpio.InstanceId } | Select-Object -First 1 } else { $null }
+        $controllerAudit.Add([PSCustomObject]@{
+            Controller = "AMD GPIO Controller"
+            Present    = ($null -ne $gpio)
+            Status     = if ($gpio) { $gpio.Status } else { "Not Present" }
+            DriverVer  = if ($gpioDrv) { $gpioDrv.DriverVersion } else { "N/A" }
+            Provider   = if ($gpioDrv) { $gpioDrv.DriverProviderName } else { "N/A" }
+        })
+        if (-not $gpio -or ($gpio -and $gpio.Status -ne "OK")) {
+            $missingChipsetControllers.Add("AMD GPIO Controller")
+        }
+
+        # Check AMD I2C Controller
+        $i2c = $allPnp | Where-Object { $_.FriendlyName -match '(?i)AMD I2C' -or $_.InstanceId -match '(?i)AMDI0010|AMDI0011' } | Select-Object -First 1
+        $i2cDrv = if ($i2c) { $allDrivers | Where-Object { $_.DeviceID -eq $i2c.InstanceId } | Select-Object -First 1 } else { $null }
+        if ($i2c) {
+            $controllerAudit.Add([PSCustomObject]@{
+                Controller = "AMD I2C Controller"
+                Present    = $true
+                Status     = $i2c.Status
+                DriverVer  = if ($i2cDrv) { $i2cDrv.DriverVersion } else { "N/A" }
+                Provider   = if ($i2cDrv) { $i2cDrv.DriverProviderName } else { "N/A" }
+            })
+            if ($i2c.Status -ne "OK") {
+                $missingChipsetControllers.Add("AMD I2C Controller ($($i2c.Status))")
+            }
+        }
+
+        # Check AMD PCI Device Driver (amdfendr / amdpcidev)
+        $pciDev = $allPnp | Where-Object { $_.FriendlyName -match '(?i)AMD PCI' -or $_.InstanceId -match '(?i)VEN_1022&DEV_148A|VEN_1022&DEV_149A' } | Select-Object -First 1
+        $pciDevDrv = if ($pciDev) { $allDrivers | Where-Object { $_.DeviceID -eq $pciDev.InstanceId } | Select-Object -First 1 } else { $null }
+        if ($pciDev) {
+            $controllerAudit.Add([PSCustomObject]@{
+                Controller = "AMD PCI Device Driver"
+                Present    = $true
+                Status     = $pciDev.Status
+                DriverVer  = if ($pciDevDrv) { $pciDevDrv.DriverVersion } else { "N/A" }
+                Provider   = if ($pciDevDrv) { $pciDevDrv.DriverProviderName } else { "N/A" }
+            })
+            if ($pciDev.Status -ne "OK") {
+                $missingChipsetControllers.Add("AMD PCI Device Driver ($($pciDev.Status))")
+            }
+        }
+
+        # Check AMD PSP (Platform Security Processor)
+        $psp = $allPnp | Where-Object { $_.FriendlyName -match '(?i)AMD PSP|Platform Security Processor' -or $_.InstanceId -match '(?i)VEN_1022&DEV_1486|VEN_1022&DEV_15DF|VEN_1022&DEV_1649' } | Select-Object -First 1
+        $pspDrv = if ($psp) { $allDrivers | Where-Object { $_.DeviceID -eq $psp.InstanceId } | Select-Object -First 1 } else { $null }
+        if ($psp) {
+            $controllerAudit.Add([PSCustomObject]@{
+                Controller = "AMD PSP Device"
+                Present    = $true
+                Status     = $psp.Status
+                DriverVer  = if ($pspDrv) { $pspDrv.DriverVersion } else { "N/A" }
+                Provider   = if ($pspDrv) { $pspDrv.DriverProviderName } else { "N/A" }
+            })
+            if ($psp.Status -ne "OK") {
+                $missingChipsetControllers.Add("AMD PSP Device ($($psp.Status))")
+            }
+        }
+
+        # Check AMD 3D V-Cache Optimizer (if X3D CPU)
+        if ($cpuName -match '(?i)X3D') {
+            $vcacheSvc = Get-Service -Name "amd3dvcache" -ErrorAction SilentlyContinue
+            $controllerAudit.Add([PSCustomObject]@{
+                Controller = "AMD 3D V-Cache Optimizer"
+                Present    = ($null -ne $vcacheSvc)
+                Status     = if ($vcacheSvc) { $vcacheSvc.Status.ToString() } else { "Not Installed" }
+                DriverVer  = "Service"
+                Provider   = "AMD"
+            })
+            if (-not $vcacheSvc -or $vcacheSvc.Status -ne "Running") {
+                $missingChipsetControllers.Add("AMD 3D V-Cache Optimizer Service (Not running for X3D CPU)")
+            }
+        }
+    } elseif ($isIntelCpu) {
+        # Check Intel Management Engine (MEI)
+        $mei = $allPnp | Where-Object { $_.FriendlyName -match '(?i)Intel.*Management Engine|Intel.*MEI' -or $_.InstanceId -match '(?i)VEN_8086&DEV_' } | Select-Object -First 1
+        $meiDrv = if ($mei) { $allDrivers | Where-Object { $_.DeviceID -eq $mei.InstanceId } | Select-Object -First 1 } else { $null }
+        if ($mei) {
+            $controllerAudit.Add([PSCustomObject]@{
+                Controller = "Intel Management Engine (MEI)"
+                Present    = $true
+                Status     = $mei.Status
+                DriverVer  = if ($meiDrv) { $meiDrv.DriverVersion } else { "N/A" }
+                Provider   = if ($meiDrv) { $meiDrv.DriverProviderName } else { "N/A" }
+            })
+            if ($mei.Status -ne "OK") {
+                $missingChipsetControllers.Add("Intel Management Engine ($($mei.Status))")
+            }
+        }
+    }
+
+    # Summary Health Assessment
+    $isHealthy = ($missingChipsetControllers.Count -eq 0)
+    $summary = if ($chipsetSoftware) {
+        "$chipsetSoftware v$chipsetVersion"
+    } elseif ($isAmdCpu) {
+        "AMD Platform (Generic / Unregistered Chipset Package)"
+    } elseif ($isIntelCpu) {
+        "Intel Platform (Generic / Unregistered Chipset Package)"
+    } else {
+        "Standard Platform"
+    }
+
+    return [PSCustomObject]@{
+        MotherboardManufacturer = $mbManufacturer
+        MotherboardProduct      = $mbProduct
+        MotherboardVersion      = $mbVersion
+        BiosVendor              = $biosVendor
+        BiosVersion             = $biosVersion
+        BiosReleaseDate         = $biosDateStr
+        BiosAgeDays             = $biosAgeDays
+        BiosAgeYears            = $biosAgeYears
+        IsBiosOutdated          = $isBiosOutdated
+        CpuName                 = $cpuName
+        IsAmdCpu                = $isAmdCpu
+        IsIntelCpu              = $isIntelCpu
+        ChipsetSoftware         = $chipsetSoftware
+        ChipsetVersion          = $chipsetVersion
+        ChipsetInstallDate      = $chipsetInstallDate
+        ChipsetControllers      = @($controllerAudit)
+        MissingControllers      = @($missingChipsetControllers)
+        IsHealthy               = $isHealthy
+        Summary                 = $summary
+    }
+}
+
+Export-ModuleMember -Function Get-DcPnpHealth, Get-DcGpuDriverHealth, Get-DcBluetoothHealth, Get-DcNetworkHealth, Get-DcDisplayDiagnostics, Get-DcProblematicKernelDrivers, Get-DcMotherboardAndChipsetHealth

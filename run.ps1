@@ -14,7 +14,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $destDir = Join-Path $env:TEMP "DriverCheck_Live"
-$zipUrl = "https://github.com/Soddentrough/amddrivercheck/releases/latest/download/drivercheck-v4.2.0.zip"
+$zipUrl = "https://github.com/Soddentrough/amddrivercheck/releases/latest/download/drivercheck-v4.3.0.zip"
 $zipFile = Join-Path $env:TEMP "drivercheck_temp.zip"
 
 Write-Host ""

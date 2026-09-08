@@ -136,11 +136,39 @@ function Export-DcHtmlReport {
 
     # Build Hardware HTML
     $hw = $ReportData.HardwareHealth
+
+    # Build Motherboard & Chipset HTML
+    $mbRows = [System.Collections.Generic.List[string]]::new()
+    if ($hw -and $hw.Motherboard) {
+        $mb = $hw.Motherboard
+        $mbBadge = if ($mb.IsHealthy) { "<span class='badge-healthy'>HEALTHY</span>" } else { "<span class='badge-warning'>ACTION RECOMMENDED</span>" }
+        $biosAgeNotice = if ($mb.BiosAgeYears) { " ($($mb.BiosAgeYears) yrs old)" } else { "" }
+        $biosBadge = if ($mb.IsBiosOutdated) { "<span class='badge-warning'>AGING ($($mb.BiosAgeYears) YRS)</span>" } else { "<span class='badge-healthy'>OK</span>" }
+
+        $missingHtml = ""
+        if ($mb.MissingControllers.Count -gt 0) {
+            $missingList = ($mb.MissingControllers | ForEach-Object { "<li>$_</li>" }) -join ""
+            $missingHtml = "<div class='alert-card alert-warning' style='margin-top: 8px;'><strong>&#x26A0; Missing Platform Controllers:</strong><ul style='margin-left: 20px; margin-top: 4px;'>$missingList</ul><span style='font-size: 0.85rem;'>Recommendation: Download and install the latest official chipset driver package from your motherboard support page or AMD.com / Intel.com.</span></div>"
+        }
+
+        $mbCard = "<div class='card-item'>" +
+            "<div class='card-header-row'>" +
+                "<span class='file-name'>&#x1F4DF; $($mb.MotherboardManufacturer) $($mb.MotherboardProduct)</span>" +
+                "$mbBadge" +
+            "</div>" +
+            "<div><strong>BIOS Version:</strong> $($mb.BiosVersion) (Released: $($mb.BiosReleaseDate)$biosAgeNotice) $biosBadge</div>" +
+            "<div><strong>Platform & Chipset:</strong> $($mb.Summary)</div>" +
+            $missingHtml +
+        "</div>"
+        $mbRows.Add($mbCard)
+    }
+
     $gpuRows = [System.Collections.Generic.List[string]]::new()
     if ($hw -and $hw.Gpus) {
         foreach ($g in $hw.Gpus) {
             $gpuBadge = if ($g.IsGeneric) { "<span class='badge-critical'>GENERIC ADAPTER</span>" } else { "<span class='badge-healthy'>ACTIVE</span>" }
-            $gpuRows.Add("<tr><td><strong>$($g.Name)</strong></td><td>$($g.Vendor)</td><td>$($g.DriverVersion)</td><td>$($g.DriverDate)</td><td>$gpuBadge</td></tr>")
+            $installInfo = if ($g.AmdInstallType) { "<br><span style='font-size: 0.8rem; color: var(--text-muted);'>Type: $($g.AmdInstallType)</span>" } else { "" }
+            $gpuRows.Add("<tr><td><strong>$($g.Name)</strong>$installInfo</td><td>$($g.Vendor)</td><td>$($g.DriverVersion)</td><td>$($g.DriverDate)</td><td>$gpuBadge</td></tr>")
         }
     }
 
@@ -194,6 +222,14 @@ function Export-DcHtmlReport {
 
     $fastStartupStatusStr = if ($telem -and $telem.FastStartup.FastStartupEnabled) { 'Enabled (Risk)' } else { 'Disabled (Clean)' }
     $pcieAspmStr = if ($telem -and $telem.PciePowerManagement) { $telem.PciePowerManagement.ACSettingName } else { 'Unknown' }
+    $mbSummaryStr = if ($hw -and $hw.Motherboard) {
+        "$($hw.Motherboard.MotherboardManufacturer) $($hw.Motherboard.MotherboardProduct) (BIOS: $($hw.Motherboard.BiosVersion) - $($hw.Motherboard.BiosReleaseDate))"
+    } else { 'Unknown' }
+    $chipsetSummaryStr = if ($hw -and $hw.Motherboard) {
+        $mb = $hw.Motherboard
+        $statusNotice = if ($mb.IsHealthy) { "Healthy" } else { "Missing: " + ($mb.MissingControllers -join ', ') }
+        "$($mb.Summary) [$statusNotice]"
+    } else { 'Unknown' }
     $gpuNamesStr = if ($hw -and $hw.Gpus) { ($hw.Gpus.Name -join ' | ') } else { 'None' }
     $pnpCountStr = if ($hw -and $hw.PnpIssues) { $hw.PnpIssues.Count } else { 0 }
     $dispSummaryStr = if ($hw -and $hw.Displays) {
@@ -208,18 +244,20 @@ function Export-DcHtmlReport {
     } else { 'None (Clean)' }
 
     $discordText = "=== DriverCheck Diagnostic Summary ===`n" +
-        "Status:     $($ReportData.RootCauseTitle)`n" +
-        "Severity:   $($ReportData.RootCauseSeverity)`n" +
-        "Timestamp:  $((Get-Date).ToString('yyyy-MM-dd HH:mm'))`n" +
-        "Scan Range: Past $($ReportData.HoursScanned) Hours`n`n" +
+        "Status:      $($ReportData.RootCauseTitle)`n" +
+        "Severity:    $($ReportData.RootCauseSeverity)`n" +
+        "Timestamp:   $((Get-Date).ToString('yyyy-MM-dd HH:mm'))`n" +
+        "Scan Range:  Past $($ReportData.HoursScanned) Hours`n`n" +
         "[Summary]`n$($ReportData.RootCauseGuidance)`n`n" +
-        "[Hardware & Power]`n" +
-        "GPUs: $gpuNamesStr`n" +
-        "Displays: $dispSummaryStr`n" +
-        "PCIe ASPM: $pcieAspmStr`n" +
+        "[Hardware & Platform]`n" +
+        "Motherboard: $mbSummaryStr`n" +
+        "Chipset:     $chipsetSummaryStr`n" +
+        "GPUs:        $gpuNamesStr`n" +
+        "Displays:    $dispSummaryStr`n" +
+        "PCIe ASPM:   $pcieAspmStr`n" +
         "Fast Startup: $fastStartupStatusStr`n" +
         "Kernel Drivers: $rogueDriversStr`n" +
-        "PnP Issues: $pnpCountStr`n" +
+        "PnP Issues:  $pnpCountStr`n" +
         "Crash Dumps: $($ReportData.Dumps.Count)"
 
     # Assemble HTML
@@ -273,7 +311,8 @@ function Export-DcHtmlReport {
     $parts.Add("        <header class='header'>")
     $parts.Add("            <div class='header-title'>")
     $parts.Add("                <h1>DriverCheck Diagnostic Suite</h1>")
-    $parts.Add("                <p>Generated on $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss')) | Scan Window: Past $($ReportData.HoursScanned) Hours</p>")
+    $mbHeaderInfo = if ($hw -and $hw.Motherboard) { " | System: $($hw.Motherboard.MotherboardManufacturer) $($hw.Motherboard.MotherboardProduct)" } else { "" }
+    $parts.Add("                <p>Generated on $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss')) | Scan Window: Past $($ReportData.HoursScanned) Hours$mbHeaderInfo</p>")
     $parts.Add("            </div>")
     $parts.Add("            <span class='badge $statusClass'>$statusText</span>")
     $parts.Add("        </header>")
@@ -293,6 +332,12 @@ function Export-DcHtmlReport {
     $parts.Add("        <h3 class='section-title'>[TIER 3] System Logs & Telemetry (Tertiary Telemetry)</h3>")
     $parts.Add(($telemRows -join "`n"))
     $parts.Add("        <h3 class='section-title'>[TIER 4] Hardware & Driver Health (Contextual Audit)</h3>")
+    if ($mbRows.Count -gt 0) {
+        $parts.Add("        <div style='margin-bottom: 12px;'>")
+        $parts.Add("            <strong>Motherboard, BIOS & Platform Chipset Drivers:</strong>")
+        $parts.Add(($mbRows -join "`n"))
+        $parts.Add("        </div>")
+    }
     $parts.Add("        <div class='card-item'>")
     $parts.Add("            <strong>Active Graphics Hardware:</strong>")
     $parts.Add("            <table>")
@@ -321,7 +366,7 @@ function Export-DcHtmlReport {
     $parts.Add("            <textarea readonly onclick='this.select()'>$discordText</textarea>")
     $parts.Add("        </div>")
     $parts.Add("        <footer>")
-    $parts.Add("            DriverCheck Diagnostic Suite v4.2.0 | Evidence-Based Crash Analysis Engine")
+    $parts.Add("            DriverCheck Diagnostic Suite v4.3.0 | Evidence-Based Crash Analysis Engine")
     $parts.Add("        </footer>")
     $parts.Add("    </div>")
     $parts.Add("</body>")

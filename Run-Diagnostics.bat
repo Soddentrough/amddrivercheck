@@ -9,7 +9,7 @@ PowerShell.exe -NoProfile -ExecutionPolicy Bypass -Command "Get-ChildItem -Path 
 :menu
 cls
 echo ========================================================================
-echo   AUTOMATED GAME ^& SYSTEM CRASH DIAGNOSTIC SUITE (v4.2.0)
+echo   AUTOMATED GAME ^& SYSTEM CRASH DIAGNOSTIC SUITE (v4.3.0)
 echo   Evidence-Based Engine (Crash Dumps, Logs, Telemetry, Hardware)
 echo ========================================================================
 echo.
@@ -17,7 +17,7 @@ echo   [1] Full Crash Diagnostics + Open HTML Report (Recommended)
 echo   [2] Quick Scan (Past 24 Hours)
 echo   [3] Deep Scan (Past 7 Days)
 echo   [4] Export Support Bundle (HTML Report + ZIP for Discord/Support)
-echo   [5] Hardware Health ^& Missing Drivers Audit (PnP)
+echo   [5] Motherboard, Chipset Drivers ^& PnP Hardware Health Audit
 echo   [6] Display, EDID Timings ^& DP Scaler Saturation Audit
 echo   [7] GPU Driver Health ^& Downgrade Prevention Audit
 echo   [8] Apply GPU Downgrade Protection (Lock Windows Update Drivers)
