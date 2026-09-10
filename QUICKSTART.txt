@@ -72,6 +72,14 @@ WHAT THIS TOOL DIAGNOSES:
      installations and verifies core platform controllers (AMD GPIO, I2C,
      PCI Device Driver, PSP, and 3D V-Cache Optimizer).
 
+12. Steam Watchdog IPC Hangs & Network Link Drops
+   - Diagnoses Steam engine stalls and cross-thread pipe watchdog terminations
+     (Assert( Stalled cross-thread pipe )) which abruptly terminate games.
+   - Correlates socket hangs with network ARP probe failures (NCSI Event 4042)
+     and wireless failovers on Intel 2.5GbE adapters (I225-V / I226-V).
+   - Provides safe 1-click remediation via "Run-Diagnostics.bat" -> Maintenance [5]
+     to disable Packet Priority & VLAN while preserving active negotiated link speed.
+
 ------------------------------------------------------------------------
 HOW TO SHARE FOR TECHNICAL SUPPORT (DISCORD / REDDIT):
 ------------------------------------------------------------------------

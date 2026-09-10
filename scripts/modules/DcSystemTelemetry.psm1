@@ -180,6 +180,8 @@ function Get-DcSystemTelemetry {
         StorageErrors          = [System.Collections.Generic.List[PSCustomObject]]::new()
         AppCrashes             = [System.Collections.Generic.List[PSCustomObject]]::new()
         AppHangs               = [System.Collections.Generic.List[PSCustomObject]]::new()
+        NetworkDrops           = [System.Collections.Generic.List[PSCustomObject]]::new()
+        WlanFailovers          = [System.Collections.Generic.List[PSCustomObject]]::new()
     }
 
     # Query System Events within time window
@@ -332,6 +334,76 @@ function Get-DcSystemTelemetry {
                 TimeCreated = $ah.TimeCreated
                 Application = $hangApp
                 Message     = $ah.Message.Trim()
+            })
+        }
+    }
+
+    # Cache network adapters for GUID resolution
+    $adaptersByGuid = @{}
+    try {
+        $netAdapters = Get-NetAdapter -ErrorAction SilentlyContinue
+        if ($netAdapters) {
+            foreach ($na in $netAdapters) {
+                if ($na.InterfaceGuid) {
+                    $adaptersByGuid[$na.InterfaceGuid.ToUpper()] = "$($na.Name) ($($na.InterfaceDescription))"
+                }
+            }
+        }
+    } catch {}
+
+    # Query Network Disconnects & Capability Drops (NCSI Event 4042)
+    $ncsiEvents = Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-NCSI/Operational'; StartTime=$Cutoff} -ErrorAction SilentlyContinue |
+        Where-Object { $_.Id -eq 4042 -and ($_.Message -match 'Capability:\s*None|SuspectArpProbeFailed|SuspectDnsProbeFailed') }
+    if ($ncsiEvents) {
+        foreach ($ne in ($ncsiEvents | Select-Object -First 10)) {
+            $reason = "Unknown"
+            if ($ne.Message -match 'ChangeReason:\s*([a-zA-Z0-9]+)') { $reason = $Matches[1] }
+            $ifaceGuid = "Unknown"
+            if ($ne.Message -match 'Capability change on (\{[a-zA-Z0-9\-]+\})') { $ifaceGuid = $Matches[1].ToUpper() }
+            $ifaceName = if ($adaptersByGuid.ContainsKey($ifaceGuid)) { $adaptersByGuid[$ifaceGuid] } else { $ifaceGuid }
+
+            $results.NetworkDrops.Add([PSCustomObject]@{
+                TimeCreated   = $ne.TimeCreated
+                Id            = $ne.Id
+                Provider      = "NCSI"
+                InterfaceGuid = $ifaceGuid
+                InterfaceName = $ifaceName
+                Reason        = $reason
+                Message       = "Network Internet capability dropped to None (Reason: $reason) on $ifaceName."
+            })
+        }
+    }
+
+    # Query WLAN AutoConfig Failovers / Reconnects
+    $wlanEvents = Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-WLAN-AutoConfig/Operational'; StartTime=$Cutoff} -ErrorAction SilentlyContinue |
+        Where-Object { $_.Id -in @(8000, 11000) }
+    if ($wlanEvents) {
+        foreach ($we in ($wlanEvents | Select-Object -First 10)) {
+            $ssid = "Wi-Fi"
+            if ($we.Message -match 'SSID:\s*([^\r\n]+)') { $ssid = $Matches[1].Trim() }
+            $results.WlanFailovers.Add([PSCustomObject]@{
+                TimeCreated = $we.TimeCreated
+                Id          = $we.Id
+                Provider    = "WLAN-AutoConfig"
+                SSID        = $ssid
+                Message     = "Wireless failover association initiated for SSID '$ssid'."
+            })
+        }
+    }
+
+    # Query TCP/IP Ephemeral Port Exhaustion (Event 4266)
+    $tcpipEvents = Get-WinEvent -FilterHashtable @{LogName='System'; StartTime=$Cutoff} -ErrorAction SilentlyContinue |
+        Where-Object { $_.ProviderName -match 'Tcpip' -and $_.Id -in @(4266, 4227, 4231) }
+    if ($tcpipEvents) {
+        foreach ($te in ($tcpipEvents | Select-Object -First 5)) {
+            $results.NetworkDrops.Add([PSCustomObject]@{
+                TimeCreated   = $te.TimeCreated
+                Id            = $te.Id
+                Provider      = "Tcpip"
+                InterfaceGuid = ""
+                InterfaceName = "Global TCP/IP"
+                Reason        = "EphemeralPortExhaustion"
+                Message       = $te.Message.Trim()
             })
         }
     }

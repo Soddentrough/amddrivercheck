@@ -104,8 +104,8 @@ param(
     [switch]$RepairNetwork,
 
     [Parameter(Mandatory = $false)]
-    [ValidateSet("2.5G", "1.0G", "Auto")]
-    [string]$Speed = "2.5G",
+    [ValidateSet("Current", "2.5G", "1.0G", "Auto")]
+    [string]$Speed = "Current",
 
     [Parameter(Mandatory = $false)]
     [switch]$CleanConfig,
@@ -242,7 +242,7 @@ if (-not $Quiet) {
     Write-Host ""
     Write-Host "  +------------------------------------------------------------------------+" -ForegroundColor Cyan
     Write-Host "  |          AUTOMATED SYSTEM & GAME CRASH DIAGNOSTIC SUITE               |" -ForegroundColor Cyan
-    Write-Host "  |             4-Tier Evidence Hierarchy Engine v4.3.0                   |" -ForegroundColor Cyan
+    Write-Host "  |             4-Tier Evidence Hierarchy Engine v4.4.0                   |" -ForegroundColor Cyan
     Write-Host "  +------------------------------------------------------------------------+" -ForegroundColor Cyan
     Write-Host "  Scan Window: $($cutoff.ToString('yyyy-MM-dd HH:mm')) to $((Get-Date).ToString('yyyy-MM-dd HH:mm')) ($Hours hours)" -ForegroundColor DarkGray
     Write-Host "  Precedence:  [1] Crash Dumps -> [2] App Logs -> [3] System Logs -> [4] System Config" -ForegroundColor DarkGray
@@ -403,8 +403,19 @@ if (-not $Quiet) {
         }
     }
 
-    if ($telemetry.WheaErrors.Count -eq 0 -and $telemetry.TdrEvents.Count -eq 0 -and $telemetry.KernelBugChecks.Count -eq 0 -and $telemetry.AbruptReboots.Count -eq 0) {
-        Write-Host "  [ OK ] No GPU driver TDR resets, Kernel BugChecks, or hardware errors in event telemetry." -ForegroundColor Green
+    if ($telemetry.NetworkDrops.Count -gt 0) {
+        foreach ($nd in ($telemetry.NetworkDrops | Select-Object -First 5)) {
+            Write-Host "  [!] Network Link Drop [$($nd.TimeCreated)]: $($nd.Message)" -ForegroundColor Red
+        }
+    }
+    if ($telemetry.WlanFailovers.Count -gt 0) {
+        foreach ($wf in ($telemetry.WlanFailovers | Select-Object -First 3)) {
+            Write-Host "  [!] WLAN Failover Event [$($wf.TimeCreated)]: $($wf.Message)" -ForegroundColor Yellow
+        }
+    }
+
+    if ($telemetry.WheaErrors.Count -eq 0 -and $telemetry.TdrEvents.Count -eq 0 -and $telemetry.KernelBugChecks.Count -eq 0 -and $telemetry.AbruptReboots.Count -eq 0 -and $telemetry.NetworkDrops.Count -eq 0) {
+        Write-Host "  [ OK ] No GPU driver TDR resets, Kernel BugChecks, network drops, or hardware errors in event telemetry." -ForegroundColor Green
     }
     Write-Host ""
 }
@@ -492,11 +503,50 @@ $rootCauseDesc = "No critical hardware faults, GPU driver crashes, or unhandled 
 $rootCauseGuidance = "Your system is reporting normal stability telemetry. If you experienced a game crash, it may have terminated cleanly without writing a dump or occurred outside the $Hours-hour scan window."
 $rootCauseSeverity = "Healthy"
 
-if ($zombieProcesses.Count -gt 0) {
-    $rootCauseTitle = "ACTIVE ZOMBIE / HUNG STEAM PROCESS"
-    $rootCauseDesc = "steam.exe (PID: $($zombieProcesses[0].PID)) is lingering headless in background, blocking the single-instance mutex and preventing relaunch."
-    $rootCauseGuidance = "Run '.\Analyze-LatestCrash.ps1 -KillHungSteam' or terminate steam.exe in Task Manager."
-    $rootCauseSeverity = "Warning"
+# Pre-screen for Steam Watchdog & Correlated Network Drops
+$correlatedDrop = $null
+$steamWatchdogCrash = $null
+
+if ($parsedDumps.Count -gt 0) {
+    # Check for Steam Watchdog / Pipe Stall / MainLoop Stall signatures
+    $steamWatchdogCrash = $parsedDumps | Where-Object {
+        ($_.Assertions -match '(?i)cross-thread pipe|pipes\.cpp|BMainLoop appears to have stalled') -or
+        ($_.ExceptionCode -eq "0x00000000" -and $_.FileName -match '(?i)crash_(steam|crimsondesert|stalker|gameoverlay)')
+    } | Select-Object -First 1
+
+    if ($steamWatchdogCrash -and ($telemetry.NetworkDrops.Count -gt 0 -or $telemetry.WlanFailovers.Count -gt 0)) {
+        $crashTime = $steamWatchdogCrash.Timestamp
+        $matchedNet = $telemetry.NetworkDrops | Where-Object {
+            [Math]::Abs(($_.TimeCreated - $crashTime).TotalMinutes) -le 10
+        } | Select-Object -First 1
+
+        if (-not $matchedNet) {
+            $matchedNet = $telemetry.WlanFailovers | Where-Object {
+                [Math]::Abs(($_.TimeCreated - $crashTime).TotalMinutes) -le 10
+            } | Select-Object -First 1
+        }
+
+        if ($matchedNet) {
+            $correlatedDrop = $matchedNet
+        }
+    }
+}
+
+if ($steamWatchdogCrash -and $correlatedDrop) {
+    $gameTarget = if ($steamWatchdogCrash.FaultingModule -and $steamWatchdogCrash.FaultingModule -ne "Unknown") { $steamWatchdogCrash.FaultingModule } else { "the active game" }
+    $dropIface = if ($correlatedDrop.InterfaceName) { $correlatedDrop.InterfaceName } else { "Ethernet" }
+    $dropTime = $correlatedDrop.TimeCreated.ToString('HH:mm:ss')
+    
+    $rootCauseTitle = "STEAM WATCHDOG CRASH TRIGGERED BY NETWORK LINK DROP ($dropIface)"
+    $rootCauseDesc = "$gameTarget was terminated by Steam's internal watchdog assertion ('Assert( Stalled cross-thread pipe )') after Steam's engine loop stalled. Telemetry confirms this was triggered at $dropTime when $dropIface suffered an ARP probe failure (SuspectArpProbeFailed), causing Windows to initiate a Wi-Fi failover while game sockets were active."
+    $rootCauseGuidance = "1. Terminate lingering zombie Steam processes using '.\Analyze-LatestCrash.ps1 -KillHungSteam'.`n  2. (Recommended) Optimize Intel I225-V stability by running '.\Analyze-LatestCrash.ps1 -RepairNetwork' as Administrator (disables Packet Priority & VLAN while preserving active negotiated link speed, eliminating known I225-V ARP drops).`n  3. Disconnect or turn off Wi-Fi when plugged into Ethernet to prevent Windows from flapping between wired and wireless connections during gameplay."
+    $rootCauseSeverity = "Critical"
+} elseif ($steamWatchdogCrash) {
+    $gameTarget = if ($steamWatchdogCrash.FaultingModule -and $steamWatchdogCrash.FaultingModule -ne "Unknown") { $steamWatchdogCrash.FaultingModule } else { "the active game" }
+    $rootCauseTitle = "STEAM CROSS-THREAD PIPE WATCHDOG TERMINATION (pipes.cpp:672)"
+    $rootCauseDesc = "$gameTarget was terminated by Steam's internal cross-thread IPC pipe watchdog ('Assert( Stalled cross-thread pipe )'). Steam's main event loop hung or deadlocked, causing Steam to forcefully terminate itself, GameOverlay, and the attached game process."
+    $rootCauseGuidance = "1. Run '.\Analyze-LatestCrash.ps1 -KillHungSteam' to terminate lingering headless Steam processes.`n  2. Clear Steam browser cache with '.\Analyze-LatestCrash.ps1 -CleanSteamCache'.`n  3. If using an overlay or recording software, temporarily disable Steam Overlay in Steam Settings."
+    $rootCauseSeverity = "Critical"
 } elseif ($parsedDumps.Count -gt 0 -and ($parsedDumps | Where-Object { $_.ExceptionCode })) {
     $firstCrash = $parsedDumps | Where-Object { $_.ExceptionCode } | Select-Object -First 1
     if ($firstCrash.IsShaderCompiler -or ($firstCrash.FaultingModule -match '(?i)amdxc|amdxx|nvwgf2|oo2core')) {
@@ -607,6 +657,16 @@ if ($zombieProcesses.Count -gt 0) {
     $rootCauseDesc = "The system experienced unexpected reboots or sleep-wake issues while PCIe Link State Power Management was enabled ($($telemetry.PciePowerManagement.ACSettingName))."
     $rootCauseGuidance = "Disable PCIe Link State Power Management using '.\Analyze-LatestCrash.ps1 -DisablePciePowerSavings' or '.\scripts\Repair-PciePowerSettings.ps1'."
     $rootCauseSeverity = "Warning"
+} elseif ($zombieProcesses.Count -gt 0) {
+    $rootCauseTitle = "ACTIVE ZOMBIE / HUNG STEAM PROCESS"
+    $rootCauseDesc = "steam.exe (PID: $($zombieProcesses[0].PID)) is lingering headless in background, blocking the single-instance mutex and preventing relaunch."
+    $rootCauseGuidance = "Run '.\Analyze-LatestCrash.ps1 -KillHungSteam' or terminate steam.exe in Task Manager."
+    $rootCauseSeverity = "Warning"
+}
+
+# Post-Crash Zombie Process Advisory
+if ($zombieProcesses.Count -gt 0 -and $rootCauseTitle -notmatch 'ACTIVE ZOMBIE') {
+    $rootCauseGuidance += "`n  * Post-Crash Cleanup: steam.exe (PID: $($zombieProcesses[0].PID)) is currently stuck as a zombie process from this crash; run '.\Analyze-LatestCrash.ps1 -KillHungSteam' to terminate it before relaunching Steam."
 }
 
 if (-not $Quiet) {

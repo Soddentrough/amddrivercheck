@@ -24,7 +24,7 @@ def calculate_sha256(filepath: Path) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="Package DriverCheck Release")
-    parser.add_argument("--version", default="4.3.0", help="Release version tag (e.g. 4.3.0)")
+    parser.add_argument("--version", default="4.4.0", help="Release version tag (e.g. 4.4.0)")
     args = parser.parse_args()
 
     version = args.version.lstrip("v")

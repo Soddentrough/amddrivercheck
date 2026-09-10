@@ -125,6 +125,18 @@ function Export-DcHtmlReport {
             $rebDetail = if ($reb.BugcheckCode -eq 0) { "Instant Power Cut / PSU Trip / Freeze (BugcheckCode: 0 - No BSOD dump recorded)" } else { "Dirty reboot following BugCheck 0x{0:X}" -f $reb.BugcheckCode }
             $telemRows.Add("<div class='alert-card alert-warning'><strong>&#x1F50C; Kernel-Power Event 41 [$($reb.TimeCreated)]:</strong> $rebDetail</div>")
         }
+        if ($telem.NetworkDrops -and $telem.NetworkDrops.Count -gt 0) {
+            $hasTelemIssue = $true
+            foreach ($nd in ($telem.NetworkDrops | Select-Object -First 5)) {
+                $telemRows.Add("<div class='alert-card alert-critical'><strong>&#x1F310; Network Link Drop / NCSI Issue [$($nd.TimeCreated)]:</strong> $($nd.Message)</div>")
+            }
+        }
+        if ($telem.WlanFailovers -and $telem.WlanFailovers.Count -gt 0) {
+            $hasTelemIssue = $true
+            foreach ($wf in ($telem.WlanFailovers | Select-Object -First 3)) {
+                $telemRows.Add("<div class='alert-card alert-warning'><strong>&#x1F4F6; WLAN AutoConfig Failover [$($wf.TimeCreated)]:</strong> $($wf.Message)</div>")
+            }
+        }
         foreach ($us in $telem.UnexpectedShutdowns) {
             $hasTelemIssue = $true
             $telemRows.Add("<div class='alert-card alert-warning'><strong>&#x1F50C; Unexpected Shutdown (Event 6008) [$($us.TimeCreated)]:</strong> Previous system shutdown was unexpected.</div>")
@@ -218,6 +230,21 @@ function Export-DcHtmlReport {
         }
     } else {
         $driverRows.Add("<div class='empty-state'>&#x2705; No problematic third-party kernel I/O drivers (inpoutx64/WinRing0/ENE) detected.</div>")
+    }
+
+    # Build Network HTML
+    $networkRows = [System.Collections.Generic.List[string]]::new()
+    if ($hw -and $hw.NetworkAdapters -and $hw.NetworkAdapters.Count -gt 0) {
+        foreach ($net in $hw.NetworkAdapters) {
+            $statusBadge = if ($net.Status -eq "Up") { "<span class='badge-healthy'>UP</span>" } else { "<span class='badge-neutral'>$($net.Status)</span>" }
+            $intelNotice = ""
+            if ($net.IsIntel25G -and $net.PriorityVLAN -match 'Enabled') {
+                $intelNotice = "<div class='alert-card alert-warning' style='margin-top: 6px; font-size: 0.85rem;'><strong>&#x26A0; Intel 2.5G Stability Notice:</strong> Packet Priority & VLAN is enabled on $($net.Name). This is known to cause ARP probe timeouts and socket stalls. Run <code>Repair-EthernetSettings.ps1</code> to disable VLAN tagging.</div>"
+            }
+            $networkRows.Add("<div class='card-item'><div class='card-header-row'><span class='file-name'>&#x1F310; $($net.Name) - $($net.InterfaceDescription)</span>$statusBadge</div><div style='font-size: 0.9rem;'>Link Speed: <strong>$($net.LinkSpeed)</strong> | Speed/Duplex: <strong>$($net.SpeedDuplex)</strong> | VLAN/Priority: <strong>$($net.PriorityVLAN)</strong></div>$intelNotice</div>")
+        }
+    } else {
+        $networkRows.Add("<div class='empty-state'>&#x2705; Network adapters reporting normal status.</div>")
     }
 
     $fastStartupStatusStr = if ($telem -and $telem.FastStartup.FastStartupEnabled) { 'Enabled (Risk)' } else { 'Disabled (Clean)' }
@@ -361,12 +388,16 @@ function Export-DcHtmlReport {
     $parts.Add("            <strong>Plug and Play Device Health:</strong>")
     $parts.Add(($pnpRows -join "`n"))
     $parts.Add("        </div>")
+    $parts.Add("        <div style='margin-top: 12px;'>")
+    $parts.Add("            <strong>Network Adapters & Link Stability:</strong>")
+    $parts.Add(($networkRows -join "`n"))
+    $parts.Add("        </div>")
     $parts.Add("        <div class='discord-copy-box'>")
     $parts.Add("            <strong>Copy Summary for Discord / Reddit / Technical Support</strong>")
     $parts.Add("            <textarea readonly onclick='this.select()'>$discordText</textarea>")
     $parts.Add("        </div>")
     $parts.Add("        <footer>")
-    $parts.Add("            DriverCheck Diagnostic Suite v4.3.0 | Evidence-Based Crash Analysis Engine")
+    $parts.Add("            DriverCheck Diagnostic Suite v4.4.0 | Evidence-Based Crash Analysis Engine")
     $parts.Add("        </footer>")
     $parts.Add("    </div>")
     $parts.Add("</body>")

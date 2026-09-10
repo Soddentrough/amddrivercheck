@@ -120,6 +120,8 @@ function Get-DcExceptionMeaning {
         "0xE06D7363" { "STATUS_CPP_EXCEPTION (Uncaught C++ Exception)" }
         "0x00000093" { "INVALID_KERNEL_HANDLE (Driver Attempted to Use or Close an Invalid Kernel Handle)" }
         "0x00000000" { "STATUS_SUCCESS (External Watchdog Termination / Process Hang)" }
+        "ASSERTION"  { "Fatal Engine/Platform Assertion Hit" }
+        "SENTRY_FATAL" { "Sentry Native Crashpad Fatal Crash Event" }
         default      { "Unhandled Exception" }
     }
 }
@@ -151,6 +153,22 @@ function Read-DcMinidump {
         Modules         = @()
         Assertions      = @()
         IsKernelDump    = ($fileInfo.DirectoryName -match '(?i)SystemRoot|Windows\\Minidump' -or $fileInfo.Name -match '(?i)MEMORY\.DMP')
+    }
+
+    if ($fileInfo.Name -match '__sentry-event') {
+        try {
+            $sBytes = [System.IO.File]::ReadAllBytes($Path)
+            $sText = [System.Text.Encoding]::ASCII.GetString($sBytes)
+            $result.Architecture = "64-bit (x64)"
+            $result.ExceptionCode = "SENTRY_FATAL"
+            $result.ExceptionMeaning = "Sentry Native Crashpad Fatal Crash Event"
+            if ($sText -match 'app_name\?([a-zA-Z0-9_\-\.]+)') { $result.FaultingModule = $Matches[1] }
+            $asserts = [System.Collections.Generic.List[string]]::new()
+            if ($sText -match 'release\?([a-zA-Z0-9_\-\.@]+)') { $asserts.Add("Release: $($Matches[1])") }
+            if ($sText -match 'BuildKey\?([a-zA-Z0-9_\-]+)') { $asserts.Add("Build: $($Matches[1])") }
+            $result.Assertions = @($asserts)
+        } catch {}
+        return $result
     }
 
     if ($fileInfo.Name -notmatch '\.dmp$') { return $result }
@@ -267,6 +285,28 @@ function Read-DcMinidump {
             $fs.Position = $threadStream.Rva
             $result.ThreadCount = $br.ReadUInt32()
         }
+
+        # 5. Comment Stream (Type 10 = CommentStreamA, Type 11 = CommentStreamW)
+        $commentStreamA = $streams | Where-Object { $_.Type -eq 10 } | Select-Object -First 1
+        if ($commentStreamA -and $commentStreamA.Size -gt 0) {
+            $fs.Position = $commentStreamA.Rva
+            $cBytes = $br.ReadBytes([math]::Min($commentStreamA.Size, 4096))
+            $cText = [System.Text.Encoding]::ASCII.GetString($cBytes).TrimEnd([char]0, "`r", "`n")
+            if ($cText) {
+                if (-not $result.Assertions) { $result.Assertions = @() }
+                $result.Assertions += $cText
+            }
+        }
+        $commentStreamW = $streams | Where-Object { $_.Type -eq 11 } | Select-Object -First 1
+        if ($commentStreamW -and $commentStreamW.Size -gt 0) {
+            $fs.Position = $commentStreamW.Rva
+            $cBytes = $br.ReadBytes([math]::Min($commentStreamW.Size, 4096))
+            $cText = [System.Text.Encoding]::Unicode.GetString($cBytes).TrimEnd([char]0, "`r", "`n")
+            if ($cText) {
+                if (-not $result.Assertions) { $result.Assertions = @() }
+                $result.Assertions += $cText
+            }
+        }
     } catch {
         # Graceful degradation
     } finally {
@@ -274,7 +314,7 @@ function Read-DcMinidump {
         if ($fs) { $fs.Close() }
     }
 
-    # 5. Bounded, safe scan for text assertions (Max 2 MB scan)
+    # 6. Bounded, safe scan for text assertions (Max 2 MB scan)
     try {
         if ($fileInfo.Length -gt 0) {
             $scanLimit = [math]::Min($fileInfo.Length, 2MB)
@@ -289,11 +329,34 @@ function Read-DcMinidump {
                     Select-Object -ExpandProperty Value -Unique |
                     Select-Object -First 6
                 if ($matches) {
-                    $result.Assertions = @($matches)
+                    $combined = [System.Collections.Generic.List[string]]::new()
+                    if ($result.Assertions) { foreach ($a in $result.Assertions) { $combined.Add($a) } }
+                    foreach ($m in $matches) {
+                        $alreadyContained = $false
+                        foreach ($c in $combined) {
+                            if ($c.Contains($m)) { $alreadyContained = $true; break }
+                        }
+                        if (-not $alreadyContained) { $combined.Add($m) }
+                    }
+                    $result.Assertions = @($combined)
                 }
             }
         }
     } catch {}
+
+    # 7. Post-process assertions & external watchdog signatures
+    if (-not $result.ExceptionCode -and $result.Assertions.Count -gt 0) {
+        $result.ExceptionCode = "ASSERTION"
+        $result.ExceptionMeaning = "Fatal Application Assertion / Process Watchdog"
+    }
+
+    if ($result.ExceptionCode -eq "0x00000000" -and ($result.Assertions -match '(?i)cross-thread pipe|pipes\.cpp|watchdog|stall')) {
+        $result.ExceptionMeaning = "STATUS_SUCCESS (Steam Watchdog Stalled Cross-Thread Pipe Kill)"
+    }
+
+    if ($result.FaultingModule -eq "Unknown" -and $fileInfo.Name -match '^crash_([a-zA-Z0-9_\-\.]+?)\.exe') {
+        $result.FaultingModule = "$($Matches[1]).exe"
+    }
 
     return $result
 }

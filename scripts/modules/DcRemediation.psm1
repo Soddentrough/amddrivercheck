@@ -148,8 +148,8 @@ function Repair-DcEthernetSettings {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [Parameter(Mandatory = $false)]
-        [ValidateSet("2.5G", "1.0G", "Auto")]
-        [string]$Speed = "2.5G"
+        [ValidateSet("Current", "2.5G", "1.0G", "Auto")]
+        [string]$Speed = "Current"
     )
 
     if (-not (Test-DcIsAdmin)) {
@@ -170,15 +170,28 @@ function Repair-DcEthernetSettings {
         "2.5G" { "2.5 Gbps Full Duplex" }
         "1.0G" { "1.0 Gbps Full Duplex" }
         "Auto" { "Auto Negotiation" }
+        default { $null }
     }
 
-    if ($PSCmdlet.ShouldProcess($adapter.Name, "Set Speed/Duplex to '$speedValue' and disable Packet Priority/VLAN")) {
-        try {
-            Write-Host "Applying Speed & Duplex ('$speedValue')..." -NoNewline -ForegroundColor White
-            Set-NetAdapterAdvancedProperty -Name $adapter.Name -DisplayName "Speed & Duplex" -DisplayValue $speedValue -ErrorAction Stop
-            Write-Host " [ OK ]" -ForegroundColor Green
-        } catch {
-            Write-Host " [NOTICE: $($_.Exception.Message)]" -ForegroundColor Yellow
+    $actionDesc = if ($speedValue) {
+        "Set Speed/Duplex to '$speedValue' and disable Packet Priority/VLAN"
+    } else {
+        "Disable Packet Priority/VLAN (preserving current Speed & Duplex)"
+    }
+
+    if ($PSCmdlet.ShouldProcess($adapter.Name, $actionDesc)) {
+        if ($speedValue) {
+            try {
+                Write-Host "Applying Speed & Duplex ('$speedValue')..." -NoNewline -ForegroundColor White
+                Set-NetAdapterAdvancedProperty -Name $adapter.Name -DisplayName "Speed & Duplex" -DisplayValue $speedValue -ErrorAction Stop
+                Write-Host " [ OK ]" -ForegroundColor Green
+            } catch {
+                Write-Host " [NOTICE: $($_.Exception.Message)]" -ForegroundColor Yellow
+            }
+        } else {
+            $currentSpeed = Get-NetAdapterAdvancedProperty -Name $adapter.Name -DisplayName "Speed & Duplex" -ErrorAction SilentlyContinue
+            $curVal = if ($currentSpeed) { $currentSpeed.DisplayValue } else { "Unknown" }
+            Write-Host "Preserving current Speed & Duplex ('$curVal')." -ForegroundColor DarkGray
         }
 
         try {
