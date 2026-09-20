@@ -206,7 +206,7 @@ function Get-DcDisplayDiagnostics {
 
         # Parse Detailed Timing Descriptors (Base block: 54, 72, 90, 108)
         $dtdOffsets = [System.Collections.Generic.List[int]]::new()
-        $dtdOffsets.AddRange(@(54, 72, 90, 108))
+        foreach ($offset in 54, 72, 90, 108) { $dtdOffsets.Add($offset) }
 
         # Check Extension Blocks (CEA-861 / DisplayID)
         $numExtensions = [int]$edidBytes[126]
