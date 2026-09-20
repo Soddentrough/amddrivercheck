@@ -5,13 +5,13 @@
     Packages all runtime files, modules, helper scripts, launchers, and documentation
     into a clean, distributable portable ZIP file with SHA256 checksums.
 .PARAMETER Version
-    Release version tag (default: "4.0.0").
+    Release version tag (default: "4.2.0").
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
-    [string]$Version = "4.1.0"
+    [string]$Version = "4.2.0"
 )
 
 $OutputEncoding = [System.Text.Encoding]::UTF8

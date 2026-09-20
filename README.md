@@ -27,9 +27,11 @@ It strictly adheres to a **4-Tier Diagnostic Hierarchy**, prioritizing binary cr
      * Unexpected shutdowns (Event `6008`) and dirty reboots / instant power trips (Kernel-Power Event `41`).
      * Driver load failures (Kernel-PnP Event `219`) and storage/NVMe timeouts (`stornvme`, `disk`).
    * Audits Windows **Fast Startup** configuration (`HiberbootEnabled`), which frequently causes recurring `0x9F` driver power state crashes.
+   * Audits **PCIe Link State Power Management (ASPM)** settings across active power plans (`SUB_PCIEXPRESS`), identifying low-power bus transition latency spikes that trigger GPU driver timeouts (TDR 4101 / 0x141) during idle or video playback.
 
 4. **Tier 4: System Hardware & Configuration (Contextual Audit)**
    * Audits **Plug and Play (PnP) Hardware Health** across all system devices for missing drivers (Code 28 `CM_PROB_FAILED_INSTALL`), failed devices (Code 43), and uninitialized chipset devices.
+   * Audits **Rogue & Legacy Kernel I/O Drivers** (`inpoutx64.sys`, `WinRing0x64.sys`, `ene.sys`, `AsrOmgDrv.sys`, `gdrv.sys`) left by RGB or fan tools, diagnosing collisions with anti-cheat software (Easy Anti-Cheat, BattlEye, Vanguard) and Windows Memory Integrity that cause `INVALID_KERNEL_HANDLE (0x93)` BSODs or video freeze lockups.
    * Audits active graphics hardware (`Win32_VideoController`), detects **Dual-GPU driver version conflicts** (e.g. AMD Ryzen integrated graphics vs. discrete Radeon graphics), and checks Windows Update driver overwrite policies (`SearchOrderConfig`, `ExcludeWUDriversInQualityUpdate`).
    * Audits **Connected Displays & EDID Detailed Timings** via WMI and Registry, detecting aggressive factory overclocks (e.g. 1440p 165Hz with bloated vertical blanking >1500 lines or pixel clock >585 MHz) saturating DisplayPort 1.2a budget scalers and causing periodic 2-3s blackouts without generating Windows TDRs or crash dumps.
    * Audits graphics subsystem configuration (TdrDelay, TdrLevel, Hardware-Accelerated GPU Scheduling).
@@ -44,7 +46,7 @@ Simply double-click **`Run-Diagnostics.bat`** in the project folder. It launches
 
 ```text
 ========================================================================
-  AUTOMATED GAME & SYSTEM CRASH DIAGNOSTIC SUITE (v4.1.0)
+  AUTOMATED GAME & SYSTEM CRASH DIAGNOSTIC SUITE (v4.2.0)
   Evidence-Based Engine (Crash Dumps, Logs, Telemetry, Hardware)
 ========================================================================
 
@@ -105,6 +107,8 @@ Each tool in the `scripts/` directory can also be executed individually as an is
 | **`Clean-GameConfig.ps1`** | Purges stale game configs and shader caches (**creates automatic `.bak` backups**). |
 | **`Clean-SteamCache.ps1`** | Purges the Steam CEF HTML browser cache (`%LOCALAPPDATA%\Steam\htmlcache`). |
 | **`Repair-EthernetSettings.ps1`** | Applies stability settings to Intel/Realtek Ethernet adapters (disables VLAN/Priority). |
+| **`Repair-PciePowerSettings.ps1`** | Disables PCIe Link State Power Management (ASPM) on the active power scheme to eliminate TDRs. |
+| **`Disable-RogueKernelDrivers.ps1`** | Scans for and disables problematic kernel I/O drivers (`inpoutx64`, `winring0`, etc.). |
 
 ---
 
@@ -113,6 +117,8 @@ Each tool in the `scripts/` directory can also be executed individually as an is
 Remediation features are strictly separated from read-only scans:
 * **Safe Configuration Cleaner:** Before deleting any `.cfg` or `.local` files, `Clean-GameConfig.ps1` creates an exact `.bak` copy in the same directory, ensuring custom keybinds and sensitivities are never lost.
 * **Downgrade Protection:** `Get-GPUDriverDiagnostics.ps1 -ApplyFix` sets registry policies (`SearchOrderConfig = 0`, `ExcludeWUDriversInQualityUpdate = 1`) to permanently prevent Windows Update from silently replacing your official graphics drivers with older OEM builds.
+* **PCIe Power Stability:** `Repair-PciePowerSettings.ps1` runs `powercfg` to disable Link State Power Management on AC and DC for `SCHEME_CURRENT`, eliminating bus wake latency spikes that cause TDRs.
+* **Kernel Driver Neutralization:** `Disable-RogueKernelDrivers.ps1` safely disables legacy RGB/fan kernel services via `sc config <name> start= disabled` and terminates running instances without deleting files, immediately resolving anti-cheat conflicts and BugCheck 0x93.
 
 ---
 

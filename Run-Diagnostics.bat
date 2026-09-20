@@ -9,7 +9,7 @@ PowerShell.exe -NoProfile -ExecutionPolicy Bypass -Command "Get-ChildItem -Path 
 :menu
 cls
 echo ========================================================================
-echo   AUTOMATED GAME ^& SYSTEM CRASH DIAGNOSTIC SUITE (v4.1.0)
+echo   AUTOMATED GAME ^& SYSTEM CRASH DIAGNOSTIC SUITE (v4.2.0)
 echo   Evidence-Based Engine (Crash Dumps, Logs, Telemetry, Hardware)
 echo ========================================================================
 echo.
@@ -105,16 +105,20 @@ echo   [2] Clean Stale Game Configs ^& Shader Caches (with .bak backup)
 echo   [3] Purge Steam CEF Browser HTML Cache
 echo   [4] Terminate Hung / Zombie Steam Processes
 echo   [5] Optimize Ethernet Adapter Stability (Requires Admin)
+echo   [6] Disable PCIe Link State Power Management (Fix GPU Timeouts ^& Sleep Crashes)
+echo   [7] Scan ^& Disable Rogue Kernel I/O Drivers (Fix inpoutx64 / 0x93 BSODs)
 echo   [0] Return to Main Menu
 echo.
 set "mchoice="
-set /p mchoice="Select an option [0-5]: "
+set /p mchoice="Select an option [0-7]: "
 if defined mchoice set "mchoice=%mchoice: =%"
 if "%mchoice%"=="1" ( PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Clean-ShaderCache.ps1" & goto finish )
 if "%mchoice%"=="2" ( PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Clean-GameConfig.ps1" & goto finish )
 if "%mchoice%"=="3" ( PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Clean-SteamCache.ps1" & goto finish )
 if "%mchoice%"=="4" ( PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Analyze-LatestCrash.ps1" -KillHungSteam & goto finish )
 if "%mchoice%"=="5" ( PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Repair-EthernetSettings.ps1" & goto finish )
+if "%mchoice%"=="6" ( PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Repair-PciePowerSettings.ps1" & goto finish )
+if "%mchoice%"=="7" ( PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Disable-RogueKernelDrivers.ps1" & goto finish )
 if "%mchoice%"=="0" goto menu
 goto menu
 

@@ -17,6 +17,9 @@ param(
 $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
+$modulesDir = Join-Path $PSScriptRoot "modules"
+Import-Module (Join-Path $modulesDir "DcSystemTelemetry.psm1") -Force -ErrorAction SilentlyContinue
+
 Write-Host ""
 Write-Host "========================================================================" -ForegroundColor Magenta
 Write-Host "  POWER, FAST STARTUP & SLEEP TRANSITION DIAGNOSTICS" -ForegroundColor Magenta
@@ -34,6 +37,17 @@ if ($fastStartup) {
     Write-Host "      If hardware drivers fail power IRPs, this causes recurring 0x9F crash loops." -ForegroundColor DarkYellow
 } else {
     Write-Host "  [ OK ] Fast Startup (HiberbootEnabled) : DISABLED (0 - Clean Cold Boot)" -ForegroundColor Green
+}
+
+$pciePower = Get-DcPciePowerManagementStatus
+if ($pciePower.IsEnabled) {
+    Write-Host "  [!] PCIe Link State Power Management : ENABLED ($($pciePower.ACSettingName))" -ForegroundColor Red
+    Write-Host "      Power Plan: $($pciePower.SchemeName)" -ForegroundColor DarkGray
+    Write-Host "      Hazard: Puts PCIe bus into low-power L0s/L1 states during idle/video." -ForegroundColor Yellow
+    Write-Host "      Modern GPUs (PCIe 4.0/5.0) can timeout (TDR 4101) or crash waking from sleep." -ForegroundColor Yellow
+    Write-Host "      Remediation: Run '.\scripts\Repair-PciePowerSettings.ps1' to set Link State to OFF." -ForegroundColor Cyan
+} else {
+    Write-Host "  [ OK ] PCIe Link State Power Management : OFF (Continuous high-speed link clock)" -ForegroundColor Green
 }
 
 # 2. Sleep / Wake Events & Power Transitions

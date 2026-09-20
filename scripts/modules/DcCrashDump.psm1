@@ -118,6 +118,7 @@ function Get-DcExceptionMeaning {
         "0x887A0001" { "DXGI_ERROR_INVALID_CALL (Graphics API Misuse by Engine)" }
         "0x887A002B" { "DXGI_ERROR_DRIVER_INTERNAL_ERROR (Display Driver Internal Bug)" }
         "0xE06D7363" { "STATUS_CPP_EXCEPTION (Uncaught C++ Exception)" }
+        "0x00000093" { "INVALID_KERNEL_HANDLE (Driver Attempted to Use or Close an Invalid Kernel Handle)" }
         "0x00000000" { "STATUS_SUCCESS (External Watchdog Termination / Process Hang)" }
         default      { "Unhandled Exception" }
     }
@@ -145,6 +146,7 @@ function Read-DcMinidump {
         FaultingIP      = $null
         IsGraphicsCrash = $false
         IsShaderCompiler= $false
+        IsRogueKernelDriver = $false
         ThreadCount     = 0
         Modules         = @()
         Assertions      = @()
@@ -253,7 +255,9 @@ function Read-DcMinidump {
 
             $isShaderCompiler = ($result.FaultingModule -match '(?i)amdxc|amdxx|nvwgf2|oo2core')
             $isGfxDriver = ($result.FaultingModule -match '(?i)amdkmdag|nvlddmkm|igdkmd|dxgi|d3d12|d3d11|vulkan|atidxx')
+            $isRogueKernel = ($result.FaultingModule -match '(?i)inpoutx64|inpout32|winring0|ene\.sys|asromgdrv|asrdrv|gdrv' -or $result.ExceptionCode -eq '0x00000093')
             $result.IsShaderCompiler = $isShaderCompiler
+            $result.IsRogueKernelDriver = $isRogueKernel
             $result.IsGraphicsCrash = ($isShaderCompiler -or $isGfxDriver -or ($result.ExceptionCode -match '0x887A000[156]'))
         }
 
