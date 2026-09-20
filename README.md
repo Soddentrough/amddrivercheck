@@ -51,6 +51,24 @@ PowerShell.exe -ExecutionPolicy Bypass -File .\Analyze-LatestCrash.ps1 -ExportJs
 
 ---
 
+## 🔍 What `drivercheck` Checks & Reports On
+
+`drivercheck` runs a full audit of your gaming software stack, hardware telemetry, and Windows system policies:
+
+| Diagnostic Domain | Exact Checks & What It Reports On |
+| :--- | :--- |
+| **Windows Driver Overwrites** | • Audits Windows Update driver searching policy (`SearchOrderConfig`).<br>• Audits Windows Quality Update driver exclusion policies (`ExcludeWUDriversInQualityUpdate`) to identify if Windows Update is silently replacing official GPU drivers with outdated OEM builds. |
+| **Mismatched & Desynced Drivers** | • Detects **Dual-GPU driver version mismatch** between discrete AMD Radeon GPUs and integrated CPU graphics (primary cause of `atieclxx.exe` crashes and `0x9F` sleep hangs).<br>• Detects generic display adapter fallbacks (Microsoft Basic Display Adapter).<br>• Identifies AMD Software installation type (Driver Only vs Adrenalin Full GUI) and active AMD Crash Defender services. |
+| **Recent Windows Updates & Hotfixes** | • Queries Windows Update Agent session history for recently installed Windows Quality Updates, Defender updates, and driver packages.<br>• Audits installed Windows Hotfixes (`Win32_QuickFixEngineering`) to correlate new crashes with recent system changes. |
+| **Windows Event Logs (Crashes & Timeouts)** | • **GPU Driver Resets**: Display driver timeouts (Event `4101` / `0x141` / `VIDEO_TDR_ERROR`).<br>• **PCIe Bus & Riser Errors**: `WHEA-Logger` PCIe Root Port link communication faults (Event `17`).<br>• **Kernel BugChecks**: System BSOD crash codes (`WER-SystemErrorReporting` Event `1001`).<br>• **Unexpected Shutdowns & Power Cuts**: Kernel-Power Event `41` (transient PSU trips/hard freezes) and Event `6008`.<br>• **Virtual Memory Exhaustion**: Windows commit limit / pagefile exhaustion (`Resource-Exhaustion-Detector` Event `2004`).<br>• **Network Drops**: NCSI internet capability drops (Event `4042`), Intel 2.5GbE ARP probe failures, and Wi-Fi failovers. |
+| **Application & Binary Crash Dumps** | • Deep binary minidump parser (`MDMP`) across Windows Kernel BSODs (`C:\Windows\Minidump`, `MEMORY.DMP`), User-Mode WER dumps (`%LOCALAPPDATA%\CrashDumps`), Steam dumps (`Steam\dumps`), Unreal Engine (`Saved\Crashes`), and Unity.<br>• Extracts exact Exception Codes (`0xC0000005`, `0x887A0006`, `0xC0000409`, `0x00000000`), faulting module addresses, and in-binary assertion strings.<br>• Detects zombie/deadlocked background processes (e.g. headless `steam.exe` blocking relaunch mutexes). |
+| **Motherboard, BIOS & Chipset Drivers** | • Audits motherboard manufacturer, product model, and BIOS release date (flags firmware >3 years old lacking PCIe/AGESA stability fixes).<br>• Audits official AMD Chipset Software / Intel Chipset Device Software installations.<br>• Verifies core platform controller health (AMD GPIO, I2C, PCI Device Driver, PSP, 3D V-Cache / Intel MEI).<br>• Scans Plug and Play (PnP) devices for missing drivers (Code 28) and device failures (Code 43). |
+| **Display EDID Timings & Scaler Saturation** | • Parses binary EDID Detailed Timing Descriptors (DTDs) across HDMI and DisplayPort.<br>• Calculates pixel clocks (MHz) and vertical blanking lines to flag aggressive factory overclocks (e.g. 1440p 165Hz with vertical blanking >1500 lines) that saturate DP 1.2a scalers and cause periodic 2-3s blackouts without generating TDRs. |
+| **Rogue Kernel I/O Driver Audit** | • Scans for legacy direct port I/O drivers (`inpoutx64.sys`, `WinRing0x64.sys`, `ene.sys`, `AsrOmgDrv.sys`, `gdrv.sys`) left behind by RGB or hardware monitoring software.<br>• Diagnoses collisions with anti-cheat engines (Easy Anti-Cheat, BattlEye, Vanguard) and Windows Memory Integrity that cause `INVALID_KERNEL_HANDLE (0x93)` BSODs or video freeze lockups. |
+| **Power & PCIe ASPM Link States** | • Audits Windows **Fast Startup** configuration (`HiberbootEnabled`), which frequently triggers recurring `0x9F` sleep/wake crashes.<br>• Audits **PCIe Link State Power Management (ASPM)** across active power plans, identifying low-power bus states that trigger GPU driver timeouts (TDR 4101) during idle or video load. |
+
+---
+
 ## 🎯 What Symptoms Does This Diagnose?
 
 | Symptom | Detected Root Causes & Diagnostic Check |
