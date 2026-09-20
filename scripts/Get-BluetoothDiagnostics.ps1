@@ -42,7 +42,8 @@ if ($radios) {
 Write-Host "`nGaming Controllers & Input Devices:" -ForegroundColor Cyan
 if ($controllers) {
     foreach ($c in $controllers) {
-        Write-Host "  * $($c.FriendlyName) (Status: $($c.Status))" -ForegroundColor White
+        $cName = $c.FriendlyName -replace "^.+?'s\s+", "" -replace "^.+?の\s*", ""
+        Write-Host "  * $cName (Status: $($c.Status))" -ForegroundColor White
     }
 } else {
     Write-Host "  No Bluetooth controllers currently connected." -ForegroundColor DarkGray
@@ -51,7 +52,8 @@ if ($controllers) {
 Write-Host "`nAudio Devices & Headsets:" -ForegroundColor Cyan
 if ($audio) {
     foreach ($a in $audio) {
-        Write-Host "  * $($a.FriendlyName) (Status: $($a.Status))" -ForegroundColor White
+        $aName = $a.FriendlyName -replace "^.+?'s\s+", "" -replace "^.+?の\s*", ""
+        Write-Host "  * $aName (Status: $($a.Status))" -ForegroundColor White
     }
 } else {
     Write-Host "  No Bluetooth audio devices currently connected." -ForegroundColor DarkGray

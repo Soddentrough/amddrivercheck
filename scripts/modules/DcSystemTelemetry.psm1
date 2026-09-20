@@ -148,12 +148,28 @@ function Get-DcGraphicsDriverSettings {
         default { "Default / Not Configured" }
     }
 
+    $ulpsEnabled = $false
+    try {
+        $classKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+        if (Test-Path $classKey) {
+            $subkeys = Get-ChildItem -Path $classKey -ErrorAction SilentlyContinue
+            foreach ($sk in $subkeys) {
+                $p = Get-ItemProperty -Path $sk.PSPath -ErrorAction SilentlyContinue
+                if ($p -and ($p.DriverDesc -match '(?i)Radeon|AMD' -or $null -ne $p.EnableUlps) -and $p.EnableUlps -eq 1) {
+                    $ulpsEnabled = $true
+                    break
+                }
+            }
+        }
+    } catch {}
+
     return [PSCustomObject]@{
-        TdrDelay    = $tdrDelay
-        TdrLevel    = $tdrLevel
-        TdrDdiDelay = $tdrDdiDelay
-        HwSchMode   = $hwSchMode
-        HAGSStatus  = $hagsStatus
+        TdrDelay      = $tdrDelay
+        TdrLevel      = $tdrLevel
+        TdrDdiDelay   = $tdrDdiDelay
+        HwSchMode     = $hwSchMode
+        HAGSStatus    = $hagsStatus
+        IsUlpsEnabled = $ulpsEnabled
     }
 }
 
@@ -182,6 +198,7 @@ function Get-DcSystemTelemetry {
         AppHangs               = [System.Collections.Generic.List[PSCustomObject]]::new()
         NetworkDrops           = [System.Collections.Generic.List[PSCustomObject]]::new()
         WlanFailovers          = [System.Collections.Generic.List[PSCustomObject]]::new()
+        SleepTransitions       = [System.Collections.Generic.List[PSCustomObject]]::new()
     }
 
     # Query System Events within time window
@@ -189,6 +206,22 @@ function Get-DcSystemTelemetry {
 
     if ($sysEvents) {
         foreach ($e in $sysEvents) {
+            # Sleep & Wake Transitions (Power-Troubleshooter Event 1)
+            if ($e.Id -eq 1 -and $e.ProviderName -match 'Power-Troubleshooter') {
+                $wakeSource = "Unknown"
+                if ($e.Message -match 'Wake Source:\s*([^\r\n]+)') { $wakeSource = $Matches[1].Trim() }
+                $sleepTime = $null
+                if ($e.Message -match 'Sleep Time:\s*([^\r\n]+)') {
+                    try { $sleepTime = [datetime]::Parse($Matches[1].Trim()) } catch {}
+                }
+                $results.SleepTransitions.Add([PSCustomObject]@{
+                    WakeTime   = $e.TimeCreated
+                    SleepTime  = $sleepTime
+                    WakeSource = $wakeSource
+                    Message    = "System resumed from sleep at $($e.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')) (Wake Source: $wakeSource)."
+                })
+            }
+
             # 1. WHEA Hardware Errors
             if ($e.ProviderName -match 'WHEA-Logger') {
                 $isPcie = ($e.Id -eq 17 -or $e.Message -match '(?i)PCI Express|PCIe')
@@ -205,12 +238,28 @@ function Get-DcSystemTelemetry {
                 }
             }
 
+            # Physical Ethernet Link Drops (Intel I225-V / Realtek / Marvell Event 27 / 32)
+            if ($e.Id -in @(27, 32) -and ($e.ProviderName -match '(?i)e2f|e1d|rt64|rt68|tcpip' -or $e.Message -match '(?i)Network link is disconnected|link has been disconnected')) {
+                $results.NetworkDrops.Add([PSCustomObject]@{
+                    TimeCreated   = $e.TimeCreated
+                    Id            = $e.Id
+                    Provider      = $e.ProviderName
+                    InterfaceGuid = ""
+                    InterfaceName = $e.ProviderName
+                    Reason        = "Hardware Link Disconnect"
+                    Message       = "Ethernet link dropped by network driver ($($e.ProviderName)): $($e.Message.Trim())"
+                })
+            }
+
             # 2. GPU Driver TDR Resets (Event 4101 or display driver stop)
             if ($e.Id -eq 4101 -or ($e.ProviderName -match 'Display|amdkmdag|nvlddmkm|igfx' -and $e.Message -match 'stopped responding')) {
                 $results.TdrEvents.Add([PSCustomObject]@{
                     TimeCreated  = $e.TimeCreated
                     Id           = $e.Id
                     Provider     = $e.ProviderName
+                    Code         = "4101"
+                    DumpPath     = ""
+                    Meaning      = "Display Driver Stopped Responding and Successfully Recovered (Event 4101)"
                     Message      = $e.Message.Trim()
                 })
             }
@@ -338,6 +387,59 @@ function Get-DcSystemTelemetry {
         }
     }
 
+    # Query Application Events for LiveKernelEvent TDRs & AMD Watchdog Hangs (Event 1001)
+    $werLiveEvents = Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='Windows Error Reporting'; Id=1001; StartTime=$Cutoff} -ErrorAction SilentlyContinue |
+        Where-Object { $_.Message -match 'LiveKernelEvent' }
+    if ($werLiveEvents) {
+        foreach ($we in $werLiveEvents) {
+            $p1 = ""
+            if ($we.Message -match 'P1:\s*([a-fA-F0-9]+)') { $p1 = $Matches[1].ToLower() }
+
+            if ($p1 -in @('141', '117', 'a1000001', 'a2000002', '1b8', '1a8')) {
+                $attachedFile = ""
+                $dumpTime = $we.TimeCreated
+                if ($we.Message -match 'Attached files:\s*([^\r\n]+)') {
+                    $attachedFile = $Matches[1].Trim()
+                    if ($env:USERPROFILE) {
+                        $attachedFile = $attachedFile.Replace($env:USERPROFILE, "%USERPROFILE%")
+                    }
+                    $attachedFile = $attachedFile -replace '(?i)C:\\Users\\[^\\]+', '%USERPROFILE%'
+                    if ($attachedFile -match '(?<year>\d{4})(?<month>\d{2})(?<day>\d{2})-(?<hour>\d{2})(?<min>\d{2})') {
+                        try {
+                            $dumpTime = [datetime]::new(
+                                [int]$Matches['year'], [int]$Matches['month'], [int]$Matches['day'],
+                                [int]$Matches['hour'], [int]$Matches['min'], 0
+                            )
+                        } catch {}
+                    }
+                }
+
+                if ($dumpTime -ge $Cutoff) {
+                    $meaning = switch ($p1) {
+                        '141'      { "LiveKernelEvent 0x141 (VIDEO_ENGINE_TDR_TIMEOUT - GPU Engine Hung & Recovered)" }
+                        '117'      { "LiveKernelEvent 0x117 (VIDEO_TDR_TIMEOUT_DETECTED - Display Driver Failed to Respond)" }
+                        'a1000001' { "LiveKernelEvent 0xA1000001 (AMD_WATCHDOG - AMD Driver Hardware Hang & Watchdog Reset)" }
+                        'a2000002' { "LiveKernelEvent 0xA2000002 (AMD_REPORT_UM - AMD User-Mode Driver Recovery)" }
+                        default    { "LiveKernelEvent 0x$p1 (GPU Watchdog Live Dump)" }
+                    }
+
+                    $existing = @($results.TdrEvents | Where-Object { [math]::Abs(($_.TimeCreated - $dumpTime).TotalSeconds) -lt 10 -and $_.Code -eq $p1 })
+                    if ($existing.Count -eq 0) {
+                        $results.TdrEvents.Add([PSCustomObject]@{
+                            TimeCreated  = $dumpTime
+                            Id           = 1001
+                            Provider     = "Windows Error Reporting (LiveKernelEvent)"
+                            Code         = $p1
+                            DumpPath     = $attachedFile
+                            Meaning      = $meaning
+                            Message      = "$meaning [Dump: $attachedFile]"
+                        })
+                    }
+                }
+            }
+        }
+    }
+
     # Cache network adapters for GUID resolution
     $adaptersByGuid = @{}
     try {
@@ -374,19 +476,21 @@ function Get-DcSystemTelemetry {
         }
     }
 
-    # Query WLAN AutoConfig Failovers / Reconnects
+    # Query WLAN AutoConfig Failovers / Reconnects (Privacy-Preserving: Redact Raw SSID)
     $wlanEvents = Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-WLAN-AutoConfig/Operational'; StartTime=$Cutoff} -ErrorAction SilentlyContinue |
         Where-Object { $_.Id -in @(8000, 11000) }
     if ($wlanEvents) {
         foreach ($we in ($wlanEvents | Select-Object -First 10)) {
             $ssid = "Wi-Fi"
             if ($we.Message -match 'SSID:\s*([^\r\n]+)') { $ssid = $Matches[1].Trim() }
+            # Redact personal SSID to protect physical location privacy
+            $maskedSsid = if ($ssid -and $ssid -ne "Wi-Fi") { "[Redacted Wi-Fi Network]" } else { "Wi-Fi" }
             $results.WlanFailovers.Add([PSCustomObject]@{
                 TimeCreated = $we.TimeCreated
                 Id          = $we.Id
                 Provider    = "WLAN-AutoConfig"
-                SSID        = $ssid
-                Message     = "Wireless failover association initiated for SSID '$ssid'."
+                SSID        = $maskedSsid
+                Message     = "Wireless failover association initiated ($maskedSsid)."
             })
         }
     }

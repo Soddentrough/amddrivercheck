@@ -137,6 +137,11 @@ function Export-DcHtmlReport {
                 $telemRows.Add("<div class='alert-card alert-warning'><strong>&#x1F4F6; WLAN AutoConfig Failover [$($wf.TimeCreated)]:</strong> $($wf.Message)</div>")
             }
         }
+        if ($telem.SleepTransitions -and $telem.SleepTransitions.Count -gt 0) {
+            foreach ($st in ($telem.SleepTransitions | Select-Object -First 3)) {
+                $telemRows.Add("<div class='alert-card alert-warning'><strong>&#x1F319; Sleep/Wake Transition [$($st.WakeTime)]:</strong> $($st.Message)</div>")
+            }
+        }
         foreach ($us in $telem.UnexpectedShutdowns) {
             $hasTelemIssue = $true
             $telemRows.Add("<div class='alert-card alert-warning'><strong>&#x1F50C; Unexpected Shutdown (Event 6008) [$($us.TimeCreated)]:</strong> Previous system shutdown was unexpected.</div>")
@@ -270,6 +275,9 @@ function Export-DcHtmlReport {
         if ($activeKd.Count -gt 0) { ($activeKd.FileName -join ', ') + " [HAZARD: Auto-Start]" } else { "None Active (Clean)" }
     } else { 'None (Clean)' }
 
+    $ulpsStr = if ($hw -and $hw.IsUlpsEnabled) { "Enabled (Power Saving Active)" } else { "Disabled" }
+    $tdrDelayStr = if ($telem -and $telem.GraphicsDriverSettings -and $telem.GraphicsDriverSettings.TdrDelay) { "$($telem.GraphicsDriverSettings.TdrDelay)s" } else { "2s (Windows Default)" }
+
     $discordText = "=== DriverCheck Diagnostic Summary ===`n" +
         "Status:      $($ReportData.RootCauseTitle)`n" +
         "Severity:    $($ReportData.RootCauseSeverity)`n" +
@@ -282,6 +290,8 @@ function Export-DcHtmlReport {
         "GPUs:        $gpuNamesStr`n" +
         "Displays:    $dispSummaryStr`n" +
         "PCIe ASPM:   $pcieAspmStr`n" +
+        "ULPS (Power): $ulpsStr`n" +
+        "TDR Delay:   $tdrDelayStr`n" +
         "Fast Startup: $fastStartupStatusStr`n" +
         "Kernel Drivers: $rogueDriversStr`n" +
         "PnP Issues:  $pnpCountStr`n" +
@@ -404,6 +414,14 @@ function Export-DcHtmlReport {
     $parts.Add("</html>")
 
     $fullHtml = $parts -join "`r`n"
+
+    # Global Privacy Pass: Redact user directory paths and SteamID identifiers
+    if ($env:USERPROFILE) {
+        $fullHtml = $fullHtml.Replace($env:USERPROFILE, "%USERPROFILE%")
+    }
+    $fullHtml = $fullHtml -replace '(?i)C:\\Users\\[^\\]+', '%USERPROFILE%'
+    $fullHtml = $fullHtml -replace '\[U:\d+:\d+\]', '[U:1:REDACTED]'
+
     [System.IO.File]::WriteAllText($OutputPath, $fullHtml, [System.Text.Encoding]::UTF8)
     return $OutputPath
 }
@@ -431,14 +449,22 @@ function Export-DcSupportBundle {
         $htmlPath = Join-Path $tempDir "CrashReport.html"
         Export-DcHtmlReport -ReportData $ReportData -OutputPath $htmlPath | Out-Null
 
-        # 2. Copy relevant small logs if present
+        # 2. Copy sanitized small logs if present
         $logsDir = Join-Path $tempDir "Logs"
         New-Item -Path $logsDir -ItemType Directory -Force | Out-Null
 
         foreach ($el in $ReportData.EngineLogs) {
             if (Test-Path $el.FullName) {
                 $dest = Join-Path $logsDir "$($el.Engine)_$($el.LogName)"
-                Get-Content $el.FullName -Tail 500 | Set-Content -Path $dest -Encoding UTF8
+                $tailLines = Get-Content $el.FullName -Tail 500 -ErrorAction SilentlyContinue
+                if ($tailLines) {
+                    $sanitized = $tailLines | ForEach-Object {
+                        $s = $_ -replace '\[U:\d+:\d+\]', '[U:1:REDACTED]'
+                        if ($env:USERPROFILE) { $s = $s.Replace($env:USERPROFILE, "%USERPROFILE%") }
+                        $s -replace '(?i)C:\\Users\\[^\\]+', '%USERPROFILE%'
+                    }
+                    Set-Content -Path $dest -Value $sanitized -Encoding UTF8
+                }
             }
         }
 

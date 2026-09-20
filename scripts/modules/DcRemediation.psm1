@@ -16,7 +16,7 @@ function Clear-DcGameConfig {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [Parameter(Mandatory = $false)]
-        [ValidateSet("TheGreatCircle", "DOOMEternal", "DOOMTheDarkAges", "All")]
+        [ValidateSet("TheGreatCircle", "DOOMEternal", "DOOMTheDarkAges", "CrimsonDesert", "All")]
         [string]$Game = "All",
 
         [Parameter(Mandatory = $false)]
@@ -25,6 +25,7 @@ function Clear-DcGameConfig {
 
     $targets = [System.Collections.Generic.List[string]]::new()
     $savedGames = Join-Path $env:USERPROFILE "Saved Games"
+    $localApp = $env:LOCALAPPDATA
 
     if ($Game -in @("TheGreatCircle", "All")) {
         $targets.Add((Join-Path $savedGames "MachineGames\TheGreatCircle\base"))
@@ -60,6 +61,62 @@ function Clear-DcGameConfig {
                 }
             } else {
                 Write-Host "  No stale config files found in directory." -ForegroundColor DarkGray
+            }
+        }
+    }
+
+    # Special handling for Crimson Desert (Pearl Abyss / BlackSpace Engine)
+    if ($Game -in @("CrimsonDesert", "All")) {
+        $paDir = Join-Path $localApp "Pearl Abyss"
+        $dumpCacheDir = Join-Path $paDir "DumpCache"
+        $tempDir = Join-Path $paDir "temp"
+        $cdSaveDir = Join-Path $paDir "CD\save"
+
+        if (Test-Path $dumpCacheDir) {
+            Write-Host "Inspecting Pearl Abyss DumpCache & Crash Locks: $dumpCacheDir" -ForegroundColor Yellow
+            $dumpItems = Get-ChildItem -Path $dumpCacheDir -Include "*.lock", "*.run", "*.dat", "last_crash", "metadata" -Recurse -ErrorAction SilentlyContinue
+            foreach ($item in $dumpItems) {
+                if ($PSCmdlet.ShouldProcess($item.FullName, "Purge Crash Lock / Dump Item")) {
+                    try {
+                        Remove-Item -Path $item.FullName -Recurse -Force -ErrorAction Stop
+                        Write-Host "  [REMOVED] $($item.Name)" -ForegroundColor Green
+                        $cleanedCount++
+                    } catch {
+                        Write-Host "  [NOTICE] Could not remove $($item.Name): $($_.Exception.Message)" -ForegroundColor DarkGray
+                    }
+                }
+            }
+        }
+
+        if (Test-Path $tempDir) {
+            Write-Host "Inspecting Pearl Abyss Temp: $tempDir" -ForegroundColor Yellow
+            $tempFiles = Get-ChildItem -Path $tempDir -File -ErrorAction SilentlyContinue
+            foreach ($tf in $tempFiles) {
+                if ($PSCmdlet.ShouldProcess($tf.FullName, "Purge Temp Dump File")) {
+                    try {
+                        Remove-Item -Path $tf.FullName -Force -ErrorAction Stop
+                        Write-Host "  [REMOVED] $($tf.Name)" -ForegroundColor Green
+                        $cleanedCount++
+                    } catch {}
+                }
+            }
+        }
+
+        if (Test-Path $cdSaveDir) {
+            $optFile = Join-Path $cdSaveDir "user_engine_option_save.xml"
+            if (Test-Path $optFile) {
+                if ($PSCmdlet.ShouldProcess($optFile, "Backup and Clean Engine Options")) {
+                    try {
+                        if ($Backup) {
+                            $bakPath = "$optFile.bak"
+                            Copy-Item -Path $optFile -Destination $bakPath -Force -ErrorAction Stop
+                            Write-Host "  [BACKUP] Created: $([System.IO.Path]::GetFileName($bakPath))" -ForegroundColor DarkGray
+                        }
+                        Remove-Item -Path $optFile -Force -ErrorAction Stop
+                        Write-Host "  [REMOVED] user_engine_option_save.xml" -ForegroundColor Green
+                        $cleanedCount++
+                    } catch {}
+                }
             }
         }
     }
@@ -359,7 +416,6 @@ function Disable-DcProblematicKernelDriver {
             Write-Host "  [OK] Stop signal sent to '$DriverName'." -ForegroundColor DarkGray
 
             Write-Host "[SUCCESS] Driver '$DriverName' disabled. It will no longer load into kernel memory on boot." -ForegroundColor Green
-            return $true
         } catch {
             Write-Host "[FAILED] Could not disable service '$DriverName': $($_.Exception.Message)" -ForegroundColor Red
             return $false
@@ -368,4 +424,73 @@ function Disable-DcProblematicKernelDriver {
     return $false
 }
 
-Export-ModuleMember -Function Test-DcIsAdmin, Clear-DcGameConfig, Clear-DcSteamCache, Clear-DcShaderCache, Stop-DcZombieProcesses, Repair-DcEthernetSettings, Repair-DcAmdDriverAlignment, Repair-DcPciePowerSettings, Disable-DcProblematicKernelDriver
+function Repair-DcGpuSleepSettings {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory = $false)]
+        [int]$TdrDelaySeconds = 8,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$DisableUlps,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$DisableFastStartup
+    )
+
+    if (-not (Test-DcIsAdmin)) {
+        Write-Host "[ERROR] Administrator elevation is required to configure GPU sleep and TDR recovery settings." -ForegroundColor Red
+        Write-Host "Please run this command from an elevated PowerShell terminal (Run as Administrator)." -ForegroundColor Yellow
+        return $false
+    }
+
+    Write-Host "=== OPTIMIZING GPU WATCHDOG & DISPLAY WAKE RECOVERY ===" -ForegroundColor Magenta
+    Write-Host "  Preserving GPU sleep and power-saving states by default (Zero Power Impact)." -ForegroundColor Cyan
+
+    # 1. Increase TdrDelay and TdrDdiDelay in GraphicsDrivers registry (Zero Power Impact)
+    $gfxKey = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
+    if ($PSCmdlet.ShouldProcess($gfxKey, "Set TdrDelay = $TdrDelaySeconds and TdrDdiDelay = $TdrDelaySeconds")) {
+        if (-not (Test-Path $gfxKey)) { New-Item -Path $gfxKey -ItemType Directory -Force | Out-Null }
+        Set-ItemProperty -Path $gfxKey -Name "TdrDelay" -Value $TdrDelaySeconds -Type DWord -Force
+        Set-ItemProperty -Path $gfxKey -Name "TdrDdiDelay" -Value $TdrDelaySeconds -Type DWord -Force
+        Write-Host "  [OK] Graphics watchdog timeout (TdrDelay / TdrDdiDelay) set to $TdrDelaySeconds seconds (Zero Power Impact)." -ForegroundColor Green
+    }
+
+    # 2. Ultra-Low Power State (ULPS) - ONLY modified if explicitly requested as a temporary diagnostic last resort
+    if ($DisableUlps) {
+        Write-Host "  [NOTICE] Disabling ULPS (Temporary Diagnostic Workaround / Last Resort). Note: Increases idle power consumption." -ForegroundColor Yellow
+        $classKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+        $ulpsFixed = 0
+        if (Test-Path $classKey) {
+            $subkeys = Get-ChildItem -Path $classKey -ErrorAction SilentlyContinue
+            foreach ($sk in $subkeys) {
+                $prop = Get-ItemProperty -Path $sk.PSPath -ErrorAction SilentlyContinue
+                if ($prop -and ($prop.DriverDesc -match '(?i)Radeon|AMD' -or $null -ne $prop.EnableUlps)) {
+                    if ($PSCmdlet.ShouldProcess("$($prop.DriverDesc) ($($sk.PSChildName))", "Set EnableUlps = 0")) {
+                        Set-ItemProperty -Path $sk.PSPath -Name "EnableUlps" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                        Set-ItemProperty -Path $sk.PSPath -Name "EnableUlps_NA" -Value "0" -Type String -Force -ErrorAction SilentlyContinue
+                        Write-Host "  [OK] Disabled ULPS on $($prop.DriverDesc) ($($sk.PSChildName)) [Temporary Workaround]." -ForegroundColor Yellow
+                        $ulpsFixed++
+                    }
+                }
+            }
+        }
+    } else {
+        Write-Host "  [INFO] GPU low-power sleep states (ULPS) kept active to preserve energy savings." -ForegroundColor Gray
+    }
+
+    # 3. Disable Fast Startup if requested
+    if ($DisableFastStartup) {
+        $pwrKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power"
+        if (Test-Path $pwrKey) {
+            if ($PSCmdlet.ShouldProcess($pwrKey, "Set HiberbootEnabled = 0")) {
+                Set-ItemProperty -Path $pwrKey -Name "HiberbootEnabled" -Value 0 -Type DWord -Force
+                Write-Host "  [OK] Windows Fast Startup disabled (ensures clean driver state on reboots)." -ForegroundColor Green
+            }
+        }
+    }
+
+    Write-Host "[SUCCESS] GPU recovery settings optimized. A system reboot is recommended to apply changes." -ForegroundColor Green
+    return $true
+}
+
+Export-ModuleMember -Function Test-DcIsAdmin, Clear-DcGameConfig, Clear-DcSteamCache, Clear-DcShaderCache, Stop-DcZombieProcesses, Repair-DcEthernetSettings, Repair-DcAmdDriverAlignment, Repair-DcPciePowerSettings, Disable-DcProblematicKernelDriver, Repair-DcGpuSleepSettings

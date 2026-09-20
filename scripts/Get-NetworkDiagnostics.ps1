@@ -73,7 +73,7 @@ if ($ncsiEvents) {
 if ($wlanEvents) {
     $hasNetIssue = $true
     foreach ($we in ($wlanEvents | Select-Object -First 3)) {
-        $msg = $we.Message.Split("`n")[0].Trim()
+        $msg = ($we.Message.Split("`n")[0].Trim()) -replace '(?i)SSID:\s*([^\s,\r\n]+)', 'SSID: [Redacted]'
         Write-Host "  [!] [$($we.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss'))] WLAN-AutoConfig (Event $($we.Id)): $msg" -ForegroundColor Yellow
     }
 }

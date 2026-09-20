@@ -6,6 +6,22 @@
     telemetry logs, suppressing clean exit patterns and capturing real crash markers.
 #>
 
+function Protect-DcLogText {
+    param([string]$Text)
+    if (-not $Text) { return $Text }
+
+    # Redact SteamID3 ([U:1:xxxxxx]) to preserve user privacy
+    $sanitized = $Text -replace '\[U:\d+:\d+\]', '[U:1:REDACTED]'
+
+    # Redact user profile directory paths (C:\Users\<username> -> %USERPROFILE%)
+    if ($env:USERPROFILE) {
+        $sanitized = $sanitized.Replace($env:USERPROFILE, "%USERPROFILE%")
+    }
+    $sanitized = $sanitized -replace '(?i)C:\\Users\\[^\\]+', '%USERPROFILE%'
+
+    return $sanitized
+}
+
 function Get-DcSteamPath {
     $steamPath = $null
     $regVal = Get-ItemProperty -Path "HKCU:\Software\Valve\Steam" -Name "SteamPath" -ErrorAction SilentlyContinue
@@ -56,14 +72,14 @@ function Get-DcSteamLogs {
                         }
                         # Match actual crash and stall patterns
                         if ($line -match '(?i)stalled|fatal assert|exitonfatalassert|cross-thread pipe|pipes\.cpp|The game hasn''t rendered a frame|possibly crashed/killed game|OnSystemPowerStateSuspend|BMainLoop appears to have stalled|OnNetworkDeviceStateChange|failed talking to cm|Connectivity test.*failed|Reset cReconnectAttempts') {
-                            $errors.Add($line.Trim())
+                            $errors.Add((Protect-DcLogText $line.Trim()))
                         }
                     }
 
                     if ($errors.Count -gt 0) {
                         $results.Add([PSCustomObject]@{
                             LogName     = $item.Name
-                            FullName    = $item.FullName
+                            FullName    = (Protect-DcLogText $item.FullName)
                             Timestamp   = $item.LastWriteTime
                             ErrorLines  = @($errors)
                             IsPipeError = ($errors | Where-Object { $_ -match '(?i)pipes\.cpp|cross-thread pipe|ExitOnFatalAssert' }).Count -gt 0
@@ -99,12 +115,12 @@ function Get-DcEngineLogs {
                 $lines = Get-Content $log.FullName -Tail 250 -ErrorAction SilentlyContinue
                 $critLines = $lines | Where-Object {
                     $_ -match '(?i)Fatal error|CrashReportClient|Assertion failed|GPU Crash dump Triggered|DXGI_ERROR|D3D12.*Hung|DeviceRemovedReason|Out of memory'
-                }
+                } | ForEach-Object { Protect-DcLogText $_ }
                 if ($critLines) {
                     $results.Add([PSCustomObject]@{
                         Engine      = "Unreal Engine"
                         LogName     = $log.Name
-                        FullName    = $log.FullName
+                        FullName    = (Protect-DcLogText $log.FullName)
                         Timestamp   = $log.LastWriteTime
                         ErrorLines  = @($critLines)
                     })
@@ -122,12 +138,12 @@ function Get-DcEngineLogs {
             $lines = Get-Content $ulog.FullName -Tail 250 -ErrorAction SilentlyContinue
             $critLines = $lines | Where-Object {
                 $_ -match '(?i)Crash!!!|Fatal Error|d3d11: failed to create|d3d12: failed to|D3D12 device removed|Vulkan: out of device memory|NullReferenceException|StackOverflowException'
-            }
+            } | ForEach-Object { Protect-DcLogText $_ }
             if ($critLines) {
                 $results.Add([PSCustomObject]@{
                     Engine      = "Unity"
                     LogName     = $ulog.Name
-                    FullName    = $ulog.FullName
+                    FullName    = (Protect-DcLogText $ulog.FullName)
                     Timestamp   = $ulog.LastWriteTime
                     ErrorLines  = @($critLines)
                 })
@@ -144,12 +160,12 @@ function Get-DcEngineLogs {
             $lines = Get-Content $il.FullName -Tail 250 -ErrorAction SilentlyContinue
             $critLines = $lines | Where-Object {
                 $_ -match '(?i)Failed to allocate.*material|buffer allocation failure|catchup timeout expired|FATAL ERROR'
-            }
+            } | ForEach-Object { Protect-DcLogText $_ }
             if ($critLines) {
                 $results.Add([PSCustomObject]@{
                     Engine      = "idTech"
                     LogName     = $il.Name
-                    FullName    = $il.FullName
+                    FullName    = (Protect-DcLogText $il.FullName)
                     Timestamp   = $il.LastWriteTime
                     ErrorLines  = @($critLines)
                 })
@@ -164,12 +180,12 @@ function Get-DcEngineLogs {
             Where-Object { $_.LastWriteTime -ge $Cutoff }
         foreach ($gl in $godotLogs) {
             $lines = Get-Content $gl.FullName -Tail 200 -ErrorAction SilentlyContinue
-            $critLines = $lines | Where-Object { $_ -match '(?i)ERROR:|CRITICAL:|FATAL:' }
+            $critLines = $lines | Where-Object { $_ -match '(?i)ERROR:|CRITICAL:|FATAL:' } | ForEach-Object { Protect-DcLogText $_ }
             if ($critLines) {
                 $results.Add([PSCustomObject]@{
                     Engine      = "Godot"
                     LogName     = $gl.Name
-                    FullName    = $gl.FullName
+                    FullName    = (Protect-DcLogText $gl.FullName)
                     Timestamp   = $gl.LastWriteTime
                     ErrorLines  = @($critLines)
                 })
@@ -184,12 +200,12 @@ function Get-DcEngineLogs {
             Where-Object { $_.LastWriteTime -ge $Cutoff }
         foreach ($pl in $paLogs) {
             $lines = Get-Content $pl.FullName -Tail 200 -ErrorAction SilentlyContinue
-            $critLines = $lines | Where-Object { $_ -match '(?i)\[ERROR\]|\[FATAL\]|DATA_ERROR|Crash|Exception' }
+            $critLines = $lines | Where-Object { $_ -match '(?i)\[ERROR\]|\[FATAL\]|DATA_ERROR|Crash|Exception' } | ForEach-Object { Protect-DcLogText $_ }
             if ($critLines) {
                 $results.Add([PSCustomObject]@{
                     Engine      = "BlackSpace Engine (Pearl Abyss)"
                     LogName     = $pl.Name
-                    FullName    = $pl.FullName
+                    FullName    = (Protect-DcLogText $pl.FullName)
                     Timestamp   = $pl.LastWriteTime
                     ErrorLines  = @($critLines)
                 })
@@ -200,4 +216,4 @@ function Get-DcEngineLogs {
     return $results
 }
 
-Export-ModuleMember -Function Get-DcSteamPath, Get-DcSteamLogs, Get-DcEngineLogs
+Export-ModuleMember -Function Get-DcSteamPath, Get-DcSteamLogs, Get-DcEngineLogs, Protect-DcLogText

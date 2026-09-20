@@ -136,9 +136,15 @@ function Read-DcMinidump {
     if (-not (Test-Path $Path)) { return $null }
 
     $fileInfo = Get-Item $Path
+    $cleanFullName = $fileInfo.FullName
+    if ($env:USERPROFILE) {
+        $cleanFullName = $cleanFullName.Replace($env:USERPROFILE, "%USERPROFILE%")
+    }
+    $cleanFullName = $cleanFullName -replace '(?i)C:\\Users\\[^\\]+', '%USERPROFILE%'
+
     $result = [PSCustomObject]@{
         FileName        = $fileInfo.Name
-        FullName        = $fileInfo.FullName
+        FullName        = $cleanFullName
         Timestamp       = $fileInfo.LastWriteTime
         SizeMb          = [math]::Round($fileInfo.Length / 1MB, 2)
         Architecture    = "Unknown"
@@ -356,6 +362,15 @@ function Read-DcMinidump {
 
     if ($result.FaultingModule -eq "Unknown" -and $fileInfo.Name -match '^crash_([a-zA-Z0-9_\-\.]+?)\.exe') {
         $result.FaultingModule = "$($Matches[1]).exe"
+    }
+
+    # Redact user profile directory paths from assertion messages
+    if ($result.Assertions) {
+        $result.Assertions = @($result.Assertions | ForEach-Object {
+            $s = $_
+            if ($env:USERPROFILE) { $s = $s.Replace($env:USERPROFILE, "%USERPROFILE%") }
+            $s -replace '(?i)C:\\Users\\[^\\]+', '%USERPROFILE%'
+        })
     }
 
     return $result

@@ -107,10 +107,11 @@ echo   [4] Terminate Hung / Zombie Steam Processes
 echo   [5] Optimize Ethernet Adapter Stability (Requires Admin)
 echo   [6] Disable PCIe Link State Power Management (Fix GPU Timeouts ^& Sleep Crashes)
 echo   [7] Scan ^& Disable Rogue Kernel I/O Drivers (Fix inpoutx64 / 0x93 BSODs)
+echo   [8] Optimize GPU Watchdog Timeout (Increase TdrDelay to 8s - Zero Power Impact)
 echo   [0] Return to Main Menu
 echo.
 set "mchoice="
-set /p mchoice="Select an option [0-7]: "
+set /p mchoice="Select an option [0-8]: "
 if defined mchoice set "mchoice=%mchoice: =%"
 if "%mchoice%"=="1" ( PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Clean-ShaderCache.ps1" & goto finish )
 if "%mchoice%"=="2" ( PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Clean-GameConfig.ps1" & goto finish )
@@ -119,6 +120,7 @@ if "%mchoice%"=="4" ( PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%
 if "%mchoice%"=="5" ( PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Repair-EthernetSettings.ps1" & goto finish )
 if "%mchoice%"=="6" ( PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Repair-PciePowerSettings.ps1" & goto finish )
 if "%mchoice%"=="7" ( PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Disable-RogueKernelDrivers.ps1" & goto finish )
+if "%mchoice%"=="8" ( PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Repair-GpuSleepSettings.ps1" & goto finish )
 if "%mchoice%"=="0" goto menu
 goto menu
 

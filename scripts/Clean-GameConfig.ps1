@@ -5,13 +5,13 @@
     Safely purges stale game configurations and shader caches while creating .bak
     backups to prevent losing user keybindings and sensitivities.
 .PARAMETER Game
-    Target game: "TheGreatCircle", "DOOMEternal", "DOOMTheDarkAges", or "All" (default).
+    Target game: "TheGreatCircle", "DOOMEternal", "DOOMTheDarkAges", "CrimsonDesert", or "All" (default).
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [Parameter(Mandatory = $false)]
-    [ValidateSet("TheGreatCircle", "DOOMEternal", "DOOMTheDarkAges", "All")]
+    [ValidateSet("TheGreatCircle", "DOOMEternal", "DOOMTheDarkAges", "CrimsonDesert", "All")]
     [string]$Game = "All"
 )
 

@@ -112,6 +112,21 @@ function Get-DcGpuDriverHealth {
     $wuReg = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -ErrorAction SilentlyContinue
     $excludeWUDrivers = if ($wuReg) { $wuReg.ExcludeWUDriversInQualityUpdate } else { $null }
 
+    $ulpsActive = $false
+    try {
+        $classKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+        if (Test-Path $classKey) {
+            $subkeys = Get-ChildItem -Path $classKey -ErrorAction SilentlyContinue
+            foreach ($sk in $subkeys) {
+                $p = Get-ItemProperty -Path $sk.PSPath -ErrorAction SilentlyContinue
+                if ($p -and ($p.DriverDesc -match '(?i)Radeon|AMD' -or $null -ne $p.EnableUlps) -and $p.EnableUlps -eq 1) {
+                    $ulpsActive = $true
+                    break
+                }
+            }
+        }
+    } catch {}
+
     return [PSCustomObject]@{
         Gpus               = @($gpuList)
         DualGpuConflict    = $dualGpuConflict
@@ -119,6 +134,7 @@ function Get-DcGpuDriverHealth {
         SearchOrderConfig  = $searchOrderConfig
         ExcludeWUDrivers   = $excludeWUDrivers
         IsWUDriverBlocked  = ($searchOrderConfig -eq 0 -and $excludeWUDrivers -eq 1)
+        IsUlpsEnabled      = $ulpsActive
     }
 }
 
@@ -131,12 +147,26 @@ function Get-DcBluetoothHealth {
     $controllers = $btDevices | Where-Object { $_.FriendlyName -match '(?i)Controller|DualSense|Xbox|Stadia|VR|Sense' }
     $audio = $btDevices | Where-Object { $_.FriendlyName -match '(?i)Buds|Headphones|Headset|AirPods|WH-|WF-' }
 
+    # Sanitize possessive personal names (e.g. "John's AirPods" -> "AirPods") to protect user identity
+    function Anonymize-BtDevice($dev) {
+        if (-not $dev) { return $dev }
+        $sanitizedName = $dev.FriendlyName -replace "^.+?'s\s+", "" -replace "^.+?の\s*", ""
+        return [PSCustomObject]@{
+            FriendlyName = $sanitizedName
+            Status       = $dev.Status
+            InstanceId   = $dev.InstanceId
+        }
+    }
+
+    $sanitizedControllers = @($controllers | ForEach-Object { Anonymize-BtDevice $_ })
+    $sanitizedAudio = @($audio | ForEach-Object { Anonymize-BtDevice $_ })
+
     $problemBt = $btDevices | Where-Object { $_.Status -ne "OK" }
 
     return [PSCustomObject]@{
         Radios        = @($radios)
-        Controllers   = @($controllers)
-        AudioDevices  = @($audio)
+        Controllers   = $sanitizedControllers
+        AudioDevices  = $sanitizedAudio
         ProblemCount  = if ($problemBt) { $problemBt.Count } else { 0 }
         ProblemList   = if ($problemBt) { @($problemBt) } else { @() }
     }

@@ -101,6 +101,12 @@ param(
     [switch]$FixDrivers,
 
     [Parameter(Mandatory = $false)]
+    [switch]$RepairGpuSleep,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$DisableUlps,
+
+    [Parameter(Mandatory = $false)]
     [switch]$RepairNetwork,
 
     [Parameter(Mandatory = $false)]
@@ -111,7 +117,7 @@ param(
     [switch]$CleanConfig,
 
     [Parameter(Mandatory = $false)]
-    [ValidateSet("TheGreatCircle", "DOOMEternal", "DOOMTheDarkAges", "All")]
+    [ValidateSet("TheGreatCircle", "DOOMEternal", "DOOMTheDarkAges", "CrimsonDesert", "All")]
     [string]$Game = "All",
 
     [Parameter(Mandatory = $false)]
@@ -197,6 +203,11 @@ if ($DisablePciePowerSavings) {
 
 if ($DisableRogueDrivers) {
     & (Join-Path $PSScriptRoot "scripts\Disable-RogueKernelDrivers.ps1")
+    exit 0
+}
+
+if ($RepairGpuSleep) {
+    & (Join-Path $PSScriptRoot "scripts\Repair-GpuSleepSettings.ps1") -DisableUlps:$DisableUlps
     exit 0
 }
 
@@ -414,6 +425,12 @@ if (-not $Quiet) {
         }
     }
 
+    if ($telemetry.SleepTransitions -and $telemetry.SleepTransitions.Count -gt 0) {
+        foreach ($st in ($telemetry.SleepTransitions | Select-Object -First 3)) {
+            Write-Host "  [i] Sleep/Wake Transition [$($st.WakeTime)]: $($st.Message)" -ForegroundColor Cyan
+        }
+    }
+
     if ($telemetry.WheaErrors.Count -eq 0 -and $telemetry.TdrEvents.Count -eq 0 -and $telemetry.KernelBugChecks.Count -eq 0 -and $telemetry.AbruptReboots.Count -eq 0 -and $telemetry.NetworkDrops.Count -eq 0) {
         Write-Host "  [ OK ] No GPU driver TDR resets, Kernel BugChecks, network drops, or hardware errors in event telemetry." -ForegroundColor Green
     }
@@ -441,8 +458,8 @@ if (-not $Quiet) {
     # Motherboard & Chipset Overview
     Write-Host "  Motherboard : $($mbHealth.MotherboardManufacturer) $($mbHealth.MotherboardProduct) $($mbHealth.MotherboardVersion)" -ForegroundColor White
     $biosAgeStr = if ($mbHealth.BiosAgeYears) { " ($($mbHealth.BiosAgeYears) yrs old)" } else { "" }
-    Write-Host "  BIOS        : $($mbHealth.BiosVersion) | Released: $($mbHealth.BiosReleaseDate)$biosAgeStr" -ForegroundColor (if ($mbHealth.IsBiosOutdated) { [ConsoleColor]::Yellow } else { [ConsoleColor]::White })
-    Write-Host "  Chipset     : $($mbHealth.Summary)" -ForegroundColor (if ($mbHealth.IsHealthy) { [ConsoleColor]::Green } else { [ConsoleColor]::Yellow })
+    Write-Host "  BIOS        : $($mbHealth.BiosVersion) | Released: $($mbHealth.BiosReleaseDate)$biosAgeStr" -ForegroundColor $(if ($mbHealth.IsBiosOutdated) { [ConsoleColor]::Yellow } else { [ConsoleColor]::White })
+    Write-Host "  Chipset     : $($mbHealth.Summary)" -ForegroundColor $(if ($mbHealth.IsHealthy) { [ConsoleColor]::Green } else { [ConsoleColor]::Yellow })
     if ($mbHealth.MissingControllers.Count -gt 0) {
         Write-Host "  [!] Missing Chipset Controllers: $($mbHealth.MissingControllers -join ', ')" -ForegroundColor Red
     }
@@ -565,11 +582,21 @@ if ($steamWatchdogCrash -and $correlatedDrop) {
         $rootCauseTitle = "APPLICATION MEMORY ACCESS VIOLATION (0xC0000005)"
         $rootCauseDesc = "Exception 0xC0000005: Native memory access violation in $($firstCrash.FaultingModule) ($($firstCrash.FileName))."
         $rootCauseGuidance = "Memory access violation in $($firstCrash.FaultingModule). Verify game integrity via Steam/Launcher and update Visual C++ Redistributables. If overclocked, test with stock memory/XMP timings."
+    } elseif ($firstCrash.FaultingModule -match '(?i)CrimsonDesert' -or ($telemetry.AppHangs | Where-Object { $_.Application -match '(?i)CrimsonDesert' })) {
+        $rootCauseTitle = "CRIMSON DESERT (BLACKSPACE ENGINE) GRAPHICS HANG & SHADER STALL"
+        $rootCauseDesc = "CrimsonDesert.exe stopped responding during scene/shader dispatch ($($firstCrash.ExceptionMeaning)). Mid-render TDRs leave uncommitted SQLite WAL journal files (.dxcache-wal, .dxcache-shm) in '%LOCALAPPDATA%\D3DSCache' and corrupted PSO cache blocks in '%LOCALAPPDATA%\AMD\DxCache', plus stale crash locks in Pearl Abyss DumpCache, causing subsequent game launches to fail or exit prematurely."
+        $rootCauseGuidance = "1. Flush corrupted DirectX & AMD shader caches using '.\Analyze-LatestCrash.ps1 -CleanShaderCache'.`n  2. Purge stale crash locks and DumpCache using '.\Analyze-LatestCrash.ps1 -CleanConfig -Game CrimsonDesert'.`n  3. Fully exit and restart Steam to clear stale GameOverlay/IPC pipes.`n  4. If experiencing Intel I225-V Ethernet disconnects, run '.\Analyze-LatestCrash.ps1 -RepairNetwork' as Admin."
     } else {
         $rootCauseTitle = "UNHANDLED APPLICATION CRASH (Tier 1 Crash Dump)"
         $rootCauseDesc = "Exception $($firstCrash.ExceptionCode): $($firstCrash.ExceptionMeaning) in $($firstCrash.FaultingModule) ($($firstCrash.FileName))."
         $rootCauseGuidance = "Verify game integrity via Steam/Launcher and report the faulting module ($($firstCrash.FaultingModule)) to the game developer."
     }
+    $rootCauseSeverity = "Critical"
+} elseif ($telemetry.AppHangs | Where-Object { $_.Application -match '(?i)CrimsonDesert' }) {
+    $firstHang = $telemetry.AppHangs | Where-Object { $_.Application -match '(?i)CrimsonDesert' } | Select-Object -First 1
+    $rootCauseTitle = "CRIMSON DESERT (BLACKSPACE ENGINE) APPLICATION HANG (Event 1002)"
+    $rootCauseDesc = "CrimsonDesert.exe stopped interacting with Windows and was closed at $($firstHang.TimeCreated.ToString('HH:mm:ss')). Following a mid-render hang or TDR, corrupted DirectX 12/AMD shader cache files (.dxcache-wal, .dxcache-shm, .parc) and Pearl Abyss DumpCache locks prevent the game from loading."
+    $rootCauseGuidance = "1. Flush corrupted DirectX & AMD shader caches using '.\Analyze-LatestCrash.ps1 -CleanShaderCache'.`n  2. Purge stale crash locks and DumpCache using '.\Analyze-LatestCrash.ps1 -CleanConfig -Game CrimsonDesert'.`n  3. Fully exit and restart Steam to refresh GameOverlay hooks.`n  4. If experiencing Intel I225-V Ethernet disconnects, run '.\Analyze-LatestCrash.ps1 -RepairNetwork' as Admin."
     $rootCauseSeverity = "Critical"
 } elseif ($gpuHealth.DualGpuConflict) {
     $rootCauseTitle = "DUAL-GPU DRIVER VERSION MISMATCH"
@@ -590,8 +617,38 @@ if ($steamWatchdogCrash -and $correlatedDrop) {
 } elseif ($telemetry.TdrEvents.Count -gt 0) {
     $hasHighBoostGpu = @($gpuHealth.Gpus | Where-Object { $_.IsHighBoostCard }).Count -gt 0
     $hasAmdFullInstall = @($gpuHealth.Gpus | Where-Object { $_.AmdInstallType -like "*Full*" }).Count -gt 0
+    $isUlpsActive = if ($gpuHealth.IsUlpsEnabled -or ($telemetry.GraphicsDriverSettings -and $telemetry.GraphicsDriverSettings.IsUlpsEnabled)) { $true } else { $false }
 
-    if ($telemetry.PciePowerManagement.IsEnabled) {
+    # Check if TDR / Watchdog occurred shortly after wake from sleep
+    $sleepTdr = $null
+    if ($telemetry.SleepTransitions -and $telemetry.SleepTransitions.Count -gt 0) {
+        foreach ($tdr in $telemetry.TdrEvents) {
+            $matchingWake = @($telemetry.SleepTransitions | Where-Object {
+                $sec = ($tdr.TimeCreated - $_.WakeTime).TotalSeconds
+                $sec -ge -10 -and $sec -le 180
+            })
+            if ($matchingWake.Count -gt 0) {
+                $sleepTdr = [PSCustomObject]@{
+                    Tdr  = $tdr
+                    Wake = $matchingWake[0]
+                }
+                break
+            }
+        }
+    }
+
+    if ($sleepTdr) {
+        $rootCauseTitle = "GPU DRIVER TIMEOUT ON WAKE FROM SLEEP (TDR 0x141 / AMD WATCHDOG)"
+        $diffSec = [math]::Round([math]::Abs(($sleepTdr.Tdr.TimeCreated - $sleepTdr.Wake.WakeTime).TotalSeconds))
+        $rootCauseDesc = "The GPU display driver stopped responding and triggered a watchdog recovery ($($sleepTdr.Tdr.Meaning)) at $($sleepTdr.Tdr.TimeCreated.ToString('HH:mm:ss')), within ${diffSec}s of waking from sleep (Wake Source: $($sleepTdr.Wake.WakeSource))."
+        $remedies = [System.Collections.Generic.List[string]]::new()
+        $remedies.Add("(Recommended - Zero Power Impact) Increase TdrDelay and TdrDdiDelay to 8-10 seconds in HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers. High-refresh 4K HDMI 2.1 link training and display handshakes on wake take several seconds, exceeding Windows' default 2-second watchdog threshold. Extending the timeout allows the link to finish initializing while fully preserving all sleep and power-saving states.")
+        $remedies.Add("Verify HDMI 2.1 cable integrity (Ultra High Speed 48 Gbps certified) and check TV standby / Quick Start+ settings to ensure display handshakes respond promptly.")
+        $remedies.Add("(Temporary Workaround / Last Resort Only) If timeouts persist after optimizing TdrDelay, test disabling Ultra-Low Power State (ULPS) via '.\scripts\Repair-GpuSleepSettings.ps1 -DisableUlps' to isolate deep-sleep wake latency. Re-enable after testing to maintain system power efficiency.")
+        $remedies.Add("Run '.\Analyze-LatestCrash.ps1 -RepairGpuSleep' or '.\scripts\Repair-GpuSleepSettings.ps1' as Administrator to apply the zero-power-impact TDR timeout fix.")
+        $rootCauseGuidance = $remedies -join "`n  * "
+        $rootCauseSeverity = "Critical"
+    } elseif ($telemetry.PciePowerManagement.IsEnabled) {
         $rootCauseTitle = "GPU DISPLAY DRIVER TIMEOUT (TDR / 0x141) - PCIE POWER SAVINGS ACTIVE"
         $rootCauseDesc = "The GPU display driver stopped responding and was recovered by Windows ($($telemetry.TdrEvents.Count) incident(s)). Windows PCIe Link State Power Management (ASPM) is currently ENABLED ('$($telemetry.PciePowerManagement.ACSettingName)') in power plan '$($telemetry.PciePowerManagement.SchemeName)'. When the PCIe link enters low-power L0s/L1 states during idle or video playback, resumption latency spikes cause the graphics watchdog to timeout."
         $boostAdvice = if ($hasHighBoostGpu) { " If timeouts persist under low load, enthusiast cards with aggressive factory boost targets (e.g. RX 7900 XTX / 6950 XT defaulting up to ~2970 MHz vs 2500 MHz reference) benefit from capping Max Frequency to ~2700-2800 MHz or applying a -100 MHz offset in AMD Software Tuning to eliminate transient voltage droop." } else { "" }
