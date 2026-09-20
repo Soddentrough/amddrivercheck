@@ -152,4 +152,176 @@ function Get-DcNetworkHealth {
     return $results
 }
 
-Export-ModuleMember -Function Get-DcPnpHealth, Get-DcGpuDriverHealth, Get-DcBluetoothHealth, Get-DcNetworkHealth
+function Get-DcDisplayDiagnostics {
+    [CmdletBinding()]
+    param()
+
+    $results = [PSCustomObject]@{
+        Displays                = [System.Collections.Generic.List[PSCustomObject]]::new()
+        HighRiskTimingsDetected = $false
+        RiskSummary             = $null
+        Guidance                = $null
+    }
+
+    # Query WMI Monitor info
+    $wmiMonitors = @(Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID -ErrorAction SilentlyContinue)
+    $wmiConns = @(Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorConnectionParams -ErrorAction SilentlyContinue)
+    $activeGpus = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue)
+
+    # Query Registry EDID entries
+    $regDisplays = @(Get-ChildItem -Path "HKLM:\SYSTEM\CurrentControlSet\Enum\DISPLAY" -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.PSChildName -eq "Device Parameters" })
+
+    $displayList = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    foreach ($reg in $regDisplays) {
+        $edidBytes = (Get-ItemProperty -Path $reg.PSPath -Name "EDID" -ErrorAction SilentlyContinue).EDID
+        if (-not $edidBytes -or $edidBytes.Length -lt 128) { continue }
+
+        $pathParts = $reg.PSPath -split '\\'
+        $monId = if ($pathParts.Length -ge 3) { $pathParts[-2] } else { "Unknown" }
+
+        # Match WMI monitor for user-friendly name
+        $friendlyName = $null
+        $matchedWmi = $wmiMonitors | Where-Object { $reg.PSPath -match [regex]::Escape($_.InstanceName) } | Select-Object -First 1
+        if ($matchedWmi -and $matchedWmi.UserFriendlyName) {
+            $friendlyName = -join ($matchedWmi.UserFriendlyName | Where-Object { $_ -gt 0 } | ForEach-Object { [char]$_ })
+        }
+
+        # Connection technology
+        $connType = "Unknown"
+        $isDisplayPort = $false
+        $matchedConn = $wmiConns | Where-Object { $reg.PSPath -match [regex]::Escape($_.InstanceName) } | Select-Object -First 1
+        if ($matchedConn) {
+            switch ($matchedConn.VideoOutputTechnology) {
+                10 { $connType = "DisplayPort"; $isDisplayPort = $true }
+                11 { $connType = "DisplayPort (External)"; $isDisplayPort = $true }
+                12 { $connType = "Embedded DisplayPort (eDP)"; $isDisplayPort = $true }
+                5  { $connType = "HDMI" }
+                4  { $connType = "DVI" }
+                0  { $connType = "VGA" }
+                default { $connType = "Output Tech ($($matchedConn.VideoOutputTechnology))" }
+            }
+        }
+
+        # Parse Detailed Timing Descriptors (Base block: 54, 72, 90, 108)
+        $dtdOffsets = [System.Collections.Generic.List[int]]::new()
+        $dtdOffsets.AddRange(@(54, 72, 90, 108))
+
+        # Check Extension Blocks (CEA-861 / DisplayID)
+        $numExtensions = [int]$edidBytes[126]
+        if ($numExtensions -gt 0 -and $edidBytes.Length -ge (128 * ($numExtensions + 1))) {
+            for ($ext = 1; $ext -le $numExtensions; $ext++) {
+                $extBase = $ext * 128
+                $tag = [int]$edidBytes[$extBase]
+                if ($tag -eq 0x02) {
+                    $dtdStart = [int]$edidBytes[$extBase + 2]
+                    if ($dtdStart -ge 4 -and $dtdStart -lt 120) {
+                        for ($o = ($extBase + $dtdStart); $o -le ($extBase + 128 - 18); $o += 18) {
+                            $dtdOffsets.Add($o)
+                        }
+                    }
+                }
+            }
+        }
+
+        $timings = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+        foreach ($offset in $dtdOffsets) {
+            if ($offset + 17 -ge $edidBytes.Length) { continue }
+
+            $pClockLower = [int]$edidBytes[$offset]
+            $pClockUpper = [int]$edidBytes[$offset + 1]
+
+            if ($pClockLower -eq 0 -and $pClockUpper -eq 0) {
+                $tag = [int]$edidBytes[$offset + 3]
+                if ($tag -eq 0xFC -and -not $friendlyName) {
+                    $nameBytes = $edidBytes[($offset + 5)..($offset + 17)]
+                    $friendlyName = (-join ($nameBytes | Where-Object { $_ -ge 32 -and $_ -le 126 } | ForEach-Object { [char]$_ })).Trim()
+                }
+                continue
+            }
+
+            $pixelClockHz = (($pClockUpper -shl 8) -bor $pClockLower) * 10000
+            $pixelClockMHz = [math]::Round($pixelClockHz / 1000000, 2)
+
+            $hActive = (([int]$edidBytes[$offset + 4] -band 0xF0) -shl 4) -bor [int]$edidBytes[$offset + 2]
+            $hBlank  = (([int]$edidBytes[$offset + 4] -band 0x0F) -shl 8) -bor [int]$edidBytes[$offset + 3]
+            $hTotal  = $hActive + $hBlank
+
+            $vActive = (([int]$edidBytes[$offset + 7] -band 0xF0) -shl 4) -bor [int]$edidBytes[$offset + 5]
+            $vBlank  = (([int]$edidBytes[$offset + 7] -band 0x0F) -shl 8) -bor [int]$edidBytes[$offset + 6]
+            $vTotal  = $vActive + $vBlank
+
+            if ($hTotal -gt 0 -and $vTotal -gt 0) {
+                $refreshRate = [math]::Round($pixelClockHz / ($hTotal * $vTotal), 1)
+
+                $timings.Add([PSCustomObject]@{
+                    HActive       = $hActive
+                    VActive       = $vActive
+                    HBlank        = $hBlank
+                    VBlank        = $vBlank
+                    HTotal        = $hTotal
+                    VTotal        = $vTotal
+                    PixelClockMHz = $pixelClockMHz
+                    RefreshRate   = $refreshRate
+                })
+            }
+        }
+
+        $currentRes = "Unknown"
+        $currentRefresh = 0
+        if ($activeGpus) {
+            $g = $activeGpus[0]
+            if ($g.CurrentHorizontalResolution -and $g.CurrentVerticalResolution) {
+                $currentRes = "$($g.CurrentHorizontalResolution)x$($g.CurrentVerticalResolution)"
+                $currentRefresh = $g.CurrentRefreshRate
+            }
+        }
+
+        $dispName = if ($friendlyName) { $friendlyName } else { $monId }
+
+        # Check for High-Risk Overclocked Timing on DisplayPort
+        # Signature: 1440p+ with >144Hz refresh rate, and PixelClock >= 585 MHz OR VTotal >= 1500 lines
+        $hasRisk = $false
+        $riskTiming = $null
+        foreach ($t in $timings) {
+            if ($t.HActive -ge 2560 -and $t.VActive -ge 1440 -and $t.RefreshRate -gt 144) {
+                if ($t.PixelClockMHz -ge 585 -or $t.VTotal -ge 1500) {
+                    $hasRisk = $true
+                    $riskTiming = $t
+                    break
+                }
+            }
+        }
+
+        $isKnownIssueModel = ($dispName -match '(?i)Optix.*G27|MAG27|G24C')
+
+        $displayObj = [PSCustomObject]@{
+            Name               = $dispName
+            MonitorId          = $monId
+            Connection         = $connType
+            IsDisplayPort      = $isDisplayPort
+            ActiveResolution   = $currentRes
+            ActiveRefreshRate  = $currentRefresh
+            Timings            = @($timings)
+            HasTimingRisk      = ($hasRisk -or ($isKnownIssueModel -and $currentRefresh -gt 144))
+            RiskTiming         = $riskTiming
+            IsKnownIssueModel  = $isKnownIssueModel
+        }
+
+        $displayList.Add($displayObj)
+
+        if ($displayObj.HasTimingRisk -and -not $results.HighRiskTimingsDetected) {
+            $results.HighRiskTimingsDetected = $true
+            $timingStr = if ($riskTiming) { "$($riskTiming.HActive)x$($riskTiming.VActive) @ $($riskTiming.RefreshRate)Hz (Pixel Clock: $($riskTiming.PixelClockMHz) MHz, V-Total: $($riskTiming.VTotal) lines)" } else { "Active Refresh: $($currentRefresh)Hz" }
+            $results.RiskSummary = "Display '$dispName' ($connType) is running a high-refresh factory overclock ($timingStr). On DisplayPort 1.2a without DSC, bloated factory blanking operates budget monitor scalers at their electrical and thermal limits, causing periodic phase desync, Hot-Plug Detect (HPD) link drops, and 2-3s blackouts without triggering GPU driver TDRs."
+            $results.Guidance = "1. Lower refresh rate to native 144 Hz in Windows Display Settings.`n2. Use AMD Software (Custom Resolutions) or Custom Resolution Utility (CRU) to enforce VESA CVT-RB (Reduced Blanking) timing (target V-Total ~1463 lines, Pixel Clock ~573 MHz).`n3. In CRU, delete the 165Hz extension profile to permanently prevent Windows or graphics drivers from reverting."
+        }
+    }
+
+    $results.Displays = @($displayList)
+    return $results
+}
+
+Export-ModuleMember -Function Get-DcPnpHealth, Get-DcGpuDriverHealth, Get-DcBluetoothHealth, Get-DcNetworkHealth, Get-DcDisplayDiagnostics

@@ -149,9 +149,37 @@ function Export-DcHtmlReport {
         $pnpRows.Add("<div class='empty-state'>&#x2705; All present Plug-and-Play devices are reporting 100% HEALTHY (Status: OK).</div>")
     }
 
+    # Build Display HTML
+    $displayRows = [System.Collections.Generic.List[string]]::new()
+    if ($hw -and $hw.Displays -and $hw.Displays.Count -gt 0) {
+        foreach ($disp in $hw.Displays) {
+            $dispStatusBadge = if ($disp.HasTimingRisk) { "<span class='badge-critical'>TIMING RISK</span>" } else { "<span class='badge-healthy'>OK</span>" }
+            $timingDetails = ""
+            if ($disp.DetailedTimings -and $disp.DetailedTimings.Count -gt 0) {
+                $dtStrings = @()
+                foreach ($dt in $disp.DetailedTimings) {
+                    $dtBadge = if ($dt.IsHighRisk) { "<span class='badge-critical'>$($dt.Mode) ($($dt.PixelClockMHz) MHz)</span>" } else { "$($dt.Mode) ($($dt.PixelClockMHz) MHz)" }
+                    $dtStrings += $dtBadge
+                }
+                $timingDetails = "<div style='font-size: 0.85rem; color: var(--text-muted); margin-top: 4px;'>EDID Timings: " + ($dtStrings -join " | ") + "</div>"
+            }
+            $alertBox = ""
+            if ($disp.HasTimingRisk) {
+                $reasons = if ($disp.RiskReasons) { $disp.RiskReasons -join ' | ' } else { "High pixel clock / bloated vertical blanking exceeds budget scaler thresholds." }
+                $alertBox = "<div class='alert-card alert-critical' style='margin-top: 8px;'><strong>&#x26A0; DisplayPort Scaler Saturation Hazard:</strong> $reasons<br><span style='font-size: 0.85rem;'>Recommendation: Lower refresh rate to 144Hz or configure CVT-RB in Custom Resolution Utility (CRU) to reduce pixel clock below 580 MHz.</span></div>"
+            }
+            $displayRows.Add("<div class='card-item'><div class='card-header-row'><span class='file-name'>&#x1F5A5; $($disp.Name)</span>$dispStatusBadge</div><div>Connection: <strong>$($disp.Connection)</strong> | Active Mode: <strong>$($disp.ActiveResolution) @ $($disp.ActiveRefreshRate) Hz</strong></div>$timingDetails$alertBox</div>")
+        }
+    } else {
+        $displayRows.Add("<div class='empty-state'>&#x2705; Connected displays report standard compliant timings.</div>")
+    }
+
     $fastStartupStatusStr = if ($telem -and $telem.FastStartup.FastStartupEnabled) { 'Enabled (Risk)' } else { 'Disabled (Clean)' }
     $gpuNamesStr = if ($hw -and $hw.Gpus) { ($hw.Gpus.Name -join ' | ') } else { 'None' }
     $pnpCountStr = if ($hw -and $hw.PnpIssues) { $hw.PnpIssues.Count } else { 0 }
+    $dispSummaryStr = if ($hw -and $hw.Displays) {
+        ($hw.Displays | ForEach-Object { "$($_.Name) ($($_.ActiveResolution)@$($_.ActiveRefreshRate)Hz" + (if ($_.HasTimingRisk) { " [HAZARD: Scaler/EDID Timing Risk]" } else { "" }) }) -join '; '
+    } else { 'None' }
 
     $discordText = "=== DriverCheck Diagnostic Summary ===`n" +
         "Status:     $($ReportData.RootCauseTitle)`n" +
@@ -161,6 +189,7 @@ function Export-DcHtmlReport {
         "[Summary]`n$($ReportData.RootCauseGuidance)`n`n" +
         "[Hardware]`n" +
         "GPUs: $gpuNamesStr`n" +
+        "Displays: $dispSummaryStr`n" +
         "Fast Startup: $fastStartupStatusStr`n" +
         "PnP Issues: $pnpCountStr`n" +
         "Crash Dumps: $($ReportData.Dumps.Count)"
@@ -248,6 +277,10 @@ function Export-DcHtmlReport {
     $parts.Add("            </table>")
     $parts.Add("        </div>")
     $parts.Add("        <div style='margin-top: 12px;'>")
+    $parts.Add("            <strong>Connected Displays & Monitor EDID Timings:</strong>")
+    $parts.Add(($displayRows -join "`n"))
+    $parts.Add("        </div>")
+    $parts.Add("        <div style='margin-top: 12px;'>")
     $parts.Add("            <strong>Plug and Play Device Health:</strong>")
     $parts.Add(($pnpRows -join "`n"))
     $parts.Add("        </div>")
@@ -256,7 +289,7 @@ function Export-DcHtmlReport {
     $parts.Add("            <textarea readonly onclick='this.select()'>$discordText</textarea>")
     $parts.Add("        </div>")
     $parts.Add("        <footer>")
-    $parts.Add("            DriverCheck Diagnostic Suite v4.0 | Evidence-Based Crash Analysis Engine")
+    $parts.Add("            DriverCheck Diagnostic Suite v4.1.0 | Evidence-Based Crash Analysis Engine")
     $parts.Add("        </footer>")
     $parts.Add("    </div>")
     $parts.Add("</body>")

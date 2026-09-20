@@ -31,6 +31,7 @@ It strictly adheres to a **4-Tier Diagnostic Hierarchy**, prioritizing binary cr
 4. **Tier 4: System Hardware & Configuration (Contextual Audit)**
    * Audits **Plug and Play (PnP) Hardware Health** across all system devices for missing drivers (Code 28 `CM_PROB_FAILED_INSTALL`), failed devices (Code 43), and uninitialized chipset devices.
    * Audits active graphics hardware (`Win32_VideoController`), detects **Dual-GPU driver version conflicts** (e.g. AMD Ryzen integrated graphics vs. discrete Radeon graphics), and checks Windows Update driver overwrite policies (`SearchOrderConfig`, `ExcludeWUDriversInQualityUpdate`).
+   * Audits **Connected Displays & EDID Detailed Timings** via WMI and Registry, detecting aggressive factory overclocks (e.g. 1440p 165Hz with bloated vertical blanking >1500 lines or pixel clock >585 MHz) saturating DisplayPort 1.2a budget scalers and causing periodic 2-3s blackouts without generating Windows TDRs or crash dumps.
    * Audits graphics subsystem configuration (TdrDelay, TdrLevel, Hardware-Accelerated GPU Scheduling).
    * Audits Bluetooth gaming controllers (DualSense, Xbox, VR, Stadia) and network adapter stability.
 
@@ -43,7 +44,7 @@ Simply double-click **`Run-Diagnostics.bat`** in the project folder. It launches
 
 ```text
 ========================================================================
-  AUTOMATED GAME & SYSTEM CRASH DIAGNOSTIC SUITE (v4.0)
+  AUTOMATED GAME & SYSTEM CRASH DIAGNOSTIC SUITE (v4.1.0)
   Evidence-Based Engine (Crash Dumps, Logs, Telemetry, Hardware)
 ========================================================================
 
@@ -52,10 +53,11 @@ Simply double-click **`Run-Diagnostics.bat`** in the project folder. It launches
   [3] Deep Scan (Past 7 Days)
   [4] Export Support Bundle (HTML Report + ZIP for Discord/Support)
   [5] Hardware Health & Missing Drivers Audit (PnP)
-  [6] GPU Driver Health & Downgrade Prevention Audit
-  [7] Apply GPU Downgrade Protection (Lock Windows Update Drivers)
-  [8] Power, Fast Startup & Sleep Transition Audit
-  [9] Maintenance & Cache Cleaning Tools
+  [6] Display, EDID Timings & DP Scaler Saturation Audit
+  [7] GPU Driver Health & Downgrade Prevention Audit
+  [8] Apply GPU Downgrade Protection (Lock Windows Update Drivers)
+  [9] Power, Fast Startup & Sleep Transition Audit
+  [10] Maintenance & Cache Cleaning Tools
   [0] Exit
 ```
 
@@ -95,6 +97,7 @@ Each tool in the `scripts/` directory can also be executed individually as an is
 | **`Get-PnpDeviceDiagnostics.ps1`** | Scans all active hardware for missing drivers (Code 28) and device errors (Code 43). |
 | **`Get-GPUDriverDiagnostics.ps1`** | Audits display adapters, detects driver downgrades, and locks Windows Update driver policies. |
 | **`Get-PowerAndSleepDiagnostics.ps1`** | Audits Windows Fast Startup, unexpected shutdowns (6008), and sleep/wake transitions. |
+| **`Get-DisplayDiagnostics.ps1`** | Audits connected displays, EDID detailed timings, and DP 1.2a scaler saturation hazards. |
 | **`Get-BluetoothDiagnostics.ps1`** | Audits Bluetooth radios, gaming controllers, and connection reset errors. |
 | **`Get-NetworkDiagnostics.ps1`** | Audits network adapter link speed, duplex negotiation, and link flapping events. |
 | **`Get-WindowsUpdateHistory.ps1`** | Audits recently installed Windows Quality Updates and driver packages. |

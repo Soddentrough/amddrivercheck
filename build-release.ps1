@@ -11,7 +11,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
-    [string]$Version = "4.0.0"
+    [string]$Version = "4.1.0"
 )
 
 $OutputEncoding = [System.Text.Encoding]::UTF8

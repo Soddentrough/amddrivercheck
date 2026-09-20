@@ -25,6 +25,8 @@
     Run dedicated deep audit of Plug and Play (PnP) hardware health and missing drivers.
 .PARAMETER AuditBluetooth
     Run dedicated deep audit of Bluetooth controllers, audio devices, and radio health.
+.PARAMETER AuditDisplays
+    Run dedicated deep audit of Connected Displays, EDID Detailed Timings, and DisplayPort 1.2a Scaler Saturation risks.
 .PARAMETER FixDrivers
     Inspect Windows Driver Store for GPU driver downgrades and lock Windows Update driver policies.
 .PARAMETER RepairNetwork
@@ -71,6 +73,9 @@ param(
 
     [Parameter(Mandatory = $false)]
     [switch]$AuditBluetooth,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$AuditDisplays,
 
     [Parameter(Mandatory = $false)]
     [switch]$FixDrivers,
@@ -184,6 +189,11 @@ if ($AuditBluetooth) {
     exit 0
 }
 
+if ($AuditDisplays) {
+    & (Join-Path $PSScriptRoot "scripts\Get-DisplayDiagnostics.ps1")
+    exit 0
+}
+
 # =========================================================================
 # MAIN UNIFIED 4-TIER DIAGNOSTIC FLOW
 # =========================================================================
@@ -192,7 +202,7 @@ if (-not $Quiet) {
     Write-Host ""
     Write-Host "  +------------------------------------------------------------------------+" -ForegroundColor Cyan
     Write-Host "  |          AUTOMATED SYSTEM & GAME CRASH DIAGNOSTIC SUITE               |" -ForegroundColor Cyan
-    Write-Host "  |             4-Tier Evidence Hierarchy Engine v4.0                     |" -ForegroundColor Cyan
+    Write-Host "  |             4-Tier Evidence Hierarchy Engine v4.1.0                   |" -ForegroundColor Cyan
     Write-Host "  +------------------------------------------------------------------------+" -ForegroundColor Cyan
     Write-Host "  Scan Window: $($cutoff.ToString('yyyy-MM-dd HH:mm')) to $((Get-Date).ToString('yyyy-MM-dd HH:mm')) ($Hours hours)" -ForegroundColor DarkGray
     Write-Host "  Precedence:  [1] Crash Dumps -> [2] App Logs -> [3] System Logs -> [4] System Config" -ForegroundColor DarkGray
@@ -365,6 +375,7 @@ if (-not $Quiet) {
 $pnpIssues = Get-DcPnpHealth
 $gpuHealth = Get-DcGpuDriverHealth
 $netHealth = Get-DcNetworkHealth
+$displayHealth = Get-DcDisplayDiagnostics
 
 if (-not $Quiet) {
     if ($pnpIssues.Count -gt 0) {
@@ -384,6 +395,15 @@ if (-not $Quiet) {
 
     if ($gpuHealth.DualGpuConflict) {
         Write-Host "  [!] WARNING: $($gpuHealth.DualGpuDetails)" -ForegroundColor Red
+    }
+
+    foreach ($d in $displayHealth.Displays) {
+        $dispColor = if ($d.HasTimingRisk) { [ConsoleColor]::Red } else { [ConsoleColor]::White }
+        Write-Host "  Display: $($d.Name) ($($d.Connection))" -ForegroundColor $dispColor
+        Write-Host "    +- Active Mode:    $($d.ActiveResolution) @ $($d.ActiveRefreshRate) Hz" -ForegroundColor DarkGray
+        if ($d.HasTimingRisk) {
+            Write-Host "    [!] HAZARD: High-Risk EDID Timings / DP 1.2a Scaler Saturation Detected!" -ForegroundColor Red
+        }
     }
 
     foreach ($net in $netHealth) {
@@ -474,6 +494,11 @@ if ($zombieProcesses.Count -gt 0) {
     $rootCauseDesc = "The system experienced unexpected reboots while Windows Fast Startup was enabled."
     $rootCauseGuidance = "Disable Windows Fast Startup (Control Panel -> Power Options -> Choose what the power buttons do -> Turn off Fast Startup) to ensure clean cold reboots."
     $rootCauseSeverity = "Warning"
+} elseif ($displayHealth.HighRiskTimingsDetected) {
+    $rootCauseTitle = "DISPLAYPORT BANDWIDTH / MONITOR SCALER INSTABILITY (EDID OVERCLOCK)"
+    $rootCauseDesc = if ($displayHealth.RiskSummary) { $displayHealth.RiskSummary } else { "Connected display has aggressive factory overclock timings exceeding DisplayPort 1.2a / scaler bandwidth thresholds." }
+    $rootCauseGuidance = if ($displayHealth.Guidance) { $displayHealth.Guidance } else { "Lower monitor refresh rate (e.g. from 165Hz to 144Hz) in Windows Advanced Display Settings, or configure CVT-Reduced Blanking (CVT-RB) in Custom Resolution Utility (CRU) to reduce pixel clock below 580 MHz." }
+    $rootCauseSeverity = "Warning"
 }
 
 if (-not $Quiet) {
@@ -511,6 +536,8 @@ $reportObject = [PSCustomObject]@{
         Gpus             = @($gpuHealth.Gpus)
         DualGpuConflict  = $gpuHealth.DualGpuConflict
         PnpIssues        = @($pnpIssues)
+        Displays         = @($displayHealth.Displays)
+        HighRiskDisplays = $displayHealth.HighRiskTimingsDetected
         NetworkAdapters  = @($netHealth)
     }
 }
