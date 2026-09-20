@@ -29,6 +29,8 @@
     Run dedicated deep audit of Connected Displays, EDID Detailed Timings, and DisplayPort 1.2a Scaler Saturation risks.
 .PARAMETER AuditKernelDrivers
     Run dedicated audit for rogue/legacy third-party kernel I/O drivers (inpoutx64.sys, WinRing0, ENE).
+.PARAMETER AuditMotherboard
+    Run dedicated audit of Motherboard, BIOS version/date, and platform chipset driver software.
 .PARAMETER DisablePciePowerSavings
     Disable PCI Express Link State Power Management (ASPM) in the active Windows Power Scheme.
 .PARAMETER DisableRogueDrivers
@@ -85,6 +87,9 @@ param(
 
     [Parameter(Mandatory = $false)]
     [switch]$AuditKernelDrivers,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$AuditMotherboard,
 
     [Parameter(Mandatory = $false)]
     [switch]$DisablePciePowerSavings,
@@ -224,6 +229,11 @@ if ($AuditKernelDrivers) {
     exit 0
 }
 
+if ($AuditMotherboard) {
+    & (Join-Path $PSScriptRoot "scripts\Get-MotherboardAndChipsetDiagnostics.ps1")
+    exit 0
+}
+
 # =========================================================================
 # MAIN UNIFIED 4-TIER DIAGNOSTIC FLOW
 # =========================================================================
@@ -232,7 +242,7 @@ if (-not $Quiet) {
     Write-Host ""
     Write-Host "  +------------------------------------------------------------------------+" -ForegroundColor Cyan
     Write-Host "  |          AUTOMATED SYSTEM & GAME CRASH DIAGNOSTIC SUITE               |" -ForegroundColor Cyan
-    Write-Host "  |             4-Tier Evidence Hierarchy Engine v4.2.0                   |" -ForegroundColor Cyan
+    Write-Host "  |             4-Tier Evidence Hierarchy Engine v4.3.0                   |" -ForegroundColor Cyan
     Write-Host "  +------------------------------------------------------------------------+" -ForegroundColor Cyan
     Write-Host "  Scan Window: $($cutoff.ToString('yyyy-MM-dd HH:mm')) to $((Get-Date).ToString('yyyy-MM-dd HH:mm')) ($Hours hours)" -ForegroundColor DarkGray
     Write-Host "  Precedence:  [1] Crash Dumps -> [2] App Logs -> [3] System Logs -> [4] System Config" -ForegroundColor DarkGray
@@ -411,11 +421,21 @@ if (-not $Quiet) {
 
 $pnpIssues = Get-DcPnpHealth
 $gpuHealth = Get-DcGpuDriverHealth
+$mbHealth = Get-DcMotherboardAndChipsetHealth
 $netHealth = Get-DcNetworkHealth
 $displayHealth = Get-DcDisplayDiagnostics
 $kernelDriverHealth = Get-DcProblematicKernelDrivers
 
 if (-not $Quiet) {
+    # Motherboard & Chipset Overview
+    Write-Host "  Motherboard : $($mbHealth.MotherboardManufacturer) $($mbHealth.MotherboardProduct) $($mbHealth.MotherboardVersion)" -ForegroundColor White
+    $biosAgeStr = if ($mbHealth.BiosAgeYears) { " ($($mbHealth.BiosAgeYears) yrs old)" } else { "" }
+    Write-Host "  BIOS        : $($mbHealth.BiosVersion) | Released: $($mbHealth.BiosReleaseDate)$biosAgeStr" -ForegroundColor (if ($mbHealth.IsBiosOutdated) { [ConsoleColor]::Yellow } else { [ConsoleColor]::White })
+    Write-Host "  Chipset     : $($mbHealth.Summary)" -ForegroundColor (if ($mbHealth.IsHealthy) { [ConsoleColor]::Green } else { [ConsoleColor]::Yellow })
+    if ($mbHealth.MissingControllers.Count -gt 0) {
+        Write-Host "  [!] Missing Chipset Controllers: $($mbHealth.MissingControllers -join ', ')" -ForegroundColor Red
+    }
+
     if ($pnpIssues.Count -gt 0) {
         Write-Host "  [!] PnP Hardware Health Warning: Detected $($pnpIssues.Count) device(s) with errors/missing drivers:" -ForegroundColor Red
         foreach ($pi in $pnpIssues) {
@@ -428,7 +448,11 @@ if (-not $Quiet) {
     foreach ($g in $gpuHealth.Gpus) {
         Write-Host "  GPU: $($g.Name) ($($g.Vendor))" -ForegroundColor Yellow
         Write-Host "    +- Driver Version: $($g.DriverVersion) | Date: $($g.DriverDate)" -ForegroundColor DarkGray
-        Write-Host "    +- Provider:       $($g.Provider) | Status: $($g.Status)" -ForegroundColor DarkGray
+        $installTypeStr = if ($g.AmdInstallType) { " | Install: $($g.AmdInstallType)" } else { "" }
+        Write-Host "    +- Provider:       $($g.Provider) | Status: $($g.Status)$installTypeStr" -ForegroundColor DarkGray
+        if ($g.CrashDefenderActive) {
+            Write-Host "    +- Note: AMD Crash Defender service (AMDFendrSR) is active" -ForegroundColor DarkGray
+        }
     }
 
     if ($gpuHealth.DualGpuConflict) {
@@ -514,14 +538,26 @@ if ($zombieProcesses.Count -gt 0) {
     $rootCauseGuidance = "Ensure your Windows Paging File (Pagefile) is set to 'System managed size' on an SSD with at least 20 GB free space. Do not disable or severely restrict pagefile size."
     $rootCauseSeverity = "Critical"
 } elseif ($telemetry.TdrEvents.Count -gt 0) {
+    $hasHighBoostGpu = @($gpuHealth.Gpus | Where-Object { $_.IsHighBoostCard }).Count -gt 0
+    $hasAmdFullInstall = @($gpuHealth.Gpus | Where-Object { $_.AmdInstallType -like "*Full*" }).Count -gt 0
+
     if ($telemetry.PciePowerManagement.IsEnabled) {
         $rootCauseTitle = "GPU DISPLAY DRIVER TIMEOUT (TDR / 0x141) - PCIE POWER SAVINGS ACTIVE"
         $rootCauseDesc = "The GPU display driver stopped responding and was recovered by Windows ($($telemetry.TdrEvents.Count) incident(s)). Windows PCIe Link State Power Management (ASPM) is currently ENABLED ('$($telemetry.PciePowerManagement.ACSettingName)') in power plan '$($telemetry.PciePowerManagement.SchemeName)'. When the PCIe link enters low-power L0s/L1 states during idle or video playback, resumption latency spikes cause the graphics watchdog to timeout."
-        $rootCauseGuidance = "Disable PCIe Link State Power Management using '.\Analyze-LatestCrash.ps1 -DisablePciePowerSavings' or '.\scripts\Repair-PciePowerSettings.ps1'. If timeouts persist, clean reinstall graphics drivers."
+        $boostAdvice = if ($hasHighBoostGpu) { " If timeouts persist under low load, enthusiast cards with aggressive factory boost targets (e.g. RX 7900 XTX / 6950 XT defaulting up to ~2970 MHz vs 2500 MHz reference) benefit from capping Max Frequency to ~2700-2800 MHz or applying a -100 MHz offset in AMD Software Tuning to eliminate transient voltage droop." } else { "" }
+        $rootCauseGuidance = "Disable PCIe Link State Power Management using '.\Analyze-LatestCrash.ps1 -DisablePciePowerSavings' or '.\scripts\Repair-PciePowerSettings.ps1'.$boostAdvice"
     } else {
         $rootCauseTitle = "GPU DISPLAY DRIVER TIMEOUT (TDR / 0x141)"
         $rootCauseDesc = "The GPU display driver stopped responding and was recovered by Windows ($($telemetry.TdrEvents.Count) incident(s))."
-        $rootCauseGuidance = "Clean reinstall your graphics driver using AMD Clean Utility or DDU. Disable GPU hardware scheduling or aggressive overclocks if crashes persist."
+        $remedyList = [System.Collections.Generic.List[string]]::new()
+        $remedyList.Add("Clean reinstall your graphics driver using AMD Clean Utility or DDU in Safe Mode.")
+        if ($hasHighBoostGpu) {
+            $remedyList.Add("Enthusiast GPU Detected: Factory boost targets often exceed silicon stability in bursty/light workloads. Test applying a -100 MHz offset or capping Max Frequency to reference (~2700-2800 MHz) in AMD Software Tuning to prevent transient voltage droop.")
+        }
+        if ($hasAmdFullInstall) {
+            $remedyList.Add("AMD Adrenalin Full Install: Test a clean 'Driver Only' installation to eliminate potential background overlay and hook contention.")
+        }
+        $rootCauseGuidance = $remedyList -join " "
     }
     $rootCauseSeverity = "Critical"
 } elseif ($telemetry.KernelBugChecks.Count -gt 0) {
@@ -545,6 +581,11 @@ if ($zombieProcesses.Count -gt 0) {
     $rootCauseTitle = "HARDWARE DEVICE ERRORS / MISSING DRIVERS"
     $rootCauseDesc = "$($pnpIssues.Count) device(s) are reporting errors or missing drivers in Windows Device Manager."
     $rootCauseGuidance = "Install official motherboard chipset drivers and check Device Manager for yellow exclamation marks."
+    $rootCauseSeverity = "Warning"
+} elseif ($mbHealth -and -not $mbHealth.IsHealthy) {
+    $rootCauseTitle = "MISSING MOTHERBOARD CHIPSET CONTROLLERS"
+    $rootCauseDesc = "One or more core motherboard platform controllers ($($mbHealth.MissingControllers -join ', ')) are missing official drivers or reporting errors. This can cause PCIe link instability, USB disconnects, and intermittent driver hangs."
+    $rootCauseGuidance = "Download and install the latest official chipset drivers from your motherboard manufacturer's support site or AMD.com / Intel.com ($($mbHealth.Summary))."
     $rootCauseSeverity = "Warning"
 } elseif ($telemetry.FastStartup.FastStartupEnabled -and $telemetry.AbruptReboots.Count -gt 0) {
     $rootCauseTitle = "ABRUPT REBOOT WITH FAST STARTUP ENABLED"
@@ -602,6 +643,7 @@ $reportObject = [PSCustomObject]@{
     HardwareHealth       = [PSCustomObject]@{
         Gpus                       = @($gpuHealth.Gpus)
         DualGpuConflict            = $gpuHealth.DualGpuConflict
+        Motherboard                = $mbHealth
         PnpIssues                  = @($pnpIssues)
         Displays                   = @($displayHealth.Displays)
         HighRiskDisplays           = $displayHealth.HighRiskTimingsDetected

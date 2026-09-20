@@ -30,9 +30,10 @@ It strictly adheres to a **4-Tier Diagnostic Hierarchy**, prioritizing binary cr
    * Audits **PCIe Link State Power Management (ASPM)** settings across active power plans (`SUB_PCIEXPRESS`), identifying low-power bus transition latency spikes that trigger GPU driver timeouts (TDR 4101 / 0x141) during idle or video playback.
 
 4. **Tier 4: System Hardware & Configuration (Contextual Audit)**
+   * Audits **Motherboard, BIOS Firmware & Platform Chipset Drivers** (Manufacturer, Model, BIOS release date, AMD Chipset Software / Intel Chipset Device Software version, and core controllers: AMD GPIO, I2C, PCI, PSP, and 3D V-Cache Optimizer).
    * Audits **Plug and Play (PnP) Hardware Health** across all system devices for missing drivers (Code 28 `CM_PROB_FAILED_INSTALL`), failed devices (Code 43), and uninitialized chipset devices.
    * Audits **Rogue & Legacy Kernel I/O Drivers** (`inpoutx64.sys`, `WinRing0x64.sys`, `ene.sys`, `AsrOmgDrv.sys`, `gdrv.sys`) left by RGB or fan tools, diagnosing collisions with anti-cheat software (Easy Anti-Cheat, BattlEye, Vanguard) and Windows Memory Integrity that cause `INVALID_KERNEL_HANDLE (0x93)` BSODs or video freeze lockups.
-   * Audits active graphics hardware (`Win32_VideoController`), detects **Dual-GPU driver version conflicts** (e.g. AMD Ryzen integrated graphics vs. discrete Radeon graphics), and checks Windows Update driver overwrite policies (`SearchOrderConfig`, `ExcludeWUDriversInQualityUpdate`).
+   * Audits active graphics hardware (`Win32_VideoController`), detects **Dual-GPU driver version conflicts** (e.g. AMD Ryzen integrated graphics vs. discrete Radeon graphics), AMD Software installation type (Driver Only vs Adrenalin Full Install), and checks Windows Update driver overwrite policies (`SearchOrderConfig`, `ExcludeWUDriversInQualityUpdate`).
    * Audits **Connected Displays & EDID Detailed Timings** via WMI and Registry, detecting aggressive factory overclocks (e.g. 1440p 165Hz with bloated vertical blanking >1500 lines or pixel clock >585 MHz) saturating DisplayPort 1.2a budget scalers and causing periodic 2-3s blackouts without generating Windows TDRs or crash dumps.
    * Audits graphics subsystem configuration (TdrDelay, TdrLevel, Hardware-Accelerated GPU Scheduling).
    * Audits Bluetooth gaming controllers (DualSense, Xbox, VR, Stadia) and network adapter stability.
@@ -46,7 +47,7 @@ Simply double-click **`Run-Diagnostics.bat`** in the project folder. It launches
 
 ```text
 ========================================================================
-  AUTOMATED GAME & SYSTEM CRASH DIAGNOSTIC SUITE (v4.2.0)
+  AUTOMATED GAME & SYSTEM CRASH DIAGNOSTIC SUITE (v4.3.0)
   Evidence-Based Engine (Crash Dumps, Logs, Telemetry, Hardware)
 ========================================================================
 
@@ -54,7 +55,7 @@ Simply double-click **`Run-Diagnostics.bat`** in the project folder. It launches
   [2] Quick Scan (Past 24 Hours)
   [3] Deep Scan (Past 7 Days)
   [4] Export Support Bundle (HTML Report + ZIP for Discord/Support)
-  [5] Hardware Health & Missing Drivers Audit (PnP)
+  [5] Motherboard, Chipset Drivers & PnP Hardware Health Audit
   [6] Display, EDID Timings & DP Scaler Saturation Audit
   [7] GPU Driver Health & Downgrade Prevention Audit
   [8] Apply GPU Downgrade Protection (Lock Windows Update Drivers)
@@ -97,6 +98,7 @@ Each tool in the `scripts/` directory can also be executed individually as an is
 | **`Inspect-GameLogs.ps1`** | Scans Unreal, Unity, idTech, Source 2, and Godot logs for fatal errors and asserts. |
 | **`Inspect-SteamLogs.ps1`** | Analyzes Steam IPC pipes, CEF browser errors, and sleep/wake crashes. |
 | **`Get-PnpDeviceDiagnostics.ps1`** | Scans all active hardware for missing drivers (Code 28) and device errors (Code 43). |
+| **`Get-MotherboardAndChipsetDiagnostics.ps1`** | Audits motherboard model, BIOS version/date, and platform chipset drivers (AMD/Intel). |
 | **`Get-GPUDriverDiagnostics.ps1`** | Audits display adapters, detects driver downgrades, and locks Windows Update driver policies. |
 | **`Get-PowerAndSleepDiagnostics.ps1`** | Audits Windows Fast Startup, unexpected shutdowns (6008), and sleep/wake transitions. |
 | **`Get-DisplayDiagnostics.ps1`** | Audits connected displays, EDID detailed timings, and DP 1.2a scaler saturation hazards. |

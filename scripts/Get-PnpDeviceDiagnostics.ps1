@@ -53,3 +53,13 @@ if ($badDevices) {
 }
 
 Write-Host ""
+Write-Host "------------------------------------------------------------------------" -ForegroundColor DarkGray
+Write-Host "Motherboard & Chipset Environment:" -ForegroundColor Cyan
+$mb = Get-DcMotherboardAndChipsetHealth
+Write-Host "  Motherboard : $($mb.MotherboardManufacturer) $($mb.MotherboardProduct)" -ForegroundColor White
+Write-Host "  BIOS        : $($mb.BiosVersion) ($($mb.BiosReleaseDate))" -ForegroundColor White
+Write-Host "  Chipset     : $($mb.Summary)" -ForegroundColor if ($mb.IsHealthy) { [ConsoleColor]::Green } else { [ConsoleColor]::Yellow }
+if ($mb.MissingControllers.Count -gt 0) {
+    Write-Host "  [!] Missing Controllers: $($mb.MissingControllers -join ', ')" -ForegroundColor Red
+}
+Write-Host ""
