@@ -234,4 +234,60 @@ function Repair-DcAmdDriverAlignment {
     return $false
 }
 
-Export-ModuleMember -Function Test-DcIsAdmin, Clear-DcGameConfig, Clear-DcSteamCache, Stop-DcZombieProcesses, Repair-DcEthernetSettings, Repair-DcAmdDriverAlignment
+function Clear-DcShaderCache {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory = $false)]
+        [ValidateSet("DirectX", "AMD", "NVIDIA", "All")]
+        [string]$Target = "All"
+    )
+
+    Write-Host "=== PURGING GRAPHICS & SHADER CACHES ===" -ForegroundColor Magenta
+
+    $paths = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $localApp = $env:LOCALAPPDATA
+
+    if ($Target -in @("DirectX", "All")) {
+        $paths.Add([PSCustomObject]@{ Label = "DirectX D3D Shader Cache"; Path = (Join-Path $localApp "D3DSCache") })
+    }
+    if ($Target -in @("AMD", "All")) {
+        $paths.Add([PSCustomObject]@{ Label = "AMD DirectX Shader Cache"; Path = (Join-Path $localApp "AMD\DxCache") })
+        $paths.Add([PSCustomObject]@{ Label = "AMD OpenGL Shader Cache"; Path = (Join-Path $localApp "AMD\GLCache") })
+        $paths.Add([PSCustomObject]@{ Label = "AMD OpenCL Cache"; Path = (Join-Path $localApp "AMD\OclCache") })
+    }
+    if ($Target -in @("NVIDIA", "All")) {
+        $paths.Add([PSCustomObject]@{ Label = "NVIDIA DXCache"; Path = (Join-Path $localApp "NVIDIA\DXCache") })
+        $paths.Add([PSCustomObject]@{ Label = "NVIDIA GLCache"; Path = (Join-Path $localApp "NVIDIA\GLCache") })
+    }
+
+    $totalPurged = 0
+    foreach ($p in $paths) {
+        if (Test-Path $p.Path) {
+            Write-Host "Cleaning $($p.Label): $($p.Path)..." -ForegroundColor Yellow
+            if ($PSCmdlet.ShouldProcess($p.Path, "Purge Shader Cache Files")) {
+                $files = Get-ChildItem -Path $p.Path -Recurse -File -ErrorAction SilentlyContinue
+                if ($files) {
+                    $cleanedThis = 0
+                    foreach ($f in $files) {
+                        try {
+                            Remove-Item -Path $f.FullName -Force -ErrorAction Stop
+                            $cleanedThis++
+                            $totalPurged++
+                        } catch {
+                            # File may be actively locked by running game or display service
+                        }
+                    }
+                    Write-Host "  [OK] Cleared $cleanedThis file(s)." -ForegroundColor Green
+                } else {
+                    Write-Host "  Directory is empty (no cache files)." -ForegroundColor DarkGray
+                }
+            }
+        }
+    }
+
+    Write-Host "[DONE] Shader cache purge complete ($totalPurged file(s) removed)." -ForegroundColor Green
+    Write-Host "Next time games launch, shaders will cleanly recompile from scratch." -ForegroundColor DarkGray
+    return $totalPurged
+}
+
+Export-ModuleMember -Function Test-DcIsAdmin, Clear-DcGameConfig, Clear-DcSteamCache, Clear-DcShaderCache, Stop-DcZombieProcesses, Repair-DcEthernetSettings, Repair-DcAmdDriverAlignment

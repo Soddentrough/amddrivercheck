@@ -44,6 +44,41 @@ function Get-DcFastStartupStatus {
     }
 }
 
+function Get-DcGraphicsDriverSettings {
+    [CmdletBinding()]
+    param()
+
+    $gfxPath = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
+    $tdrDelay = $null
+    $tdrLevel = $null
+    $tdrDdiDelay = $null
+    $hwSchMode = $null
+
+    if (Test-Path $gfxPath) {
+        $props = Get-ItemProperty -Path $gfxPath -ErrorAction SilentlyContinue
+        if ($props) {
+            $tdrDelay = $props.TdrDelay
+            $tdrLevel = $props.TdrLevel
+            $tdrDdiDelay = $props.TdrDdiDelay
+            $hwSchMode = $props.HwSchMode
+        }
+    }
+
+    $hagsStatus = switch ($hwSchMode) {
+        2 { "Enabled (Hardware-Accelerated GPU Scheduling)" }
+        1 { "Disabled" }
+        default { "Default / Not Configured" }
+    }
+
+    return [PSCustomObject]@{
+        TdrDelay    = $tdrDelay
+        TdrLevel    = $tdrLevel
+        TdrDdiDelay = $tdrDdiDelay
+        HwSchMode   = $hwSchMode
+        HAGSStatus  = $hagsStatus
+    }
+}
+
 function Get-DcSystemTelemetry {
     [CmdletBinding()]
     param(
@@ -52,17 +87,20 @@ function Get-DcSystemTelemetry {
     )
 
     $results = [PSCustomObject]@{
-        CutoffTime            = $Cutoff
-        FastStartup           = Get-DcFastStartupStatus
-        WheaErrors            = [System.Collections.Generic.List[PSCustomObject]]::new()
-        TdrEvents             = [System.Collections.Generic.List[PSCustomObject]]::new()
-        KernelBugChecks       = [System.Collections.Generic.List[PSCustomObject]]::new()
-        UnexpectedShutdowns   = [System.Collections.Generic.List[PSCustomObject]]::new()
-        AbruptReboots         = [System.Collections.Generic.List[PSCustomObject]]::new()
-        PnpDriverFailures     = [System.Collections.Generic.List[PSCustomObject]]::new()
-        StorageErrors         = [System.Collections.Generic.List[PSCustomObject]]::new()
-        AppCrashes            = [System.Collections.Generic.List[PSCustomObject]]::new()
-        AppHangs              = [System.Collections.Generic.List[PSCustomObject]]::new()
+        CutoffTime             = $Cutoff
+        FastStartup            = Get-DcFastStartupStatus
+        GraphicsDriverSettings = Get-DcGraphicsDriverSettings
+        WheaErrors             = [System.Collections.Generic.List[PSCustomObject]]::new()
+        PcieWheaErrors         = [System.Collections.Generic.List[PSCustomObject]]::new()
+        MemoryExhaustion       = [System.Collections.Generic.List[PSCustomObject]]::new()
+        TdrEvents              = [System.Collections.Generic.List[PSCustomObject]]::new()
+        KernelBugChecks        = [System.Collections.Generic.List[PSCustomObject]]::new()
+        UnexpectedShutdowns    = [System.Collections.Generic.List[PSCustomObject]]::new()
+        AbruptReboots          = [System.Collections.Generic.List[PSCustomObject]]::new()
+        PnpDriverFailures      = [System.Collections.Generic.List[PSCustomObject]]::new()
+        StorageErrors          = [System.Collections.Generic.List[PSCustomObject]]::new()
+        AppCrashes             = [System.Collections.Generic.List[PSCustomObject]]::new()
+        AppHangs               = [System.Collections.Generic.List[PSCustomObject]]::new()
     }
 
     # Query System Events within time window
@@ -72,12 +110,18 @@ function Get-DcSystemTelemetry {
         foreach ($e in $sysEvents) {
             # 1. WHEA Hardware Errors
             if ($e.ProviderName -match 'WHEA-Logger') {
-                $results.WheaErrors.Add([PSCustomObject]@{
+                $isPcie = ($e.Id -eq 17 -or $e.Message -match '(?i)PCI Express|PCIe')
+                $wheaObj = [PSCustomObject]@{
                     TimeCreated  = $e.TimeCreated
                     Id           = $e.Id
                     Provider     = $e.ProviderName
+                    IsPcieError  = $isPcie
                     Message      = $e.Message.Trim()
-                })
+                }
+                $results.WheaErrors.Add($wheaObj)
+                if ($isPcie) {
+                    $results.PcieWheaErrors.Add($wheaObj)
+                }
             }
 
             # 2. GPU Driver TDR Resets (Event 4101 or display driver stop)
@@ -116,11 +160,27 @@ function Get-DcSystemTelemetry {
 
             # 5. Abrupt Reboots (Kernel-Power Event 41)
             if ($e.Id -eq 41 -and $e.ProviderName -match 'Kernel-Power') {
+                $bugCode = 0
+                try {
+                    $xml = [xml]$e.ToXml()
+                    $bcNode = $xml.Event.EventData.Data | Where-Object { $_.Name -eq 'BugcheckCode' }
+                    if ($bcNode -and $bcNode.'#text') {
+                        $bugCode = [int64]$bcNode.'#text'
+                    }
+                } catch {}
+
+                $msg = if ($bugCode -eq 0) {
+                    "Abrupt power loss or instant freeze (BugcheckCode: 0 - Power drop, PSU transient trip, or hard lock)."
+                } else {
+                    ("System rebooted following BugCheck code 0x{0:X}." -f $bugCode)
+                }
+
                 $results.AbruptReboots.Add([PSCustomObject]@{
                     TimeCreated  = $e.TimeCreated
                     Id           = $e.Id
                     Provider     = $e.ProviderName
-                    Message      = "The system rebooted without cleanly shutting down first (Power drop, hardware hang, or instant reset)."
+                    BugcheckCode = $bugCode
+                    Message      = $msg
                 })
             }
 
@@ -143,6 +203,22 @@ function Get-DcSystemTelemetry {
                     Message      = $e.Message.Trim()
                 })
             }
+        }
+    }
+
+    # Query Virtual Memory / Commit Limit Exhaustion (Event 2004)
+    $memEvents = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-Resource-Exhaustion-Detector'; Id=2004; StartTime=$Cutoff} -ErrorAction SilentlyContinue
+    if (-not $memEvents) {
+        $memEvents = Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Resource-Exhaustion-Detector/Operational'; Id=2004; StartTime=$Cutoff} -ErrorAction SilentlyContinue
+    }
+    if ($memEvents) {
+        foreach ($me in ($memEvents | Select-Object -First 5)) {
+            $results.MemoryExhaustion.Add([PSCustomObject]@{
+                TimeCreated = $me.TimeCreated
+                Id          = $me.Id
+                Provider    = $me.ProviderName
+                Message     = $me.Message.Trim()
+            })
         }
     }
 
@@ -184,4 +260,4 @@ function Get-DcSystemTelemetry {
     return $results
 }
 
-Export-ModuleMember -Function Get-DcFastStartupStatus, Get-DcSystemTelemetry, Get-DcBugCheckMeaning
+Export-ModuleMember -Function Get-DcFastStartupStatus, Get-DcSystemTelemetry, Get-DcBugCheckMeaning, Get-DcGraphicsDriverSettings

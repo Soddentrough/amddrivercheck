@@ -42,6 +42,7 @@ $rootFiles = @(
     "Get-GPUDriverDiagnostics.ps1",
     "Run-Diagnostics.bat",
     "README.md",
+    "QUICKSTART.txt",
     "run.ps1"
 )
 

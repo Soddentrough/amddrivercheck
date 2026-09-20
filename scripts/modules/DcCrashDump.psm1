@@ -143,6 +143,8 @@ function Read-DcMinidump {
         ExceptionMeaning= $null
         FaultingModule  = $null
         FaultingIP      = $null
+        IsGraphicsCrash = $false
+        IsShaderCompiler= $false
         ThreadCount     = 0
         Modules         = @()
         Assertions      = @()
@@ -248,6 +250,11 @@ function Read-DcMinidump {
             $result.ExceptionMeaning = Get-DcExceptionMeaning $codeHex
             $result.FaultingIP = Resolve-DumpAddress $excAddr $mods
             $result.FaultingModule = if ($result.FaultingIP -match '^([^\+]+)\+') { $Matches[1] } else { "Unknown" }
+
+            $isShaderCompiler = ($result.FaultingModule -match '(?i)amdxc|amdxx|nvwgf2|oo2core')
+            $isGfxDriver = ($result.FaultingModule -match '(?i)amdkmdag|nvlddmkm|igdkmd|dxgi|d3d12|d3d11|vulkan|atidxx')
+            $result.IsShaderCompiler = $isShaderCompiler
+            $result.IsGraphicsCrash = ($isShaderCompiler -or $isGfxDriver -or ($result.ExceptionCode -match '0x887A000[156]'))
         }
 
         # 4. Thread List (Type 3)
@@ -274,9 +281,9 @@ function Read-DcMinidump {
 
             if ($bytesRead -gt 0) {
                 $ascii = [System.Text.Encoding]::ASCII.GetString($buffer, 0, $bytesRead)
-                $matches = [regex]::Matches($ascii, '(?i)Assert(ion)?\([^\r\n]{5,180}\)|Fatal error:?\s+[^\r\n]{5,180}') |
+                $matches = [regex]::Matches($ascii, '(?i)Assert(ion)?\([^\r\n]{5,180}\)|Fatal error:?\s+[^\r\n]{5,180}|DXGI_ERROR_[A-Z_]+|DeviceRemovedReason:?\s+[^\r\n]{5,120}|VK_ERROR_[A-Z_]+|D3D12 device removed') |
                     Select-Object -ExpandProperty Value -Unique |
-                    Select-Object -First 5
+                    Select-Object -First 6
                 if ($matches) {
                     $result.Assertions = @($matches)
                 }

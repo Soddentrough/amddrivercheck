@@ -90,6 +90,13 @@ param(
     [string]$Game = "All",
 
     [Parameter(Mandatory = $false)]
+    [switch]$CleanShaderCache,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateSet("DirectX", "AMD", "NVIDIA", "All")]
+    [string]$ShaderTarget = "All",
+
+    [Parameter(Mandatory = $false)]
     [switch]$CleanSteamCache,
 
     [Parameter(Mandatory = $false)]
@@ -129,6 +136,13 @@ if ($CleanConfig) {
     Write-Host "`n=== GAME CONFIGURATION & CACHE CLEANER (WITH BACKUPS) ===" -ForegroundColor Magenta
     Clear-DcGameConfig -Game $Game -Backup
     Write-Host "`n[DONE] Game configuration cleaning complete." -ForegroundColor Green
+    exit 0
+}
+
+if ($CleanShaderCache) {
+    Write-Host "`n=== DIRECTX & GPU SHADER CACHE PURGE ===" -ForegroundColor Magenta
+    Clear-DcShaderCache -Target $ShaderTarget
+    Write-Host "`n[DONE] Shader cache cleaning complete." -ForegroundColor Green
     exit 0
 }
 
@@ -394,13 +408,21 @@ if ($zombieProcesses.Count -gt 0) {
     $rootCauseSeverity = "Warning"
 } elseif ($parsedDumps.Count -gt 0 -and ($parsedDumps | Where-Object { $_.ExceptionCode })) {
     $firstCrash = $parsedDumps | Where-Object { $_.ExceptionCode } | Select-Object -First 1
-    $rootCauseTitle = "UNHANDLED APPLICATION CRASH (Tier 1 Crash Dump)"
-    $rootCauseDesc = "Exception $($firstCrash.ExceptionCode): $($firstCrash.ExceptionMeaning) in $($firstCrash.FaultingModule) ($($firstCrash.FileName))."
-    if ($firstCrash.ExceptionCode -match '0xC0000005') {
-        $rootCauseGuidance = "Memory access violation / native application bug in $($firstCrash.FaultingModule). Ensure the game and Visual C++ Redistributables are fully updated. If overclocked, test with stock memory/XMP timings."
+    if ($firstCrash.IsShaderCompiler -or ($firstCrash.FaultingModule -match '(?i)amdxc|amdxx|nvwgf2|oo2core')) {
+        $rootCauseTitle = "SHADER COMPILATION / GRAPHICS RUNTIME CRASH ($($firstCrash.FaultingModule))"
+        $rootCauseDesc = "Exception $($firstCrash.ExceptionCode): $($firstCrash.ExceptionMeaning) in shader compiler / decompression DLL ($($firstCrash.FaultingModule))."
+        $rootCauseGuidance = "Purge corrupt shader caches using '.\Analyze-LatestCrash.ps1 -CleanShaderCache'. Shader compilation places heavy AVX2/AVX-512 load across all CPU cores and RAM; if crashes persist, test CPU/RAM stability or disable aggressive PBO/Curve Optimizer undervolts."
     } elseif ($firstCrash.ExceptionCode -match '0x887A0006|0x887A0005') {
-        $rootCauseGuidance = "Graphics device hang/removed error. The display driver crashed or timed out during a render pass. Check GPU temperatures and lower in-game ray tracing or texture memory settings."
+        $rootCauseTitle = "GRAPHICS DEVICE HUNG / REMOVED (0x887A0006 / 0x887A0005)"
+        $rootCauseDesc = "DirectX graphics device lost or timed out ($($firstCrash.ExceptionMeaning)) in $($firstCrash.FaultingModule)."
+        $rootCauseGuidance = "The display driver crashed or timed out during a render pass. Check GPU temperatures and power cables, lower in-game ray tracing / VRAM texture settings, or clean reinstall GPU drivers."
+    } elseif ($firstCrash.ExceptionCode -match '0xC0000005') {
+        $rootCauseTitle = "APPLICATION MEMORY ACCESS VIOLATION (0xC0000005)"
+        $rootCauseDesc = "Exception 0xC0000005: Native memory access violation in $($firstCrash.FaultingModule) ($($firstCrash.FileName))."
+        $rootCauseGuidance = "Memory access violation in $($firstCrash.FaultingModule). Verify game integrity via Steam/Launcher and update Visual C++ Redistributables. If overclocked, test with stock memory/XMP timings."
     } else {
+        $rootCauseTitle = "UNHANDLED APPLICATION CRASH (Tier 1 Crash Dump)"
+        $rootCauseDesc = "Exception $($firstCrash.ExceptionCode): $($firstCrash.ExceptionMeaning) in $($firstCrash.FaultingModule) ($($firstCrash.FileName))."
         $rootCauseGuidance = "Verify game integrity via Steam/Launcher and report the faulting module ($($firstCrash.FaultingModule)) to the game developer."
     }
     $rootCauseSeverity = "Critical"
@@ -409,6 +431,17 @@ if ($zombieProcesses.Count -gt 0) {
     $rootCauseDesc = $gpuHealth.DualGpuDetails
     $rootCauseGuidance = "Align both AMD display drivers using '.\Analyze-LatestCrash.ps1 -FixDrivers' or disable CPU Integrated Graphics in Motherboard BIOS if not using motherboard display ports."
     $rootCauseSeverity = "Warning"
+} elseif ($telemetry.PcieWheaErrors.Count -gt 0) {
+    $firstPcie = $telemetry.PcieWheaErrors[0]
+    $rootCauseTitle = "PCIe BUS / RISER CABLE INTEGRITY ERROR (WHEA Event 17)"
+    $rootCauseDesc = "Windows detected PCIe link communication errors ($($telemetry.PcieWheaErrors.Count) incident(s)). This is frequently caused by PCIe 4.0/5.0 riser cables, loose GPU PCIe slot seating, or motherboard PCIe signal degradation."
+    $rootCauseGuidance = "Reseat your graphics card. If using a vertical GPU mount or PCIe riser cable, test with the GPU plugged directly into the motherboard PCIe slot, or configure PCIe link speed to Gen 3 / Gen 4 in BIOS."
+    $rootCauseSeverity = "Critical"
+} elseif ($telemetry.MemoryExhaustion.Count -gt 0) {
+    $rootCauseTitle = "VIRTUAL MEMORY / COMMIT LIMIT EXHAUSTION (Event 2004)"
+    $rootCauseDesc = "Windows ran out of virtual memory / pagefile commit limit while games or shader compilation were active ($($telemetry.MemoryExhaustion.Count) incident(s))."
+    $rootCauseGuidance = "Ensure your Windows Paging File (Pagefile) is set to 'System managed size' on an SSD with at least 20 GB free space. Do not disable or severely restrict pagefile size."
+    $rootCauseSeverity = "Critical"
 } elseif ($telemetry.TdrEvents.Count -gt 0) {
     $rootCauseTitle = "GPU DISPLAY DRIVER TIMEOUT (TDR / 0x141)"
     $rootCauseDesc = "The GPU display driver stopped responding and was recovered by Windows ($($telemetry.TdrEvents.Count) incident(s))."
@@ -420,6 +453,17 @@ if ($zombieProcesses.Count -gt 0) {
     $rootCauseDesc = "$($firstBc.Meaning) - $($firstBc.Message)"
     $rootCauseGuidance = "A kernel driver caused a fatal system fault. Check Tier 4 hardware devices for missing or uninstalled drivers."
     $rootCauseSeverity = "Critical"
+} elseif ($telemetry.WheaErrors.Count -gt 0) {
+    $firstWhea = $telemetry.WheaErrors[0]
+    $rootCauseTitle = "WHEA HARDWARE ARCHITECTURE ERROR (Event $($firstWhea.Id))"
+    $rootCauseDesc = "A fatal or corrected hardware exception was reported by the CPU/motherboard hardware subsystem ($($firstWhea.Message))."
+    $rootCauseGuidance = "This indicates hardware or bus instability (CPU undervolt, unstable memory EXPO/XMP, or overheating). Disable CPU Curve Optimizer or RAM overclocks to restore baseline stability."
+    $rootCauseSeverity = "Critical"
+} elseif ($telemetry.AbruptReboots.Count -gt 0 -and ($telemetry.AbruptReboots | Where-Object { $_.BugcheckCode -eq 0 })) {
+    $rootCauseTitle = "DIRTY POWER RESET / INSTANT BLACK SCREEN (Event 41 BugcheckCode 0)"
+    $rootCauseDesc = "The system lost power or restarted abruptly without generating a BugCheck crash dump ($($telemetry.AbruptReboots.Count) incident(s))."
+    $rootCauseGuidance = "When occurring during gaming or 3D load, this typically points to PSU transient spike trips (GPU power draw exceeding PSU peak wattage), loose 12VHPWR/PCIe 8-pin power cables, or aggressive GPU power limits."
+    $rootCauseSeverity = "Warning"
 } elseif ($pnpIssues.Count -gt 0) {
     $rootCauseTitle = "HARDWARE DEVICE ERRORS / MISSING DRIVERS"
     $rootCauseDesc = "$($pnpIssues.Count) device(s) are reporting errors or missing drivers in Windows Device Manager."

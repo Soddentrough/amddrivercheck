@@ -20,16 +20,18 @@ It strictly adheres to a **4-Tier Diagnostic Hierarchy**, prioritizing binary cr
 
 3. **Tier 3: System Logs & Hardware Telemetry (Tertiary Telemetry)**
    * Correlates Windows Event Logs timestamp-aligned to crash incidents:
-     * `WHEA-Logger` CPU, bus, and PCIe hardware errors.
+     * `WHEA-Logger` CPU, bus, and PCIe hardware errors (detects PCIe 4.0/5.0 riser cable packet loss / WHEA Event `17`).
      * GPU driver TDR timeouts (Event `4101` / `0x141` / `VIDEO_TDR_ERROR`).
+     * Virtual memory / commit limit exhaustion (`Resource-Exhaustion-Detector` Event `2004`).
      * Kernel BugChecks (`WER-SystemErrorReporting` BSOD codes).
-     * Unexpected shutdowns (Event `6008`) and dirty reboots (Kernel-Power Event `41`).
+     * Unexpected shutdowns (Event `6008`) and dirty reboots / instant power trips (Kernel-Power Event `41`).
      * Driver load failures (Kernel-PnP Event `219`) and storage/NVMe timeouts (`stornvme`, `disk`).
    * Audits Windows **Fast Startup** configuration (`HiberbootEnabled`), which frequently causes recurring `0x9F` driver power state crashes.
 
 4. **Tier 4: System Hardware & Configuration (Contextual Audit)**
    * Audits **Plug and Play (PnP) Hardware Health** across all system devices for missing drivers (Code 28 `CM_PROB_FAILED_INSTALL`), failed devices (Code 43), and uninitialized chipset devices.
    * Audits active graphics hardware (`Win32_VideoController`), detects **Dual-GPU driver version conflicts** (e.g. AMD Ryzen integrated graphics vs. discrete Radeon graphics), and checks Windows Update driver overwrite policies (`SearchOrderConfig`, `ExcludeWUDriversInQualityUpdate`).
+   * Audits graphics subsystem configuration (TdrDelay, TdrLevel, Hardware-Accelerated GPU Scheduling).
    * Audits Bluetooth gaming controllers (DualSense, Xbox, VR, Stadia) and network adapter stability.
 
 ---
@@ -50,9 +52,10 @@ Simply double-click **`Run-Diagnostics.bat`** in the project folder. It launches
   [3] Deep Scan (Past 7 Days)
   [4] Export Support Bundle (HTML Report + ZIP for Discord/Support)
   [5] Hardware Health & Missing Drivers Audit (PnP)
-  [6] GPU Driver Health & Downgrade Prevention
-  [7] Power, Fast Startup & Sleep Transition Audit
-  [8] Maintenance Tools (Clean Cache, Terminate Zombies)
+  [6] GPU Driver Health & Downgrade Prevention Audit
+  [7] Apply GPU Downgrade Protection (Lock Windows Update Drivers)
+  [8] Power, Fast Startup & Sleep Transition Audit
+  [9] Maintenance & Cache Cleaning Tools
   [0] Exit
 ```
 
@@ -95,6 +98,7 @@ Each tool in the `scripts/` directory can also be executed individually as an is
 | **`Get-BluetoothDiagnostics.ps1`** | Audits Bluetooth radios, gaming controllers, and connection reset errors. |
 | **`Get-NetworkDiagnostics.ps1`** | Audits network adapter link speed, duplex negotiation, and link flapping events. |
 | **`Get-WindowsUpdateHistory.ps1`** | Audits recently installed Windows Quality Updates and driver packages. |
+| **`Clean-ShaderCache.ps1`** | Purges DirectX, AMD, and NVIDIA shader caches to resolve shader compile crash loops. |
 | **`Clean-GameConfig.ps1`** | Purges stale game configs and shader caches (**creates automatic `.bak` backups**). |
 | **`Clean-SteamCache.ps1`** | Purges the Steam CEF HTML browser cache (`%LOCALAPPDATA%\Steam\htmlcache`). |
 | **`Repair-EthernetSettings.ps1`** | Applies stability settings to Intel/Realtek Ethernet adapters (disables VLAN/Priority). |
