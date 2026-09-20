@@ -1,0 +1,13 @@
+# DriverCheck generated reports and bundles
+CrashReport_*.html
+CrashReport_*.json
+DriverCheck_SupportBundle_*.zip
+
+# Backup files created by Clean-GameConfig
+*.bak
+
+# Build release output
+dist/
+
+# Temporary debug logs
+*.log

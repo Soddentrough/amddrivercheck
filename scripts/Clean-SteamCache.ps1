@@ -1,18 +1,16 @@
 <#
 .SYNOPSIS
-    Game Configuration & Cache Cleaner (with Automatic Backups)
+    Steam CEF Browser HTML Cache Cleaner
 .DESCRIPTION
-    Safely purges stale game configurations and shader caches while creating .bak
-    backups to prevent losing user keybindings and sensitivities.
-.PARAMETER Game
-    Target game: "TheGreatCircle", "DOOMEternal", "DOOMTheDarkAges", or "All" (default).
+    Safely purges the Steam client embedded browser HTML cache (%LOCALAPPDATA%\Steam\htmlcache).
+.PARAMETER Force
+    Terminate active Steam processes if running to unlock the cache folder.
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [Parameter(Mandatory = $false)]
-    [ValidateSet("TheGreatCircle", "DOOMEternal", "DOOMTheDarkAges", "All")]
-    [string]$Game = "All"
+    [switch]$Force
 )
 
 $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -23,9 +21,9 @@ Import-Module (Join-Path $modulesDir "DcRemediation.psm1") -Force
 
 Write-Host ""
 Write-Host "========================================================================" -ForegroundColor Magenta
-Write-Host "  GAME CONFIGURATION & CACHE CLEANER" -ForegroundColor Magenta
+Write-Host "  STEAM CEF HTML BROWSER CACHE CLEANER" -ForegroundColor Magenta
 Write-Host "========================================================================" -ForegroundColor Magenta
 Write-Host ""
 
-Clear-DcGameConfig -Game $Game -Backup
+Clear-DcSteamCache -KillRunningSteam:$Force
 Write-Host ""

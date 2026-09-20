@@ -1,0 +1,79 @@
+name: Build & Release Portable ZIP
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version tag (e.g. 4.0.0)'
+        required: true
+        default: '4.0.0'
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate PowerShell Script Syntax (AST Parser)
+        shell: powershell
+        run: |
+          $errFound = $false
+          Get-ChildItem -Recurse -Include *.ps1,*.psm1 | ForEach-Object {
+            $errs = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errs)
+            if ($errs) {
+              $errFound = $true
+              Write-Host "SYNTAX ERROR in $($_.Name): $($errs[0].Message)" -ForegroundColor Red
+            }
+          }
+          if ($errFound) {
+            Write-Error "AST parser found syntax errors in one or more scripts."
+            exit 1
+          }
+          Write-Host "All scripts parsed successfully with zero syntax errors." -ForegroundColor Green
+
+      - name: Build Distributable Release Package
+        shell: powershell
+        run: |
+          $ver = "${{ github.event.inputs.version }}"
+          if (-not $ver) {
+            $ver = "${{ github.ref_name }}".TrimStart('v')
+          }
+          if (-not $ver) { $ver = "4.0.0" }
+          .\build-release.ps1 -Version $ver
+
+      - name: Compute Release Checksum
+        id: checksum
+        shell: powershell
+        run: |
+          $zip = Get-ChildItem dist\*.zip | Select-Object -First 1
+          $hash = (Get-FileHash -Path $zip.FullName -Algorithm SHA256).Hash
+          echo "ZIP_PATH=$($zip.FullName)" >> $env:GITHUB_OUTPUT
+          echo "ZIP_NAME=$($zip.Name)" >> $env:GITHUB_OUTPUT
+          echo "SHA256=$hash" >> $env:GITHUB_OUTPUT
+          Write-Host "Release Asset: $($zip.Name) (SHA256: $hash)"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: dist/*.zip
+          name: DriverCheck v${{ github.ref_name }}
+          body: |
+            ## Automated Game & System Crash Diagnostic Suite
+
+            ### 🚀 Download & Run
+            1. Download **`${{ steps.checksum.outputs.ZIP_NAME }}`** below.
+            2. Extract all files to a folder.
+            3. Double-click **`Run-Diagnostics.bat`** to start the interactive scan and open your HTML report.
+
+            ### 🔐 Integrity
+            * **File:** `${{ steps.checksum.outputs.ZIP_NAME }}`
+            * **SHA256:** `${{ steps.checksum.outputs.SHA256 }}`
