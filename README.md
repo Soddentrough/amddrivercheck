@@ -47,7 +47,7 @@ Simply double-click **`Run-Diagnostics.bat`** in the project folder. It launches
 
 ```text
 ========================================================================
-  AUTOMATED GAME & SYSTEM CRASH DIAGNOSTIC SUITE (v4.3.0)
+  AUTOMATED GAME & SYSTEM CRASH DIAGNOSTIC SUITE (v4.4.0)
   Evidence-Based Engine (Crash Dumps, Logs, Telemetry, Hardware)
 ========================================================================
 

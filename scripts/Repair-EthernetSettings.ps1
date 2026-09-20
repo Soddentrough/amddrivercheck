@@ -6,14 +6,14 @@
       1. Locks Speed & Duplex to user-specified rate (2.5 Gbps, 1.0 Gbps Full Duplex, or Auto) to prevent PHY retraining drops.
       2. Disables Packet Priority & VLAN tagging to minimize jitter.
 .PARAMETER Speed
-    Target speed: "2.5G" (default), "1.0G", or "Auto".
+    Target speed: "Current" (default - preserves existing rate), "2.5G", "1.0G", or "Auto".
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [Parameter(Mandatory = $false)]
-    [ValidateSet("2.5G", "1.0G", "Auto")]
-    [string]$Speed = "2.5G"
+    [ValidateSet("Current", "2.5G", "1.0G", "Auto")]
+    [string]$Speed = "Current"
 )
 
 $OutputEncoding = [System.Text.Encoding]::UTF8

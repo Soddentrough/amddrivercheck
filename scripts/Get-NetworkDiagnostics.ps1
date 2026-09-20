@@ -47,15 +47,39 @@ Write-Host "`nNetwork Driver Telemetry & Link Flapping (Past $Hours hours):" -Fo
 $nicEvents = Get-WinEvent -FilterHashtable @{LogName='System'; StartTime=$cutoff} -ErrorAction SilentlyContinue |
     Where-Object {
         $_.ProviderName -match '(?i)e2fexpress|e1dexpress|Netwtw|rt640x64|Tcpip|DNS Client Events' -and
-        ($_.LevelDisplayName -match 'Error|Warning' -or $_.Id -in @(27, 32, 1014, 4202))
+        ($_.LevelDisplayName -match 'Error|Warning' -or $_.Id -in @(27, 32, 1014, 4202, 4266))
     }
 
+$ncsiEvents = Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-NCSI/Operational'; StartTime=$cutoff} -ErrorAction SilentlyContinue |
+    Where-Object { $_.Id -eq 4042 -and ($_.Message -match 'Capability:\s*None|SuspectArpProbeFailed') }
+
+$wlanEvents = Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-WLAN-AutoConfig/Operational'; StartTime=$cutoff} -ErrorAction SilentlyContinue |
+    Where-Object { $_.Id -in @(8000, 11000) }
+
+$hasNetIssue = $false
 if ($nicEvents) {
+    $hasNetIssue = $true
     foreach ($ne in ($nicEvents | Select-Object -First 5)) {
         Write-Host "  [!] [$($ne.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss'))] $($ne.ProviderName) (Event $($ne.Id)): $($ne.Message.Trim())" -ForegroundColor Red
     }
-} else {
-    Write-Host "  [ OK ] Zero network link disconnects, DNS timeouts, or NIC driver resets recorded." -ForegroundColor Green
+}
+if ($ncsiEvents) {
+    $hasNetIssue = $true
+    foreach ($ne in ($ncsiEvents | Select-Object -First 5)) {
+        $msg = $ne.Message.Replace("`r`n", " ").Trim()
+        Write-Host "  [!] [$($ne.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss'))] NCSI (Event 4042): $msg" -ForegroundColor Red
+    }
+}
+if ($wlanEvents) {
+    $hasNetIssue = $true
+    foreach ($we in ($wlanEvents | Select-Object -First 3)) {
+        $msg = $we.Message.Split("`n")[0].Trim()
+        Write-Host "  [!] [$($we.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss'))] WLAN-AutoConfig (Event $($we.Id)): $msg" -ForegroundColor Yellow
+    }
+}
+
+if (-not $hasNetIssue) {
+    Write-Host "  [ OK ] Zero network link disconnects, DNS timeouts, ARP probe failures, or NIC driver resets recorded." -ForegroundColor Green
 }
 
 Write-Host ""

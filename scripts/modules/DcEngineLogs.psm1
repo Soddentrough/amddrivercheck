@@ -55,7 +55,7 @@ function Get-DcSteamLogs {
                             continue
                         }
                         # Match actual crash and stall patterns
-                        if ($line -match '(?i)stalled|fatal assert|exitonfatalassert|cross-thread pipe|pipes\.cpp|The game hasn''t rendered a frame|possibly crashed/killed game|OnSystemPowerStateSuspend|BMainLoop appears to have stalled') {
+                        if ($line -match '(?i)stalled|fatal assert|exitonfatalassert|cross-thread pipe|pipes\.cpp|The game hasn''t rendered a frame|possibly crashed/killed game|OnSystemPowerStateSuspend|BMainLoop appears to have stalled|OnNetworkDeviceStateChange|failed talking to cm|Connectivity test.*failed|Reset cReconnectAttempts') {
                             $errors.Add($line.Trim())
                         }
                     }
@@ -171,6 +171,26 @@ function Get-DcEngineLogs {
                     LogName     = $gl.Name
                     FullName    = $gl.FullName
                     Timestamp   = $gl.LastWriteTime
+                    ErrorLines  = @($critLines)
+                })
+            }
+        }
+    }
+
+    # 5. Pearl Abyss / BlackSpace Engine Logs (%LOCALAPPDATA%\Pearl Abyss\log\*.log)
+    $paLogDir = Join-Path $env:LOCALAPPDATA "Pearl Abyss\log"
+    if (Test-Path $paLogDir) {
+        $paLogs = Get-ChildItem -Path $paLogDir -Filter "*.log" -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -ge $Cutoff }
+        foreach ($pl in $paLogs) {
+            $lines = Get-Content $pl.FullName -Tail 200 -ErrorAction SilentlyContinue
+            $critLines = $lines | Where-Object { $_ -match '(?i)\[ERROR\]|\[FATAL\]|DATA_ERROR|Crash|Exception' }
+            if ($critLines) {
+                $results.Add([PSCustomObject]@{
+                    Engine      = "BlackSpace Engine (Pearl Abyss)"
+                    LogName     = $pl.Name
+                    FullName    = $pl.FullName
+                    Timestamp   = $pl.LastWriteTime
                     ErrorLines  = @($critLines)
                 })
             }

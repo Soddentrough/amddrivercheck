@@ -9,7 +9,7 @@ PowerShell.exe -NoProfile -ExecutionPolicy Bypass -Command "Get-ChildItem -Path 
 :menu
 cls
 echo ========================================================================
-echo   AUTOMATED GAME ^& SYSTEM CRASH DIAGNOSTIC SUITE (v4.3.0)
+echo   AUTOMATED GAME ^& SYSTEM CRASH DIAGNOSTIC SUITE (v4.4.0)
 echo   Evidence-Based Engine (Crash Dumps, Logs, Telemetry, Hardware)
 echo ========================================================================
 echo.
