@@ -197,6 +197,8 @@ function Get-DcSystemTelemetry {
         AppCrashes             = [System.Collections.Generic.List[PSCustomObject]]::new()
         AppHangs               = [System.Collections.Generic.List[PSCustomObject]]::new()
         NetworkDrops           = [System.Collections.Generic.List[PSCustomObject]]::new()
+        UdpPortExhaustions     = [System.Collections.Generic.List[PSCustomObject]]::new()
+        PciDeviceResets        = [System.Collections.Generic.List[PSCustomObject]]::new()
         WlanFailovers          = [System.Collections.Generic.List[PSCustomObject]]::new()
         SleepTransitions       = [System.Collections.Generic.List[PSCustomObject]]::new()
     }
@@ -248,6 +250,16 @@ function Get-DcSystemTelemetry {
                     InterfaceName = $e.ProviderName
                     Reason        = "Hardware Link Disconnect"
                     Message       = "Ethernet link dropped by network driver ($($e.ProviderName)): $($e.Message.Trim())"
+                })
+            }
+
+            # UDP Ephemeral Port Exhaustion (Tcpip Event 4266)
+            if ($e.Id -eq 4266 -and $e.ProviderName -match 'Tcpip') {
+                $results.UdpPortExhaustions.Add([PSCustomObject]@{
+                    TimeCreated = $e.TimeCreated
+                    Id          = $e.Id
+                    Provider    = $e.ProviderName
+                    Message     = "Global UDP ephemeral port space exhausted: $($e.Message.Trim())"
                 })
             }
 
@@ -508,6 +520,22 @@ function Get-DcSystemTelemetry {
                 InterfaceName = "Global TCP/IP"
                 Reason        = "EphemeralPortExhaustion"
                 Message       = $te.Message.Trim()
+            })
+        }
+    }
+
+    # Query PCI Operational events for hardware PDO device resets / uninitialization
+    $pciEvents = Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-PCI/Operational'; StartTime=$Cutoff} -ErrorAction SilentlyContinue |
+        Where-Object { $_.Id -eq 1 -and $_.Message -match 'Begin state transition from STARTED to UNINITIALIZED' }
+    if ($pciEvents) {
+        foreach ($pe in ($pciEvents | Select-Object -First 5)) {
+            $pdo = if ($pe.Message -match '\[PDO\]\s*\((.*?)\)') { $Matches[1] } else { "Unknown" }
+            $results.PciDeviceResets.Add([PSCustomObject]@{
+                TimeCreated = $pe.TimeCreated
+                Id          = $pe.Id
+                Provider    = "Microsoft-Windows-PCI"
+                Pdo         = $pdo
+                Message     = "PCI Bus Device Reset on PDO ($pdo): $($pe.Message.Trim())"
             })
         }
     }

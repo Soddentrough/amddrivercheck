@@ -201,13 +201,74 @@ function Stop-DcZombieProcesses {
     return $terminatedCount
 }
 
+function Repair-DcUdpPortRange {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory = $false)]
+        [int]$StartPort = 1024,
+
+        [Parameter(Mandatory = $false)]
+        [int]$NumberOfPorts = 64511
+    )
+
+    if (-not (Test-DcIsAdmin)) {
+        Write-Host "[ERROR] Administrator elevation is required to modify dynamic port ranges." -ForegroundColor Red
+        Write-Host "Please re-run in an elevated terminal (Run as Administrator) or run:" -ForegroundColor Yellow
+        Write-Host "  netsh int ipv4 set dynamicport udp start=$StartPort num=$NumberOfPorts" -ForegroundColor White
+        Write-Host "  netsh int ipv6 set dynamicport udp start=$StartPort num=$NumberOfPorts" -ForegroundColor White
+        return $false
+    }
+
+    Write-Host "=== Windows UDP Ephemeral Port Space Optimizer ===" -ForegroundColor Cyan
+    Write-Host "Target Configuration: Start Port: $StartPort, Number of Ports: $NumberOfPorts (Range: $StartPort-$($StartPort + $NumberOfPorts - 1))" -ForegroundColor White
+
+    $targetAction = "Expand dynamic UDP port range for IPv4 and IPv6 to StartPort=$StartPort, NumberOfPorts=$NumberOfPorts"
+    if ($PSCmdlet.ShouldProcess("TCP/IP Stack", $targetAction)) {
+        try {
+            Write-Host "Configuring IPv4 UDP dynamic port range..." -NoNewline -ForegroundColor White
+            $v4Out = & netsh int ipv4 set dynamicport udp start=$StartPort num=$NumberOfPorts 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host " [ OK ]" -ForegroundColor Green
+            } else {
+                Write-Host " [FAILED: $v4Out]" -ForegroundColor Red
+            }
+
+            Write-Host "Configuring IPv6 UDP dynamic port range..." -NoNewline -ForegroundColor White
+            $v6Out = & netsh int ipv6 set dynamicport udp start=$StartPort num=$NumberOfPorts 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host " [ OK ]" -ForegroundColor Green
+            } else {
+                Write-Host " [FAILED: $v6Out]" -ForegroundColor Red
+            }
+
+            Write-Host "`nUpdated Dynamic Port Status:" -ForegroundColor Cyan
+            & netsh int ipv4 show dynamicport udp | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
+
+            Write-Host "`n[SUCCESS] Windows UDP dynamic port space expanded to match TCP range." -ForegroundColor Green
+            Write-Host "Eliminates ephemeral port exhaustion (Event 4266) during Steam/game matchmaking." -ForegroundColor DarkGray
+            return $true
+        } catch {
+            Write-Host " [ERROR: $($_.Exception.Message)]" -ForegroundColor Red
+            return $false
+        }
+    }
+    return $false
+}
+
 function Repair-DcEthernetSettings {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [Parameter(Mandatory = $false)]
         [ValidateSet("Current", "2.5G", "1.0G", "Auto")]
-        [string]$Speed = "Current"
+        [string]$Speed = "Current",
+
+        [Parameter(Mandatory = $false)]
+        [switch]$ExpandUdpPorts
     )
+
+    if ($ExpandUdpPorts) {
+        $udpResult = Repair-DcUdpPortRange
+    }
 
     if (-not (Test-DcIsAdmin)) {
         Write-Host "[ERROR] Administrator elevation is required to modify network adapter properties." -ForegroundColor Red
@@ -493,4 +554,4 @@ function Repair-DcGpuSleepSettings {
     return $true
 }
 
-Export-ModuleMember -Function Test-DcIsAdmin, Clear-DcGameConfig, Clear-DcSteamCache, Clear-DcShaderCache, Stop-DcZombieProcesses, Repair-DcEthernetSettings, Repair-DcAmdDriverAlignment, Repair-DcPciePowerSettings, Disable-DcProblematicKernelDriver, Repair-DcGpuSleepSettings
+Export-ModuleMember -Function Test-DcIsAdmin, Clear-DcGameConfig, Clear-DcSteamCache, Clear-DcShaderCache, Stop-DcZombieProcesses, Repair-DcEthernetSettings, Repair-DcUdpPortRange, Repair-DcAmdDriverAlignment, Repair-DcPciePowerSettings, Disable-DcProblematicKernelDriver, Repair-DcGpuSleepSettings

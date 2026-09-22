@@ -41,6 +41,8 @@
     (Admin) Apply stability settings to Ethernet adapters (Speed/Duplex lock, VLAN disable).
 .PARAMETER Speed
     Target speed when using -RepairNetwork: "2.5G" (default), "1.0G", or "Auto".
+.PARAMETER ExpandUdpPorts
+    (Admin) Expand Windows dynamic UDP ephemeral port range to match TCP (1024-65535, 64,511 ports), preventing Event 4266 socket exhaustion during Steam/game matchmaking.
 .PARAMETER CleanConfig
     Clean stale game configuration files and shader caches (with automatic .bak backup).
 .PARAMETER Game
@@ -53,7 +55,7 @@
     Suppress interactive banner output and return only the structured report object.
 #>
 
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [Parameter(Mandatory = $false)]
     [int]$Hours = 48,
@@ -114,6 +116,9 @@ param(
     [string]$Speed = "Current",
 
     [Parameter(Mandatory = $false)]
+    [switch]$ExpandUdpPorts,
+
+    [Parameter(Mandatory = $false)]
     [switch]$CleanConfig,
 
     [Parameter(Mandatory = $false)]
@@ -157,9 +162,15 @@ $cutoff = (Get-Date).AddHours(-$Hours)
 # DEDICATED ACTION / REMEDIATION SWITCHES
 # =========================================================================
 
+if ($ExpandUdpPorts -and -not $RepairNetwork) {
+    Write-Host "`n=== WINDOWS UDP EPHEMERAL PORT SPACE OPTIMIZER ===" -ForegroundColor Magenta
+    Repair-DcUdpPortRange
+    exit 0
+}
+
 if ($RepairNetwork) {
     Write-Host "`n=== NETWORK ADAPTER STABILITY OPTIMIZER ===" -ForegroundColor Magenta
-    Repair-DcEthernetSettings -Speed $Speed
+    Repair-DcEthernetSettings -Speed $Speed -ExpandUdpPorts:$ExpandUdpPorts
     exit 0
 }
 
@@ -417,6 +428,16 @@ if (-not $Quiet) {
     if ($telemetry.NetworkDrops.Count -gt 0) {
         foreach ($nd in ($telemetry.NetworkDrops | Select-Object -First 5)) {
             Write-Host "  [!] Network Link Drop [$($nd.TimeCreated)]: $($nd.Message)" -ForegroundColor Red
+        }
+    }
+    if ($telemetry.PciDeviceResets -and $telemetry.PciDeviceResets.Count -gt 0) {
+        foreach ($pr in ($telemetry.PciDeviceResets | Select-Object -First 3)) {
+            Write-Host "  [!] PCI Bus Device Reset [$($pr.TimeCreated)]: $($pr.Message)" -ForegroundColor Red
+        }
+    }
+    if ($telemetry.UdpPortExhaustions -and $telemetry.UdpPortExhaustions.Count -gt 0) {
+        foreach ($upe in ($telemetry.UdpPortExhaustions | Select-Object -First 3)) {
+            Write-Host "  [!] UDP Dynamic Port Exhaustion [$($upe.TimeCreated)]: $($upe.Message)" -ForegroundColor Yellow
         }
     }
     if ($telemetry.WlanFailovers.Count -gt 0) {
