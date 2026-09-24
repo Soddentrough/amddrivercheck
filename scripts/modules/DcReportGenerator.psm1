@@ -277,12 +277,21 @@ function Export-DcHtmlReport {
 
     $ulpsStr = if ($hw -and $hw.IsUlpsEnabled) { "Enabled (Power Saving Active)" } else { "Disabled" }
     $tdrDelayStr = if ($telem -and $telem.GraphicsDriverSettings -and $telem.GraphicsDriverSettings.TdrDelay) { "$($telem.GraphicsDriverSettings.TdrDelay)s" } else { "2s (Windows Default)" }
+    $scanRangeDiscord = if ($ReportData.ScanMode -eq "LatestIncident" -and $ReportData.IncidentAnchor) {
+        "Latest Incident (Anchored: $($ReportData.IncidentAnchor.Timestamp.ToString('yyyy-MM-dd HH:mm')) - $($ReportData.IncidentAnchor.AgeDescription))"
+    } elseif ($ReportData.ScanMode -eq "LatestIncidentClean") {
+        "Latest Incident (Past $($ReportData.IncidentAnchor.LookbackDays) Days - Clean)"
+    } elseif ($ReportData.ScanMode -eq "AllIncidents") {
+        "Full Incident History (Past $($ReportData.HoursScanned) Hours)"
+    } else {
+        "Past $($ReportData.HoursScanned) Hours"
+    }
 
     $discordText = "=== DriverCheck Diagnostic Summary ===`n" +
         "Status:      $($ReportData.RootCauseTitle)`n" +
         "Severity:    $($ReportData.RootCauseSeverity)`n" +
         "Timestamp:   $((Get-Date).ToString('yyyy-MM-dd HH:mm'))`n" +
-        "Scan Range:  Past $($ReportData.HoursScanned) Hours`n`n" +
+        "Scan Range:  $scanRangeDiscord`n`n" +
         "[Summary]`n$($ReportData.RootCauseGuidance)`n`n" +
         "[Hardware & Platform]`n" +
         "Motherboard: $mbSummaryStr`n" +
@@ -349,7 +358,16 @@ function Export-DcHtmlReport {
     $parts.Add("            <div class='header-title'>")
     $parts.Add("                <h1>DriverCheck Diagnostic Suite</h1>")
     $mbHeaderInfo = if ($hw -and $hw.Motherboard) { " | System: $($hw.Motherboard.MotherboardManufacturer) $($hw.Motherboard.MotherboardProduct)" } else { "" }
-    $parts.Add("                <p>Generated on $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss')) | Scan Window: Past $($ReportData.HoursScanned) Hours$mbHeaderInfo</p>")
+    $scanInfo = if ($ReportData.ScanMode -eq "LatestIncident" -and $ReportData.IncidentAnchor) {
+        "Mode: Latest Incident (Anchored: $($ReportData.IncidentAnchor.Timestamp.ToString('yyyy-MM-dd HH:mm:ss')) - $($ReportData.IncidentAnchor.AgeDescription))"
+    } elseif ($ReportData.ScanMode -eq "LatestIncidentClean") {
+        "Mode: Latest Incident (Scanned past $($ReportData.IncidentAnchor.LookbackDays) days: Clean - No crashes recorded)"
+    } elseif ($ReportData.ScanMode -eq "AllIncidents") {
+        "Mode: Full Incident History (Past $($ReportData.HoursScanned) Hours)"
+    } else {
+        "Scan Window: Past $($ReportData.HoursScanned) Hours"
+    }
+    $parts.Add("                <p>Generated on $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss')) | $scanInfo$mbHeaderInfo</p>")
     $parts.Add("            </div>")
     $parts.Add("            <span class='badge $statusClass'>$statusText</span>")
     $parts.Add("        </header>")
@@ -407,7 +425,7 @@ function Export-DcHtmlReport {
     $parts.Add("            <textarea readonly onclick='this.select()'>$discordText</textarea>")
     $parts.Add("        </div>")
     $parts.Add("        <footer>")
-    $parts.Add("            DriverCheck Diagnostic Suite v4.4.0 | Evidence-Based Crash Analysis Engine")
+    $parts.Add("            DriverCheck Diagnostic Suite v4.5.0 | Evidence-Based Crash Analysis Engine")
     $parts.Add("        </footer>")
     $parts.Add("    </div>")
     $parts.Add("</body>")

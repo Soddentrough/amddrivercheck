@@ -8,7 +8,10 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
-    [int]$Hours = 48,
+    [switch]$AllIncidents,
+
+    [Parameter(Mandatory = $false)]
+    [int]$Hours = 0,
 
     [Parameter(Mandatory = $false)]
     [string]$DownloadUrl = ""
@@ -23,21 +26,25 @@ $zipUrl = if ($DownloadUrl) {
 } elseif ($env:DRIVERCHECK_ZIP_URL) {
     $env:DRIVERCHECK_ZIP_URL
 } else {
-    $repo = if ($env:DRIVERCHECK_REPO) { $env:DRIVERCHECK_REPO } else { "drivercheck/drivercheck" }
-    "https://github.com/$repo/releases/latest/download/drivercheck.zip"
+    $repo = if ($env:DRIVERCHECK_REPO) { $env:DRIVERCHECK_REPO } else { "Soddentrough/amddrivercheck" }
+    "https://github.com/$repo/releases/latest/download/drivercheck-v4.5.0.zip"
 }
 $zipFile = Join-Path $env:TEMP "drivercheck_temp.zip"
 
 Write-Host ""
 Write-Host "========================================================================" -ForegroundColor Cyan
-Write-Host "  DRIVERCHECK CLOUD BOOTSTRAPPER" -ForegroundColor Cyan
+Write-Host "  DRIVERCHECK CLOUD BOOTSTRAPPER (v4.5.0)" -ForegroundColor Cyan
 Write-Host "========================================================================" -ForegroundColor Cyan
 Write-Host "Downloading DriverCheck to temporary workspace..." -ForegroundColor DarkGray
+
+$scanParams = @{ ExportHtml = $true; OpenReport = $true }
+if ($AllIncidents) { $scanParams['AllIncidents'] = $true }
+if ($Hours -gt 0) { $scanParams['Hours'] = $Hours }
 
 try {
     # If running from a local checkout, use local scripts directly
     if (Test-Path (Join-Path $PSScriptRoot "Analyze-LatestCrash.ps1")) {
-        & (Join-Path $PSScriptRoot "Analyze-LatestCrash.ps1") -Hours $Hours -ExportHtml -OpenReport
+        & (Join-Path $PSScriptRoot "Analyze-LatestCrash.ps1") @scanParams
         return
     }
 
@@ -50,7 +57,7 @@ try {
 
     $engine = Join-Path $destDir "Analyze-LatestCrash.ps1"
     if (Test-Path $engine) {
-        & $engine -Hours $Hours -ExportHtml -OpenReport
+        & $engine @scanParams
     } else {
         Write-Host "[ERROR] Could not find engine script in extracted package." -ForegroundColor Red
     }
@@ -60,4 +67,3 @@ try {
 } finally {
     if (Test-Path $zipFile) { Remove-Item $zipFile -Force -ErrorAction SilentlyContinue }
 }
-

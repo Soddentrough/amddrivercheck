@@ -5,7 +5,8 @@
 QUICK START GUIDE:
 1. Extract all contents of this ZIP file to a folder.
 2. Double-click "Run-Diagnostics.bat"
-3. Select Option [1] "Full Crash Diagnostics + Open HTML Report".
+3. Select Option [1] "Diagnose Latest Crash & Open HTML Report" (Recommended).
+   (Or select Option [2] "Scan Full Incident History" for full 30-day incident logs).
 4. An interactive dark-mode HTML report (CrashReport_<timestamp>.html)
    will automatically generate and open in your default browser.
 
@@ -83,7 +84,7 @@ WHAT THIS TOOL DIAGNOSES:
 ------------------------------------------------------------------------
 HOW TO SHARE FOR TECHNICAL SUPPORT (DISCORD / REDDIT):
 ------------------------------------------------------------------------
-- Run Option [4] in "Run-Diagnostics.bat" to generate a Support Bundle ZIP
+- Run Option [3] in "Run-Diagnostics.bat" to generate a Support Bundle ZIP
   containing your HTML report and sanitized engine logs.
 - Or copy the pre-formatted summary text directly from the bottom of your
   HTML report!

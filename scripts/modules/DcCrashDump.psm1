@@ -76,6 +76,12 @@ function Get-DcCrashDumps {
         [datetime]$Cutoff = (Get-Date).AddHours(-48),
 
         [Parameter(Mandatory = $false)]
+        [datetime]$EndTime = (Get-Date),
+
+        [Parameter(Mandatory = $false)]
+        [switch]$LatestOnly,
+
+        [Parameter(Mandatory = $false)]
         [string[]]$CustomDirectories
     )
 
@@ -85,7 +91,7 @@ function Get-DcCrashDumps {
     foreach ($dir in $searchDirs) {
         if (Test-Path $dir) {
             $files = Get-ChildItem -Path $dir -Recurse -Include "*.dmp", "__sentry-event" -File -ErrorAction SilentlyContinue |
-                Where-Object { $_.LastWriteTime -ge $Cutoff }
+                Where-Object { $_.LastWriteTime -ge $Cutoff -and $_.LastWriteTime -le $EndTime }
             if ($files) {
                 foreach ($f in $files) { $foundFiles.Add($f) }
             }
@@ -96,12 +102,34 @@ function Get-DcCrashDumps {
     $memDump = Join-Path $env:SystemRoot "MEMORY.DMP"
     if (Test-Path $memDump) {
         $mf = Get-Item $memDump -ErrorAction SilentlyContinue
-        if ($mf -and $mf.LastWriteTime -ge $Cutoff) {
+        if ($mf -and $mf.LastWriteTime -ge $Cutoff -and $mf.LastWriteTime -le $EndTime) {
             $foundFiles.Add($mf)
         }
     }
 
-    return $foundFiles | Sort-Object LastWriteTime -Descending
+    $sorted = $foundFiles | Sort-Object LastWriteTime -Descending
+    if ($LatestOnly -and $sorted) {
+        return @($sorted | Select-Object -First 1)
+    }
+    return @($sorted)
+}
+
+function Get-DcLatestDumpFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [int]$LookbackDays = 30,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$CustomDirectories
+    )
+
+    $cutoff = (Get-Date).AddDays(-$LookbackDays)
+    $dumps = Get-DcCrashDumps -Cutoff $cutoff -CustomDirectories $CustomDirectories
+    if ($dumps -and $dumps.Count -gt 0) {
+        return ($dumps | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
+    }
+    return $null
 }
 
 function Get-DcExceptionMeaning {
@@ -376,4 +404,4 @@ function Read-DcMinidump {
     return $result
 }
 
-Export-ModuleMember -Function Get-DcDumpDirectories, Get-DcCrashDumps, Read-DcMinidump, Get-DcExceptionMeaning
+Export-ModuleMember -Function Get-DcDumpDirectories, Get-DcCrashDumps, Get-DcLatestDumpFile, Read-DcMinidump, Get-DcExceptionMeaning

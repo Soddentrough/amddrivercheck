@@ -9,38 +9,39 @@
 ### Option 1: Interactive Launcher (Recommended for Gamers)
 1. Download and extract the latest release package.
 2. Double-click **`Run-Diagnostics.bat`**.
-3. Press **`[1]`** (Full Crash Diagnostics + Open HTML Report).
+3. Press **`[1]`** (Diagnose Latest Crash & Open HTML Report).
 4. A dark-mode **HTML Report** (`CrashReport_<timestamp>.html`) will generate and automatically open in your default browser.
 
 ```text
 ========================================================================
-  AUTOMATED GAME & SYSTEM CRASH DIAGNOSTIC SUITE (v4.4.0)
+  AUTOMATED GAME & SYSTEM CRASH DIAGNOSTIC SUITE (v4.5.0)
   Evidence-Based Engine (Crash Dumps, Logs, Telemetry, Hardware)
 ========================================================================
 
-  [1] Full Crash Diagnostics + Open HTML Report (Recommended)
-  [2] Quick Scan (Past 24 Hours)
-  [3] Deep Scan (Past 7 Days)
-  [4] Export Support Bundle (HTML Report + ZIP for Discord/Support)
-  [5] Motherboard, Chipset Drivers & PnP Hardware Health Audit
-  [6] Display, EDID Timings & DP Scaler Saturation Audit
-  [7] GPU Driver Health & Downgrade Prevention Audit
-  [8] Apply GPU Downgrade Protection (Lock Windows Update Drivers)
-  [9] Power, Fast Startup & Sleep Transition Audit
-  [10] Maintenance & Cache Cleaning Tools
+  [1] Diagnose Latest Crash & Open HTML Report (Recommended)
+  [2] Scan Full Incident History (All Recent Incidents)
+  [3] Export Support Bundle (HTML Report + ZIP for Discord/Support)
+  [4] Motherboard, Chipset Drivers & PnP Hardware Health Audit
+  [5] Display, EDID Timings & DP Scaler Saturation Audit
+  [6] GPU Driver Health & Downgrade Prevention Audit
+  [7] Apply GPU Downgrade Protection (Lock Windows Update Drivers)
+  [8] Power, Fast Startup & Sleep Transition Audit
+  [9] Maintenance & Cache Cleaning Tools
   [0] Exit
 ========================================================================
 ```
+
+Selecting Option **`[1]`** automatically scans backward in time (up to 30 days) to find the most recent crash or fault incident, tightly correlates pre-crash telemetry around that event, and opens the HTML report. Option **`[2]`** expands the analysis across full historical incidents over the past 30 days.
 
 ### Option 2: PowerShell CLI (Power Users & Tech Support)
 Run directly from PowerShell (no administrator privileges required for scanning):
 
 ```powershell
-# Standard 48-Hour Diagnostic Scan & Open HTML Report
+# Default: Incident-Anchored Scan for Latest Crash with HTML Report
 PowerShell.exe -ExecutionPolicy Bypass -File .\Analyze-LatestCrash.ps1 -ExportHtml -OpenReport
 
-# Deep Scan (Past 7 Days)
-PowerShell.exe -ExecutionPolicy Bypass -File .\Analyze-LatestCrash.ps1 -DeepScan -ExportHtml
+# Full Incident History Scan (Past 30 Days)
+PowerShell.exe -ExecutionPolicy Bypass -File .\Analyze-LatestCrash.ps1 -AllIncidents -ExportHtml
 
 # Create Support Bundle ZIP (Report + Sanitized Logs for Reddit/Discord)
 PowerShell.exe -ExecutionPolicy Bypass -File .\Analyze-LatestCrash.ps1 -ExportZip
@@ -104,7 +105,7 @@ Running `drivercheck` generates a self-contained, responsive HTML report featuri
 When asking for help online, you never need to screenshot multiple windows:
 
 1. **Clipboard Summary**: Scroll to the bottom of your HTML report and click the **"Copy Summary for Discord / Reddit"** box.
-2. **Support Bundle ZIP**: Select Option **`[4]`** in `Run-Diagnostics.bat` (or run `-ExportZip`). This creates a small `DriverCheck_SupportBundle_<timestamp>.zip` containing your HTML report and engine log excerpts.
+2. **Support Bundle ZIP**: Select Option **`[3]`** in `Run-Diagnostics.bat` (or run `-ExportZip`). This creates a small `DriverCheck_SupportBundle_<timestamp>.zip` containing your HTML report and engine log excerpts.
 
 ### 🔒 Privacy Guarantee
 * **100% Offline & Local**: No data is ever sent to external servers or telemetry endpoints.
@@ -151,7 +152,6 @@ When asking for help online, you never need to screenshot multiple windows:
    * Audits Bluetooth gaming controllers (DualSense, Xbox, VR, Stadia) and network adapter stability.
 
 ---
-
 ## 🛠️ Modular Tools (`scripts/`)
 
 Every tool in the `scripts/` directory can be executed independently as an isolated, standalone diagnostic:

@@ -177,11 +177,15 @@ function Get-DcSystemTelemetry {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $false)]
-        [datetime]$Cutoff = (Get-Date).AddHours(-48)
+        [datetime]$Cutoff = (Get-Date).AddHours(-48),
+
+        [Parameter(Mandatory = $false)]
+        [datetime]$EndTime = (Get-Date)
     )
 
     $results = [PSCustomObject]@{
         CutoffTime             = $Cutoff
+        EndTime                = $EndTime
         FastStartup            = Get-DcFastStartupStatus
         PciePowerManagement    = Get-DcPciePowerManagementStatus
         GraphicsDriverSettings = Get-DcGraphicsDriverSettings
@@ -204,7 +208,9 @@ function Get-DcSystemTelemetry {
     }
 
     # Query System Events within time window
-    $sysEvents = Get-WinEvent -FilterHashtable @{LogName='System'; StartTime=$Cutoff} -ErrorAction SilentlyContinue
+    $sysFilter = @{LogName='System'; StartTime=$Cutoff}
+    if ($EndTime -and $EndTime -lt (Get-Date)) { $sysFilter['EndTime'] = $EndTime }
+    $sysEvents = Get-WinEvent -FilterHashtable $sysFilter -ErrorAction SilentlyContinue
 
     if ($sysEvents) {
         foreach ($e in $sysEvents) {
@@ -349,9 +355,13 @@ function Get-DcSystemTelemetry {
     }
 
     # Query Virtual Memory / Commit Limit Exhaustion (Event 2004)
-    $memEvents = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-Resource-Exhaustion-Detector'; Id=2004; StartTime=$Cutoff} -ErrorAction SilentlyContinue
+    $memFilter = @{LogName='System'; ProviderName='Microsoft-Windows-Resource-Exhaustion-Detector'; Id=2004; StartTime=$Cutoff}
+    if ($EndTime -and $EndTime -lt (Get-Date)) { $memFilter['EndTime'] = $EndTime }
+    $memEvents = Get-WinEvent -FilterHashtable $memFilter -ErrorAction SilentlyContinue
     if (-not $memEvents) {
-        $memEvents = Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Resource-Exhaustion-Detector/Operational'; Id=2004; StartTime=$Cutoff} -ErrorAction SilentlyContinue
+        $memOpFilter = @{LogName='Microsoft-Windows-Resource-Exhaustion-Detector/Operational'; Id=2004; StartTime=$Cutoff}
+        if ($EndTime -and $EndTime -lt (Get-Date)) { $memOpFilter['EndTime'] = $EndTime }
+        $memEvents = Get-WinEvent -FilterHashtable $memOpFilter -ErrorAction SilentlyContinue
     }
     if ($memEvents) {
         foreach ($me in ($memEvents | Select-Object -First 5)) {
@@ -365,7 +375,9 @@ function Get-DcSystemTelemetry {
     }
 
     # Query Application Events for Crashes (1000) and Hangs (1002)
-    $appEvents = Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='Application Error'; Id=1000; StartTime=$Cutoff} -ErrorAction SilentlyContinue
+    $appFilter = @{LogName='Application'; ProviderName='Application Error'; Id=1000; StartTime=$Cutoff}
+    if ($EndTime -and $EndTime -lt (Get-Date)) { $appFilter['EndTime'] = $EndTime }
+    $appEvents = Get-WinEvent -FilterHashtable $appFilter -ErrorAction SilentlyContinue
     if ($appEvents) {
         foreach ($ae in ($appEvents | Select-Object -First 10)) {
             $faultingApp = "Unknown"
@@ -386,7 +398,9 @@ function Get-DcSystemTelemetry {
         }
     }
 
-    $appHangs = Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='Application Hang'; Id=1002; StartTime=$Cutoff} -ErrorAction SilentlyContinue
+    $hangFilter = @{LogName='Application'; ProviderName='Application Hang'; Id=1002; StartTime=$Cutoff}
+    if ($EndTime -and $EndTime -lt (Get-Date)) { $hangFilter['EndTime'] = $EndTime }
+    $appHangs = Get-WinEvent -FilterHashtable $hangFilter -ErrorAction SilentlyContinue
     if ($appHangs) {
         foreach ($ah in ($appHangs | Select-Object -First 5)) {
             $hangApp = "Unknown"
@@ -543,4 +557,202 @@ function Get-DcSystemTelemetry {
     return $results
 }
 
-Export-ModuleMember -Function Get-DcFastStartupStatus, Get-DcSystemTelemetry, Get-DcBugCheckMeaning, Get-DcGraphicsDriverSettings, Get-DcPciePowerManagementStatus
+function Find-DcLatestIncident {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [int]$MaxLookbackDays = 30
+    )
+
+    $lookbackCutoff = (Get-Date).AddDays(-$MaxLookbackDays)
+    $candidates = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    # 1. Tier 1: Check newest crash dump file
+    try {
+        if (Get-Command Get-DcLatestDumpFile -ErrorAction SilentlyContinue) {
+            $latestDump = Get-DcLatestDumpFile -LookbackDays $MaxLookbackDays
+            if ($latestDump) {
+                $candidates.Add([PSCustomObject]@{
+                    Timestamp = $latestDump.LastWriteTime
+                    Tier      = 1
+                    Source    = "Minidump File"
+                    Details   = "$($latestDump.Name) ($([math]::Round($latestDump.Length / 1MB, 2)) MB)"
+                    Item      = $latestDump
+                })
+            }
+        }
+    } catch {}
+
+    # 2. Tier 2: Check Game Engine Fatal Crash Logs
+    try {
+        if ($env:LOCALAPPDATA -and (Test-Path $env:LOCALAPPDATA)) {
+            $ueLogDirs = Get-ChildItem "$env:LOCALAPPDATA" -Directory -ErrorAction SilentlyContinue |
+                ForEach-Object { Join-Path $_.FullName "Saved\Logs" } |
+                Where-Object { Test-Path $_ }
+            foreach ($dir in $ueLogDirs) {
+                $recentLogs = Get-ChildItem -Path $dir -Filter "*.log" -File -ErrorAction SilentlyContinue |
+                    Where-Object { $_.LastWriteTime -ge $lookbackCutoff } |
+                    Sort-Object LastWriteTime -Descending | Select-Object -First 3
+                foreach ($rl in $recentLogs) {
+                    $tail = Get-Content $rl.FullName -Tail 150 -ErrorAction SilentlyContinue
+                    if ($tail -match '(?i)Fatal error|DXGI_ERROR|CrashReportClient|Fatal assert') {
+                        $candidates.Add([PSCustomObject]@{
+                            Timestamp = $rl.LastWriteTime
+                            Tier      = 2
+                            Source    = "Game Engine Fatal Log"
+                            Details   = "$($rl.Name) (Unreal Engine crash log)"
+                            Item      = $rl
+                        })
+                        break
+                    }
+                }
+            }
+        }
+    } catch {}
+
+    # 3. Tier 3: Event Log Telemetry - Display Driver TDR (4101)
+    try {
+        $tdr = Get-WinEvent -FilterHashtable @{LogName='System'; Id=4101; StartTime=$lookbackCutoff} -MaxEvents 1 -ErrorAction SilentlyContinue
+        if ($tdr) {
+            $candidates.Add([PSCustomObject]@{
+                Timestamp = $tdr.TimeCreated
+                Tier      = 3
+                Source    = "GPU Driver Timeout (TDR 4101)"
+                Details   = $tdr.Message.Trim()
+                Item      = $tdr
+            })
+        }
+    } catch {}
+
+    # 4. Tier 3: Kernel BugCheck (Event 1001)
+    try {
+        $bc = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-WER-SystemErrorReporting'; Id=1001; StartTime=$lookbackCutoff} -MaxEvents 1 -ErrorAction SilentlyContinue
+        if ($bc) {
+            $bcCode = "Unknown"
+            if ($bc.Message -match '0x[0-9a-fA-F]+') { $bcCode = $Matches[0] }
+            $candidates.Add([PSCustomObject]@{
+                Timestamp = $bc.TimeCreated
+                Tier      = 3
+                Source    = "Kernel BugCheck BSOD ($bcCode)"
+                Details   = "$bcCode - $(Get-DcBugCheckMeaning $bcCode)"
+                Item      = $bc
+            })
+        }
+    } catch {}
+
+    # 5. Tier 3: Kernel-Power Event 41 (Abrupt Reboot / Power Loss)
+    try {
+        $kp = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-Kernel-Power'; Id=41; StartTime=$lookbackCutoff} -MaxEvents 1 -ErrorAction SilentlyContinue
+        if ($kp) {
+            $candidates.Add([PSCustomObject]@{
+                Timestamp = $kp.TimeCreated
+                Tier      = 3
+                Source    = "Dirty Power Cut / Black Screen (Event 41)"
+                Details   = "Abrupt power loss or dirty system restart (Event 41)"
+                Item      = $kp
+            })
+        }
+    } catch {}
+
+    # 6. Tier 3: Unexpected Shutdown (Event 6008)
+    try {
+        $us = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='EventLog'; Id=6008; StartTime=$lookbackCutoff} -MaxEvents 1 -ErrorAction SilentlyContinue
+        if ($us) {
+            $candidates.Add([PSCustomObject]@{
+                Timestamp = $us.TimeCreated
+                Tier      = 3
+                Source    = "Unexpected Shutdown (Event 6008)"
+                Details   = "Previous system shutdown was unexpected."
+                Item      = $us
+            })
+        }
+    } catch {}
+
+    # 7. Tier 3: Virtual Memory Exhaustion (Event 2004)
+    try {
+        $mem = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-Resource-Exhaustion-Detector'; Id=2004; StartTime=$lookbackCutoff} -MaxEvents 1 -ErrorAction SilentlyContinue
+        if ($mem) {
+            $candidates.Add([PSCustomObject]@{
+                Timestamp = $mem.TimeCreated
+                Tier      = 3
+                Source    = "Virtual Memory Exhaustion (Event 2004)"
+                Details   = $mem.Message.Trim()
+                Item      = $mem
+            })
+        }
+    } catch {}
+
+    # 8. Tier 3: Application Error Crash (Event 1000)
+    try {
+        $appErr = Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='Application Error'; Id=1000; StartTime=$lookbackCutoff} -MaxEvents 1 -ErrorAction SilentlyContinue
+        if ($appErr) {
+            $appFaultName = "Unknown"
+            if ($appErr.Message -match 'Faulting application name:\s*([^\r\n,]+)') { $appFaultName = $Matches[1].Trim() }
+            $candidates.Add([PSCustomObject]@{
+                Timestamp = $appErr.TimeCreated
+                Tier      = 3
+                Source    = "Application Crash (Event 1000: $appFaultName)"
+                Details   = $appErr.Message.Trim()
+                Item      = $appErr
+            })
+        }
+    } catch {}
+
+    # 9. Tier 3: WHEA Hardware Errors
+    try {
+        $whea = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-WHEA-Logger'; StartTime=$lookbackCutoff} -MaxEvents 1 -ErrorAction SilentlyContinue
+        if ($whea) {
+            $candidates.Add([PSCustomObject]@{
+                Timestamp = $whea.TimeCreated
+                Tier      = 3
+                Source    = "WHEA Hardware Error (Event $($whea.Id))"
+                Details   = $whea.Message.Trim()
+                Item      = $whea
+            })
+        }
+    } catch {}
+
+    if ($candidates.Count -gt 0) {
+        $latest = $candidates | Sort-Object Timestamp -Descending | Select-Object -First 1
+        $now = Get-Date
+        $age = $now - $latest.Timestamp
+        $ageStr = if ($age.TotalMinutes -lt 60) {
+            "{0:N0} minutes ago" -f [Math]::Max(1, $age.TotalMinutes)
+        } elseif ($age.TotalHours -lt 48) {
+            "{0:N1} hours ago" -f $age.TotalHours
+        } else {
+            "{0:N1} days ago" -f $age.TotalDays
+        }
+
+        $incStart = $latest.Timestamp.AddHours(-2)
+        $incEnd = if ($latest.Timestamp.AddMinutes(15) -lt $now) { $latest.Timestamp.AddMinutes(15) } else { $now }
+
+        return [PSCustomObject]@{
+            HasIncident      = $true
+            Timestamp        = $latest.Timestamp
+            Source           = $latest.Source
+            Details          = $latest.Details
+            Tier             = $latest.Tier
+            AgeDescription   = $ageStr
+            IncidentStart    = $incStart
+            IncidentEnd      = $incEnd
+            LookbackDays     = $MaxLookbackDays
+            CandidatesFound  = $candidates.Count
+        }
+    }
+
+    return [PSCustomObject]@{
+        HasIncident      = $false
+        Timestamp        = $null
+        Source           = "Clean"
+        Details          = "No crash dumps, driver timeouts, BSOD bugchecks, or unexpected shutdowns recorded in the past $MaxLookbackDays days."
+        Tier             = 0
+        AgeDescription   = "N/A"
+        IncidentStart    = (Get-Date).AddDays(-$MaxLookbackDays)
+        IncidentEnd      = (Get-Date)
+        LookbackDays     = $MaxLookbackDays
+        CandidatesFound  = 0
+    }
+}
+
+Export-ModuleMember -Function Get-DcFastStartupStatus, Get-DcSystemTelemetry, Get-DcBugCheckMeaning, Get-DcGraphicsDriverSettings, Get-DcPciePowerManagementStatus, Find-DcLatestIncident

@@ -41,7 +41,10 @@ function Get-DcSteamLogs {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $false)]
-        [datetime]$Cutoff = (Get-Date).AddHours(-48)
+        [datetime]$Cutoff = (Get-Date).AddHours(-48),
+
+        [Parameter(Mandatory = $false)]
+        [datetime]$EndTime = (Get-Date)
     )
 
     $steamPath = Get-DcSteamPath
@@ -60,7 +63,7 @@ function Get-DcSteamLogs {
     foreach ($lp in $logFiles) {
         if (Test-Path $lp) {
             $item = Get-Item $lp
-            if ($item.LastWriteTime -ge $Cutoff) {
+            if ($item.LastWriteTime -ge $Cutoff -and $item.LastWriteTime -le $EndTime) {
                 # Read tail of log
                 $lines = Get-Content $lp -Tail 300 -ErrorAction SilentlyContinue
                 if ($lines) {
@@ -97,7 +100,10 @@ function Get-DcEngineLogs {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $false)]
-        [datetime]$Cutoff = (Get-Date).AddHours(-48)
+        [datetime]$Cutoff = (Get-Date).AddHours(-48),
+
+        [Parameter(Mandatory = $false)]
+        [datetime]$EndTime = (Get-Date)
     )
 
     $results = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -110,7 +116,7 @@ function Get-DcEngineLogs {
 
         foreach ($dir in $ueLogDirs) {
             $logs = Get-ChildItem -Path $dir -Filter "*.log" -File -ErrorAction SilentlyContinue |
-                Where-Object { $_.LastWriteTime -ge $Cutoff }
+                Where-Object { $_.LastWriteTime -ge $Cutoff -and $_.LastWriteTime -le $EndTime }
             foreach ($log in $logs) {
                 $lines = Get-Content $log.FullName -Tail 250 -ErrorAction SilentlyContinue
                 $critLines = $lines | Where-Object {
@@ -133,7 +139,7 @@ function Get-DcEngineLogs {
     $localLow = Join-Path $env:USERPROFILE "AppData\LocalLow"
     if (Test-Path $localLow) {
         $unityLogs = Get-ChildItem -Path $localLow -Recurse -Include "Player.log", "Player-prev.log" -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.LastWriteTime -ge $Cutoff }
+            Where-Object { $_.LastWriteTime -ge $Cutoff -and $_.LastWriteTime -le $EndTime }
         foreach ($ulog in $unityLogs) {
             $lines = Get-Content $ulog.FullName -Tail 250 -ErrorAction SilentlyContinue
             $critLines = $lines | Where-Object {
@@ -155,7 +161,7 @@ function Get-DcEngineLogs {
     $savedGames = Join-Path $env:USERPROFILE "Saved Games"
     if (Test-Path $savedGames) {
         $idLogs = Get-ChildItem -Path $savedGames -Recurse -Filter "qconsole.log" -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.LastWriteTime -ge $Cutoff }
+            Where-Object { $_.LastWriteTime -ge $Cutoff -and $_.LastWriteTime -le $EndTime }
         foreach ($il in $idLogs) {
             $lines = Get-Content $il.FullName -Tail 250 -ErrorAction SilentlyContinue
             $critLines = $lines | Where-Object {
@@ -177,7 +183,7 @@ function Get-DcEngineLogs {
     $godotDir = Join-Path $env:APPDATA "Godot\app_userdata"
     if (Test-Path $godotDir) {
         $godotLogs = Get-ChildItem -Path $godotDir -Recurse -Filter "godot.log" -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.LastWriteTime -ge $Cutoff }
+            Where-Object { $_.LastWriteTime -ge $Cutoff -and $_.LastWriteTime -le $EndTime }
         foreach ($gl in $godotLogs) {
             $lines = Get-Content $gl.FullName -Tail 200 -ErrorAction SilentlyContinue
             $critLines = $lines | Where-Object { $_ -match '(?i)ERROR:|CRITICAL:|FATAL:' } | ForEach-Object { Protect-DcLogText $_ }

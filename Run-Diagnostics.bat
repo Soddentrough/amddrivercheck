@@ -9,64 +9,56 @@ PowerShell.exe -NoProfile -ExecutionPolicy Bypass -Command "Get-ChildItem -Path 
 :menu
 cls
 echo ========================================================================
-echo   AUTOMATED GAME ^& SYSTEM CRASH DIAGNOSTIC SUITE (v4.4.0)
+echo   AUTOMATED GAME ^& SYSTEM CRASH DIAGNOSTIC SUITE (v4.5.0)
 echo   Evidence-Based Engine (Crash Dumps, Logs, Telemetry, Hardware)
 echo ========================================================================
 echo.
-echo   [1] Full Crash Diagnostics + Open HTML Report (Recommended)
-echo   [2] Quick Scan (Past 24 Hours)
-echo   [3] Deep Scan (Past 7 Days)
-echo   [4] Export Support Bundle (HTML Report + ZIP for Discord/Support)
-echo   [5] Motherboard, Chipset Drivers ^& PnP Hardware Health Audit
-echo   [6] Display, EDID Timings ^& DP Scaler Saturation Audit
-echo   [7] GPU Driver Health ^& Downgrade Prevention Audit
-echo   [8] Apply GPU Downgrade Protection (Lock Windows Update Drivers)
-echo   [9] Power, Fast Startup ^& Sleep Transition Audit
-echo   [10] Maintenance ^& Cache Cleaning Tools
+echo   [1] Diagnose Latest Crash ^& Open HTML Report (Recommended)
+echo   [2] Scan Full Incident History (All Recent Incidents)
+echo   [3] Export Support Bundle (HTML Report + ZIP for Discord/Support)
+echo   [4] Motherboard, Chipset Drivers ^& PnP Hardware Health Audit
+echo   [5] Display, EDID Timings ^& DP Scaler Saturation Audit
+echo   [6] GPU Driver Health ^& Downgrade Prevention Audit
+echo   [7] Apply GPU Downgrade Protection (Lock Windows Update Drivers)
+echo   [8] Power, Fast Startup ^& Sleep Transition Audit
+echo   [9] Maintenance ^& Cache Cleaning Tools
 echo   [0] Exit
 echo.
 echo ========================================================================
 set "choice="
-set /p choice="Select an option [0-10, default is 1]: "
+set /p choice="Select an option [0-9, default is 1]: "
 
 if defined choice set "choice=%choice: =%"
 if "%choice%"=="" set choice=1
-if "%choice%"=="10" goto maintenance
+if "%choice%"=="9" goto maintenance
 if /i "%choice%"=="M" goto maintenance
-if "%choice%"=="1" goto full_scan
-if "%choice%"=="2" goto quick_scan
-if "%choice%"=="3" goto deep_scan
-if "%choice%"=="4" goto export_bundle
-if "%choice%"=="5" goto pnp_audit
-if "%choice%"=="6" goto display_audit
-if "%choice%"=="7" goto gpu_audit
-if "%choice%"=="8" goto gpu_fix
-if "%choice%"=="9" goto power_audit
+if "%choice%"=="1" goto latest_scan
+if "%choice%"=="2" goto history_scan
+if "%choice%"=="3" goto export_bundle
+if "%choice%"=="4" goto pnp_audit
+if "%choice%"=="5" goto display_audit
+if "%choice%"=="6" goto gpu_audit
+if "%choice%"=="7" goto gpu_fix
+if "%choice%"=="8" goto power_audit
 if "%choice%"=="0" goto exit_tool
 goto menu
 
-:full_scan
+:latest_scan
 cls
-echo [INFO] Running full diagnostic scan and generating HTML report...
-PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Analyze-LatestCrash.ps1" -Hours 48 -ExportHtml -OpenReport
+echo [INFO] Scanning backward for latest crash incident and generating HTML report...
+PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Analyze-LatestCrash.ps1" -ExportHtml -OpenReport
 goto finish
 
-:quick_scan
+:history_scan
 cls
-echo [INFO] Running quick scan (past 24 hours)...
-PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Analyze-LatestCrash.ps1" -Hours 24 -ExportHtml -OpenReport
-goto finish
-
-:deep_scan
-cls
-echo [INFO] Running deep scan (past 7 days)...
-PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Analyze-LatestCrash.ps1" -DeepScan -ExportHtml -OpenReport
+echo [INFO] Scanning full system incident history and generating HTML report...
+PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Analyze-LatestCrash.ps1" -AllIncidents -ExportHtml -OpenReport
 goto finish
 
 :export_bundle
 cls
 echo [INFO] Analyzing crashes and creating support bundle ZIP...
-PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Analyze-LatestCrash.ps1" -Hours 72 -ExportZip -ExportHtml -OpenReport
+PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Analyze-LatestCrash.ps1" -ExportZip -ExportHtml -OpenReport
 goto finish
 
 :pnp_audit

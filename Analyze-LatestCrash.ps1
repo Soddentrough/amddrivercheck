@@ -7,10 +7,14 @@
       2. Tier 2 (Secondary Evidence):   Application & Game Logs (Engine logs, Steam overlay/IPC, asserts).
       3. Tier 3 (Tertiary Telemetry):  System Event Logs (WHEA errors, GPU TDR resets, BugChecks, Fast Startup).
       4. Tier 4 (Contextual Audit):     Hardware Health & Configuration (PnP errors, GPU drivers, Dual-GPU alignment, Network).
+.PARAMETER AllIncidents
+    Scan full incident history (past 30 days or specified Hours) instead of focusing on the latest crash.
+.PARAMETER MaxLookbackDays
+    Maximum days to search backward for the latest crash incident (default: 30).
 .PARAMETER Hours
-    Hours back to scan for crash telemetry (default: 48).
+    Custom hours back to scan for crash telemetry (overrides default incident-anchored window if specified).
 .PARAMETER DeepScan
-    Extend scan window to 7 days (168 hours).
+    Legacy alias for -AllIncidents.
 .PARAMETER ExportHtml
     Generate a self-contained, responsive dark-mode HTML diagnostic report.
 .PARAMETER ExportJson
@@ -58,10 +62,14 @@
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [Parameter(Mandatory = $false)]
-    [int]$Hours = 48,
+    [Alias("History", "DeepScan")]
+    [switch]$AllIncidents,
 
     [Parameter(Mandatory = $false)]
-    [switch]$DeepScan,
+    [int]$MaxLookbackDays = 30,
+
+    [Parameter(Mandatory = $false)]
+    [int]$Hours = 0,
 
     [Parameter(Mandatory = $false)]
     [switch]$ExportHtml,
@@ -154,9 +162,33 @@ Import-Module (Join-Path $modulesDir "DcHardwareHealth.psm1") -Force
 Import-Module (Join-Path $modulesDir "DcRemediation.psm1") -Force
 Import-Module (Join-Path $modulesDir "DcReportGenerator.psm1") -Force
 
-# Apply -DeepScan override
-if ($DeepScan) { $Hours = 168 }
-$cutoff = (Get-Date).AddHours(-$Hours)
+# Determine Scan Mode & Temporal Windows
+$isCustomHours = ($PSBoundParameters.ContainsKey('Hours') -and $Hours -gt 0)
+
+if ($AllIncidents) {
+    $scanMode = "AllIncidents"
+    $scanHours = if ($isCustomHours) { $Hours } else { $MaxLookbackDays * 24 }
+    $cutoff = (Get-Date).AddHours(-$scanHours)
+    $endTime = Get-Date
+    $incidentAnchor = $null
+} elseif ($isCustomHours) {
+    $scanMode = "CustomHours"
+    $cutoff = (Get-Date).AddHours(-$Hours)
+    $endTime = Get-Date
+    $incidentAnchor = $null
+} else {
+    # Default: Scan backward in time looking for the latest incident
+    $incidentAnchor = Find-DcLatestIncident -MaxLookbackDays $MaxLookbackDays
+    if ($incidentAnchor.HasIncident) {
+        $scanMode = "LatestIncident"
+        $cutoff = $incidentAnchor.IncidentStart
+        $endTime = $incidentAnchor.IncidentEnd
+    } else {
+        $scanMode = "LatestIncidentClean"
+        $cutoff = $incidentAnchor.IncidentStart
+        $endTime = $incidentAnchor.IncidentEnd
+    }
+}
 
 # =========================================================================
 # DEDICATED ACTION / REMEDIATION SWITCHES
@@ -227,7 +259,8 @@ if ($RepairGpuSleep) {
 # =========================================================================
 
 if ($AuditPower) {
-    & (Join-Path $PSScriptRoot "scripts\Get-PowerAndSleepDiagnostics.ps1") -Hours $Hours
+    $pwrHours = if ($isCustomHours) { $Hours } else { 48 }
+    & (Join-Path $PSScriptRoot "scripts\Get-PowerAndSleepDiagnostics.ps1") -Hours $pwrHours
     exit 0
 }
 
@@ -264,10 +297,22 @@ if (-not $Quiet) {
     Write-Host ""
     Write-Host "  +------------------------------------------------------------------------+" -ForegroundColor Cyan
     Write-Host "  |          AUTOMATED SYSTEM & GAME CRASH DIAGNOSTIC SUITE               |" -ForegroundColor Cyan
-    Write-Host "  |             4-Tier Evidence Hierarchy Engine v4.4.0                   |" -ForegroundColor Cyan
+    Write-Host "  |             4-Tier Evidence Hierarchy Engine v4.5.0                   |" -ForegroundColor Cyan
     Write-Host "  +------------------------------------------------------------------------+" -ForegroundColor Cyan
-    Write-Host "  Scan Window: $($cutoff.ToString('yyyy-MM-dd HH:mm')) to $((Get-Date).ToString('yyyy-MM-dd HH:mm')) ($Hours hours)" -ForegroundColor DarkGray
-    Write-Host "  Precedence:  [1] Crash Dumps -> [2] App Logs -> [3] System Logs -> [4] System Config" -ForegroundColor DarkGray
+    if ($scanMode -eq "LatestIncident") {
+        Write-Host "  Scan Mode:    Latest Incident (Anchored: $($incidentAnchor.Timestamp.ToString('yyyy-MM-dd HH:mm:ss')) - $($incidentAnchor.AgeDescription))" -ForegroundColor Yellow
+        Write-Host "  Incident:     $($incidentAnchor.Source) - $($incidentAnchor.Details)" -ForegroundColor White
+        Write-Host "  Scan Window:  $($cutoff.ToString('yyyy-MM-dd HH:mm')) to $($endTime.ToString('yyyy-MM-dd HH:mm')) (Pre-crash telemetry correlated)" -ForegroundColor DarkGray
+    } elseif ($scanMode -eq "LatestIncidentClean") {
+        Write-Host "  Scan Mode:    Latest Incident (Scanned backward $MaxLookbackDays days - Clean)" -ForegroundColor Green
+        Write-Host "  Status:       No crash dumps, driver timeouts, or BSODs detected in the past $MaxLookbackDays days." -ForegroundColor White
+    } elseif ($scanMode -eq "AllIncidents") {
+        Write-Host "  Scan Mode:    Full Incident History (Past $MaxLookbackDays Days)" -ForegroundColor Yellow
+        Write-Host "  Scan Window:  $($cutoff.ToString('yyyy-MM-dd HH:mm')) to $($endTime.ToString('yyyy-MM-dd HH:mm'))" -ForegroundColor DarkGray
+    } else {
+        Write-Host "  Scan Window:  $($cutoff.ToString('yyyy-MM-dd HH:mm')) to $($endTime.ToString('yyyy-MM-dd HH:mm')) ($Hours hours)" -ForegroundColor DarkGray
+    }
+    Write-Host "  Precedence:   [1] Crash Dumps -> [2] App Logs -> [3] System Logs -> [4] System Config" -ForegroundColor DarkGray
     Write-Host ""
 }
 
@@ -281,7 +326,7 @@ if (-not $Quiet) {
     Write-Host ""
 }
 
-$dumpFiles = Get-DcCrashDumps -Cutoff $cutoff
+$dumpFiles = Get-DcCrashDumps -Cutoff $cutoff -EndTime $endTime
 $parsedDumps = [System.Collections.Generic.List[PSCustomObject]]::new()
 
 if ($dumpFiles.Count -gt 0) {
@@ -348,8 +393,8 @@ if (-not $Quiet) {
     Write-Host ""
 }
 
-$engineLogs = Get-DcEngineLogs -Cutoff $cutoff
-$steamLogs = Get-DcSteamLogs -Cutoff $cutoff
+$engineLogs = Get-DcEngineLogs -Cutoff $cutoff -EndTime $endTime
+$steamLogs = Get-DcSteamLogs -Cutoff $cutoff -EndTime $endTime
 
 if ($engineLogs.Count -gt 0 -or $steamLogs.Count -gt 0) {
     if (-not $Quiet) {
@@ -383,7 +428,7 @@ if (-not $Quiet) {
     Write-Host ""
 }
 
-$telemetry = Get-DcSystemTelemetry -Cutoff $cutoff
+$telemetry = Get-DcSystemTelemetry -Cutoff $cutoff -EndTime $endTime
 if (-not $Quiet) {
     if ($telemetry.FastStartup.FastStartupEnabled) {
         Write-Host "  [!] Power Configuration: Windows Fast Startup is ENABLED (HiberbootEnabled = 1)" -ForegroundColor Yellow
@@ -537,8 +582,18 @@ if (-not $Quiet) {
 # EXECUTIVE ROOT CAUSE DETERMINATION (EVALUATED BY PRECEDENCE TIER)
 # -------------------------------------------------------------------------
 $rootCauseTitle = "SYSTEM HEALTHY"
-$rootCauseDesc = "No critical hardware faults, GPU driver crashes, or unhandled exceptions detected in the scan window."
-$rootCauseGuidance = "Your system is reporting normal stability telemetry. If you experienced a game crash, it may have terminated cleanly without writing a dump or occurred outside the $Hours-hour scan window."
+$rootCauseDesc = if ($scanMode -eq "LatestIncidentClean") {
+    "Scanned backward $MaxLookbackDays days across crash dumps, game engine logs, and event telemetry. No crash minidumps, GPU driver timeouts (TDR 4101), BSOD bugchecks, or unexpected shutdowns were detected."
+} else {
+    "No critical hardware faults, GPU driver crashes, or unhandled exceptions detected in the scan window."
+}
+$rootCauseGuidance = if ($scanMode -eq "LatestIncidentClean") {
+    "Your system has had no recorded crash dumps or driver timeouts in the past $MaxLookbackDays days. If you are experiencing in-game stutters or disconnects, check Tier 4 hardware health and game server status."
+} elseif ($scanMode -eq "LatestIncident" -and $incidentAnchor) {
+    "Telemetry surrounding the latest incident ($($incidentAnchor.Timestamp.ToString('yyyy-MM-dd HH:mm'))) reports no cascading hardware faults. If game crashes persist, verify game file integrity."
+} else {
+    "Your system is reporting normal stability telemetry. If you experienced a game crash, it may have terminated cleanly without writing a dump or occurred outside the current analysis window."
+}
 $rootCauseSeverity = "Healthy"
 
 # Pre-screen for Steam Watchdog & Correlated Network Drops
@@ -768,7 +823,12 @@ if (-not $Quiet) {
 # Compile Report Object
 $reportObject = [PSCustomObject]@{
     GeneratedAt          = Get-Date
-    HoursScanned         = $Hours
+    Version              = "4.5.0"
+    ScanMode             = $scanMode
+    HoursScanned         = if ($isCustomHours) { $Hours } else { [math]::Round(((Get-Date) - $cutoff).TotalHours, 1) }
+    IncidentAnchor       = $incidentAnchor
+    CutoffTime           = $cutoff
+    EndTime              = $endTime
     RootCauseTitle       = $rootCauseTitle
     RootCauseDescription = $rootCauseDesc
     RootCauseGuidance    = $rootCauseGuidance
