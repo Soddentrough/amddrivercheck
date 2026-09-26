@@ -866,7 +866,13 @@ if ($ExportHtml -or $OpenReport) {
 # Export JSON if requested
 if ($ExportJson) {
     $jsonFile = Join-Path $PWD ("CrashReport_" + (Get-Date).ToString("yyyyMMdd_HHmmss") + ".json")
-    $reportObject | ConvertTo-Json -Depth 6 | Set-Content -Path $jsonFile -Encoding UTF8
+    $jsonText = $reportObject | ConvertTo-Json -Depth 6
+    if ($env:USERPROFILE) {
+        $jsonText = $jsonText.Replace($env:USERPROFILE, "%USERPROFILE%")
+    }
+    $jsonText = $jsonText -replace '(?i)C:\\Users\\[^\\]+', '%USERPROFILE%'
+    $jsonText = $jsonText -replace '\[U:\d+:\d+\]', '[U:1:REDACTED]'
+    [System.IO.File]::WriteAllText($jsonFile, $jsonText, [System.Text.Encoding]::UTF8)
     if (-not $Quiet) {
         Write-Host "  [JSON REPORT] Saved to: $jsonFile" -ForegroundColor Cyan
     }
