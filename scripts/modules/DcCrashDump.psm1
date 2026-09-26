@@ -13,9 +13,14 @@ function Get-DcDumpDirectories {
 
     $dirs = [System.Collections.Generic.List[string]]::new()
 
-    # 1. Windows Kernel BSOD Minidumps
+    # 1. Windows Kernel BSOD Minidumps & LiveKernelReports (TDR Watchdog)
     $winMinidump = Join-Path $env:SystemRoot "Minidump"
     if (Test-Path $winMinidump) { $dirs.Add($winMinidump) }
+
+    $liveWatchdog = Join-Path $env:SystemRoot "LiveKernelReports\WATCHDOG"
+    if (Test-Path $liveWatchdog) { $dirs.Add($liveWatchdog) }
+    $liveKernel = Join-Path $env:SystemRoot "LiveKernelReports"
+    if (Test-Path $liveKernel) { $dirs.Add($liveKernel) }
 
     # 2. Windows User-Mode WER Crash Dumps
     $werDumps = Join-Path $env:LOCALAPPDATA "CrashDumps"
@@ -60,7 +65,12 @@ function Get-DcDumpDirectories {
         "$env:LOCALAPPDATA\Pearl Abyss\DumpCache",
         "$env:LOCALAPPDATA\BeamNG.drive",
         "$env:LOCALAPPDATA\Maine\Saved\Crashes",
-        "$env:LOCALAPPDATA\Cyberpunk 2077\Crashes"
+        "$env:LOCALAPPDATA\CD Projekt Red\Cyberpunk 2077\Crashes",
+        "$env:LOCALAPPDATA\Cyberpunk 2077\Crashes",
+        (Join-Path $env:USERPROFILE "Documents\My Games\Starfield\CrashDumps"),
+        "$env:LOCALAPPDATA\Starfield",
+        "$env:LOCALAPPDATA\CAPCOM",
+        (Join-Path $env:USERPROFILE "Documents\Battlefield 2042\CrashDumps")
     )
     foreach ($kd in $knownGameDirs) {
         if (Test-Path $kd) { $dirs.Add($kd) }
@@ -186,7 +196,7 @@ function Read-DcMinidump {
         ThreadCount     = 0
         Modules         = @()
         Assertions      = @()
-        IsKernelDump    = ($fileInfo.DirectoryName -match '(?i)SystemRoot|Windows\\Minidump' -or $fileInfo.Name -match '(?i)MEMORY\.DMP')
+        IsKernelDump    = ($fileInfo.DirectoryName -match '(?i)SystemRoot|Windows\\Minidump|LiveKernelReports' -or $fileInfo.Name -match '(?i)MEMORY\.DMP|WATCHDOG')
     }
 
     if ($fileInfo.Name -match '__sentry-event') {
@@ -311,6 +321,19 @@ function Read-DcMinidump {
             $result.IsShaderCompiler = $isShaderCompiler
             $result.IsRogueKernelDriver = $isRogueKernel
             $result.IsGraphicsCrash = ($isShaderCompiler -or $isGfxDriver -or ($result.ExceptionCode -match '0x887A000[156]'))
+        }
+
+        # Handle LiveKernelReports Watchdog Dumps (GPU TDR Live Dumps without user exception stream)
+        if (-not $result.ExceptionCode -and ($fileInfo.DirectoryName -match '(?i)LiveKernelReports' -or $fileInfo.Name -match '(?i)WATCHDOG')) {
+            $result.ExceptionCode = "0x00000141"
+            $result.ExceptionMeaning = "LiveKernelEvent 0x141 (VIDEO_ENGINE_TDR_TIMEOUT - GPU Engine Hung & Recovered)"
+            $result.IsGraphicsCrash = $true
+            if (-not $result.FaultingModule) {
+                $gfxMod = $result.Modules | Where-Object { $_.Name -match '(?i)amdkmdag|nvlddmkm|igdkmd' } | Select-Object -First 1
+                if ($gfxMod) {
+                    $result.FaultingModule = [System.IO.Path]::GetFileName($gfxMod.Name)
+                }
+            }
         }
 
         # 4. Thread List (Type 3)

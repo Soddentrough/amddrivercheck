@@ -40,6 +40,62 @@ function Get-DcPnpHealth {
     return $results
 }
 
+function Get-DcRebarStatus {
+    [CmdletBinding()]
+    param()
+
+    $rebarStatus = [PSCustomObject]@{
+        IsSupported = $false
+        IsEnabled   = $false
+        BarSizeMb   = 0
+        Details     = "Not Audited"
+    }
+
+    try {
+        $memAddrs = @(Get-CimInstance Win32_DeviceMemoryAddress -ErrorAction SilentlyContinue)
+        $pnpRes = @(Get-CimInstance Win32_PnPAllocatedResource -ErrorAction SilentlyContinue)
+        $gpus = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue)
+
+        $maxBarBytes = [int64]0
+        foreach ($gpu in $gpus) {
+            $gpuId = $gpu.PNPDeviceID
+            if (-not $gpuId) { continue }
+
+            $matchedRes = $pnpRes | Where-Object { $_.Dependent.DeviceID -eq $gpuId }
+            foreach ($res in $matchedRes) {
+                $addr = $memAddrs | Where-Object { $_.__RELPATH -eq $res.Antecedent.__RELPATH } | Select-Object -First 1
+                if ($addr -and $addr.StartingAddress -and $addr.EndingAddress) {
+                    $start = [Convert]::ToInt64($addr.StartingAddress, 10)
+                    $end = [Convert]::ToInt64($addr.EndingAddress, 10)
+                    $size = $end - $start + 1
+                    if ($size -gt $maxBarBytes) {
+                        $maxBarBytes = $size
+                    }
+                }
+            }
+        }
+
+        $maxBarMb = [math]::Round($maxBarBytes / 1MB)
+        if ($maxBarBytes -ge 536870912) { # >= 512 MB indicates 64-bit BAR is expanded (> standard 256MB)
+            $rebarStatus.IsEnabled = $true
+            $rebarStatus.IsSupported = $true
+            $rebarStatus.BarSizeMb = $maxBarMb
+            $rebarStatus.Details = "Enabled (BAR Aperture: ${maxBarMb} MB)"
+        } elseif ($maxBarBytes -gt 0) {
+            $rebarStatus.IsEnabled = $false
+            $rebarStatus.IsSupported = $true
+            $rebarStatus.BarSizeMb = $maxBarMb
+            $rebarStatus.Details = "Disabled in BIOS / 256MB Legacy Aperture (Current: ${maxBarMb} MB)"
+        } else {
+            $rebarStatus.Details = "Memory aperture could not be resolved"
+        }
+    } catch {
+        $rebarStatus.Details = "Query exception: $($_.Exception.Message)"
+    }
+
+    return $rebarStatus
+}
+
 function Get-DcGpuDriverHealth {
     [CmdletBinding()]
     param()
@@ -105,6 +161,24 @@ function Get-DcGpuDriverHealth {
         }
     }
 
+    # Detect Conflicting / Ghost GPU Drivers (e.g. leftover NVIDIA service on AMD system or AMD service on NVIDIA)
+    $ghostGpuDrivers = [System.Collections.Generic.List[string]]::new()
+    $hasDiscreteAmd = @($gpuList | Where-Object { $_.Vendor -eq "AMD" -and -not $_.IsGeneric }).Count -gt 0
+    $hasDiscreteNvidia = @($gpuList | Where-Object { $_.Vendor -eq "NVIDIA" -and -not $_.IsGeneric }).Count -gt 0
+
+    if ($hasDiscreteAmd) {
+        $nvKmd = Get-Service -Name "nvlddmkm" -ErrorAction SilentlyContinue
+        if ($nvKmd -and $nvKmd.StartType -ne 'Disabled') {
+            $ghostGpuDrivers.Add("NVIDIA Display Driver service (nvlddmkm) is present/active on an AMD GPU system")
+        }
+    }
+    if ($hasDiscreteNvidia) {
+        $amdKmd = Get-Service -Name "amdkmdag" -ErrorAction SilentlyContinue
+        if ($amdKmd -and $amdKmd.StartType -ne 'Disabled') {
+            $ghostGpuDrivers.Add("AMD Display Driver service (amdkmdag) is present/active on an NVIDIA GPU system")
+        }
+    }
+
     # Query Windows Update Driver Policies
     $dsReg = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching" -ErrorAction SilentlyContinue
     $searchOrderConfig = if ($dsReg) { $dsReg.SearchOrderConfig } else { $null }
@@ -135,6 +209,9 @@ function Get-DcGpuDriverHealth {
         ExcludeWUDrivers   = $excludeWUDrivers
         IsWUDriverBlocked  = ($searchOrderConfig -eq 0 -and $excludeWUDrivers -eq 1)
         IsUlpsEnabled      = $ulpsActive
+        RebarStatus        = (Get-DcRebarStatus)
+        GhostGpuDrivers    = @($ghostGpuDrivers)
+        HasGhostDrivers    = ($ghostGpuDrivers.Count -gt 0)
     }
 }
 
@@ -690,4 +767,85 @@ function Get-DcMotherboardAndChipsetHealth {
     }
 }
 
-Export-ModuleMember -Function Get-DcPnpHealth, Get-DcGpuDriverHealth, Get-DcBluetoothHealth, Get-DcNetworkHealth, Get-DcDisplayDiagnostics, Get-DcProblematicKernelDrivers, Get-DcMotherboardAndChipsetHealth
+function Get-DcMemoryHealth {
+    [CmdletBinding()]
+    param()
+
+    $sticks = @(Get-CimInstance Win32_PhysicalMemory -ErrorAction SilentlyContinue)
+    $memResults = [PSCustomObject]@{
+        TotalCapacityGb      = 0
+        ModuleCount          = 0
+        ConfiguredClockSpeed = 0
+        MaxSpeed             = 0
+        IsRunningBaseJedec   = $false
+        Modules              = [System.Collections.Generic.List[PSCustomObject]]::new()
+        Summary              = "No physical memory modules detected"
+    }
+
+    if ($sticks.Count -gt 0) {
+        $totalBytes = [int64]0
+        $maxSpeed = 0
+        $configuredSpeed = 0
+
+        foreach ($s in $sticks) {
+            $capBytes = if ($s.Capacity) { [Convert]::ToInt64($s.Capacity, 10) } else { 0 }
+            $totalBytes += $capBytes
+            $spd = if ($s.Speed) { [int]$s.Speed } else { 0 }
+            $cfg = if ($s.ConfiguredClockSpeed) { [int]$s.ConfiguredClockSpeed } else { 0 }
+            if ($spd -gt $maxSpeed) { $maxSpeed = $spd }
+            if ($cfg -gt $configuredSpeed) { $configuredSpeed = $cfg }
+
+            $memResults.Modules.Add([PSCustomObject]@{
+                BankLabel       = $s.BankLabel
+                DeviceLocator   = $s.DeviceLocator
+                CapacityGb      = [math]::Round($capBytes / 1GB, 1)
+                Manufacturer    = if ($s.Manufacturer) { $s.Manufacturer.Trim() } else { "Unknown" }
+                PartNumber      = if ($s.PartNumber) { $s.PartNumber.Trim() } else { "Unknown" }
+                Speed           = $spd
+                ConfiguredSpeed = $cfg
+            })
+        }
+
+        $totalGb = [math]::Round($totalBytes / 1GB)
+        $memResults.TotalCapacityGb = $totalGb
+        $memResults.ModuleCount = $sticks.Count
+        $memResults.ConfiguredClockSpeed = $configuredSpeed
+        $memResults.MaxSpeed = $maxSpeed
+
+        if ($maxSpeed -gt 0 -and $configuredSpeed -gt 0 -and $configuredSpeed -lt $maxSpeed) {
+            $memResults.IsRunningBaseJedec = $true
+        }
+
+        $memResults.Summary = "${totalGb} GB (${sticks.Count} module(s) @ ${configuredSpeed} MT/s)"
+    }
+
+    return $memResults
+}
+
+function Get-DcStorageHealth {
+    [CmdletBinding()]
+    param()
+
+    $disks = @(Get-CimInstance Win32_LogicalDisk -Filter "DriveType = 3" -ErrorAction SilentlyContinue)
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    foreach ($d in $disks) {
+        $totalGb = if ($d.Size) { [math]::Round([Convert]::ToInt64($d.Size, 10) / 1GB, 1) } else { 0 }
+        $freeGb = if ($d.FreeSpace) { [math]::Round([Convert]::ToInt64($d.FreeSpace, 10) / 1GB, 1) } else { 0 }
+        $pctFree = if ($totalGb -gt 0) { [math]::Round(($freeGb / $totalGb) * 100, 1) } else { 0 }
+        $isLowSpace = ($freeGb -lt 10)
+
+        $results.Add([PSCustomObject]@{
+            DeviceID    = $d.DeviceID
+            VolumeName  = if ($d.VolumeName) { $d.VolumeName } else { "Local Disk" }
+            TotalGb     = $totalGb
+            FreeGb      = $freeGb
+            PercentFree = $pctFree
+            IsLowSpace  = $isLowSpace
+        })
+    }
+
+    return $results
+}
+
+Export-ModuleMember -Function Get-DcPnpHealth, Get-DcGpuDriverHealth, Get-DcRebarStatus, Get-DcMemoryHealth, Get-DcStorageHealth, Get-DcBluetoothHealth, Get-DcNetworkHealth, Get-DcDisplayDiagnostics, Get-DcProblematicKernelDrivers, Get-DcMotherboardAndChipsetHealth

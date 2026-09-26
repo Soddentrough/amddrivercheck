@@ -142,6 +142,12 @@ function Export-DcHtmlReport {
                 $telemRows.Add("<div class='alert-card alert-warning'><strong>&#x1F319; Sleep/Wake Transition [$($st.WakeTime)]:</strong> $($st.Message)</div>")
             }
         }
+        if ($telem.CpuThrottlingEvents -and $telem.CpuThrottlingEvents.Count -gt 0) {
+            $hasTelemIssue = $true
+            foreach ($ct in ($telem.CpuThrottlingEvents | Select-Object -First 3)) {
+                $telemRows.Add("<div class='alert-card alert-critical'><strong>&#x1F525; CPU Thermal / VRM Firmware Throttling (Event 37) [$($ct.TimeCreated)]:</strong> $($ct.Message)</div>")
+            }
+        }
         foreach ($us in $telem.UnexpectedShutdowns) {
             $hasTelemIssue = $true
             $telemRows.Add("<div class='alert-card alert-warning'><strong>&#x1F50C; Unexpected Shutdown (Event 6008) [$($us.TimeCreated)]:</strong> Previous system shutdown was unexpected.</div>")
@@ -350,6 +356,12 @@ function Export-DcHtmlReport {
     $parts.Add("        .discord-copy-box { margin-top: 32px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }")
     $parts.Add("        .discord-copy-box textarea { width: 100%; height: 120px; background: #050811; border: 1px solid var(--border); border-radius: 6px; color: #94a3b8; padding: 10px; font-family: monospace; font-size: 0.85rem; margin-top: 8px; resize: vertical; }")
     $parts.Add("        footer { margin-top: 40px; border-top: 1px solid var(--border); padding-top: 16px; text-align: center; color: var(--text-muted); font-size: 0.85rem; }")
+    $parts.Add("        .spec-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 24px; }")
+    $parts.Add("        .spec-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }")
+    $parts.Add("        .spec-label { font-size: 0.75rem; text-transform: uppercase; color: var(--cyan); font-weight: 600; letter-spacing: 0.5px; }")
+    $parts.Add("        .spec-value { font-size: 0.92rem; font-weight: 600; color: #fff; margin-top: 3px; word-break: break-word; }")
+    $parts.Add("        .filter-input { width: 100%; box-sizing: border-box; background: #050811; border: 1px solid var(--border); border-radius: 8px; color: #fff; padding: 12px 16px; margin: 16px 0; font-size: 0.95rem; outline: none; }")
+    $parts.Add("        .filter-input:focus { border-color: var(--cyan); }")
     $parts.Add("    </style>")
     $parts.Add("</head>")
     $parts.Add("<body>")
@@ -371,6 +383,22 @@ function Export-DcHtmlReport {
     $parts.Add("            </div>")
     $parts.Add("            <span class='badge $statusClass'>$statusText</span>")
     $parts.Add("        </header>")
+
+    $cpuVal = if ($hw -and $hw.Motherboard -and $hw.Motherboard.CpuName) { $hw.Motherboard.CpuName } else { "Standard CPU" }
+    $ramVal = if ($hw -and $hw.Memory -and $hw.Memory.Summary) { $hw.Memory.Summary } else { "Audited via System" }
+    $gpuVal = if ($hw -and $hw.Gpus -and $hw.Gpus.Count -gt 0) { "$($hw.Gpus[0].Name) (v$($hw.Gpus[0].DriverVersion))" } else { "Standard Display Adapter" }
+    $rebarVal = if ($hw -and $hw.RebarStatus -and $hw.RebarStatus.Details) { $hw.RebarStatus.Details } else { "N/A" }
+    $mbVal = if ($hw -and $hw.Motherboard) { "$($hw.Motherboard.MotherboardManufacturer) $($hw.Motherboard.MotherboardProduct)" } else { "Standard Motherboard" }
+    $biosVal = if ($hw -and $hw.Motherboard -and $hw.Motherboard.BiosVersion) { " | BIOS: $($hw.Motherboard.BiosVersion)" } else { "" }
+
+    $parts.Add("        <div class='spec-grid'>")
+    $parts.Add("            <div class='spec-card'><div class='spec-label'>Processor</div><div class='spec-value'>$cpuVal</div></div>")
+    $parts.Add("            <div class='spec-card'><div class='spec-label'>System Memory</div><div class='spec-value'>$ramVal</div></div>")
+    $parts.Add("            <div class='spec-card'><div class='spec-label'>Graphics Hardware</div><div class='spec-value'>$gpuVal</div></div>")
+    $parts.Add("            <div class='spec-card'><div class='spec-label'>Resizable BAR / SAM</div><div class='spec-value'>$rebarVal</div></div>")
+    $parts.Add("            <div class='spec-card'><div class='spec-label'>Motherboard & Firmware</div><div class='spec-value'>$mbVal$biosVal</div></div>")
+    $parts.Add("        </div>")
+    $parts.Add("        <input type='text' class='filter-input' id='reportFilter' placeholder='Search report, events, drivers, exception codes, and error logs...' onkeyup='filterReport()'>")
     $parts.Add("        <section class='executive-card'>")
     $parts.Add("            <h2>Executive Root Cause & Actionable Guidance</h2>")
     $parts.Add("            <div class='root-cause'>$($ReportData.RootCauseTitle)</div>")
@@ -428,6 +456,16 @@ function Export-DcHtmlReport {
     $parts.Add("            DriverCheck Diagnostic Suite v4.5.0 | Evidence-Based Crash Analysis Engine")
     $parts.Add("        </footer>")
     $parts.Add("    </div>")
+    $parts.Add("    <script>")
+    $parts.Add("    function filterReport() {")
+    $parts.Add("        var q = document.getElementById('reportFilter').value.toLowerCase();")
+    $parts.Add("        var items = document.querySelectorAll('.card-item, .alert-card, tbody tr');")
+    $parts.Add("        items.forEach(function(el) {")
+    $parts.Add("            var txt = el.textContent.toLowerCase();")
+    $parts.Add("            el.style.display = txt.indexOf(q) !== -1 ? '' : 'none';")
+    $parts.Add("        });")
+    $parts.Add("    }")
+    $parts.Add("    </script>")
     $parts.Add("</body>")
     $parts.Add("</html>")
 
@@ -437,7 +475,7 @@ function Export-DcHtmlReport {
     if ($env:USERPROFILE) {
         $fullHtml = $fullHtml.Replace($env:USERPROFILE, "%USERPROFILE%")
     }
-    $fullHtml = $fullHtml -replace '(?i)C:\\Users\\[^\\]+', '%USERPROFILE%'
+    $fullHtml = $fullHtml -replace '(?i)[a-zA-Z]:\\Users\\[^\\]+', '%USERPROFILE%'
     $fullHtml = $fullHtml -replace '\[U:\d+:\d+\]', '[U:1:REDACTED]'
 
     [System.IO.File]::WriteAllText($OutputPath, $fullHtml, [System.Text.Encoding]::UTF8)
@@ -479,7 +517,7 @@ function Export-DcSupportBundle {
                     $sanitized = $tailLines | ForEach-Object {
                         $s = $_ -replace '\[U:\d+:\d+\]', '[U:1:REDACTED]'
                         if ($env:USERPROFILE) { $s = $s.Replace($env:USERPROFILE, "%USERPROFILE%") }
-                        $s -replace '(?i)C:\\Users\\[^\\]+', '%USERPROFILE%'
+                        $s -replace '(?i)[a-zA-Z]:\\Users\\[^\\]+', '%USERPROFILE%'
                     }
                     Set-Content -Path $dest -Value $sanitized -Encoding UTF8
                 }

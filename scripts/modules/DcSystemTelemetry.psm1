@@ -205,6 +205,7 @@ function Get-DcSystemTelemetry {
         PciDeviceResets        = [System.Collections.Generic.List[PSCustomObject]]::new()
         WlanFailovers          = [System.Collections.Generic.List[PSCustomObject]]::new()
         SleepTransitions       = [System.Collections.Generic.List[PSCustomObject]]::new()
+        CpuThrottlingEvents    = [System.Collections.Generic.List[PSCustomObject]]::new()
     }
 
     # Query System Events within time window
@@ -345,6 +346,16 @@ function Get-DcSystemTelemetry {
             # 7. Storage / Disk / NVMe Timeouts (Events 11, 15, 129, 153, 51)
             if ($e.ProviderName -match 'stornvme|disk|Ntfs|iaStor|volsnap' -and $e.LevelDisplayName -match 'Error|Critical|Warning') {
                 $results.StorageErrors.Add([PSCustomObject]@{
+                    TimeCreated  = $e.TimeCreated
+                    Id           = $e.Id
+                    Provider     = $e.ProviderName
+                    Message      = $e.Message.Trim()
+                })
+            }
+
+            # 8. CPU Firmware Thermal & VRM Throttling (Kernel-Processor-Power Event 37)
+            if ($e.Id -eq 37 -and $e.ProviderName -match 'Kernel-Processor-Power') {
+                $results.CpuThrottlingEvents.Add([PSCustomObject]@{
                     TimeCreated  = $e.TimeCreated
                     Id           = $e.Id
                     Provider     = $e.ProviderName

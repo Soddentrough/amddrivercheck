@@ -491,6 +491,12 @@ if (-not $Quiet) {
         }
     }
 
+    if ($telemetry.CpuThrottlingEvents -and $telemetry.CpuThrottlingEvents.Count -gt 0) {
+        foreach ($ct in ($telemetry.CpuThrottlingEvents | Select-Object -First 3)) {
+            Write-Host "  [!] CPU Thermal / VRM Throttling [$($ct.TimeCreated)]: $($ct.Message)" -ForegroundColor Red
+        }
+    }
+
     if ($telemetry.SleepTransitions -and $telemetry.SleepTransitions.Count -gt 0) {
         foreach ($st in ($telemetry.SleepTransitions | Select-Object -First 3)) {
             Write-Host "  [i] Sleep/Wake Transition [$($st.WakeTime)]: $($st.Message)" -ForegroundColor Cyan
@@ -516,6 +522,8 @@ if (-not $Quiet) {
 $pnpIssues = Get-DcPnpHealth
 $gpuHealth = Get-DcGpuDriverHealth
 $mbHealth = Get-DcMotherboardAndChipsetHealth
+$memHealth = Get-DcMemoryHealth
+$storageHealth = Get-DcStorageHealth
 $netHealth = Get-DcNetworkHealth
 $displayHealth = Get-DcDisplayDiagnostics
 $kernelDriverHealth = Get-DcProblematicKernelDrivers
@@ -528,6 +536,21 @@ if (-not $Quiet) {
     Write-Host "  Chipset     : $($mbHealth.Summary)" -ForegroundColor $(if ($mbHealth.IsHealthy) { [ConsoleColor]::Green } else { [ConsoleColor]::Yellow })
     if ($mbHealth.MissingControllers.Count -gt 0) {
         Write-Host "  [!] Missing Chipset Controllers: $($mbHealth.MissingControllers -join ', ')" -ForegroundColor Red
+    }
+
+    # System Memory (RAM)
+    $memColor = if ($memHealth.IsRunningBaseJedec) { [ConsoleColor]::Yellow } else { [ConsoleColor]::White }
+    Write-Host "  RAM         : $($memHealth.Summary)" -ForegroundColor $memColor
+    if ($memHealth.IsRunningBaseJedec) {
+        Write-Host "  [!] Notice: RAM appears to be running at base JEDEC speed ($($memHealth.ConfiguredClockSpeed) MT/s) while rated for $($memHealth.MaxSpeed) MT/s. Consider enabling XMP/EXPO in BIOS." -ForegroundColor DarkYellow
+    }
+
+    # Storage Free Space
+    $lowDisks = @($storageHealth | Where-Object { $_.IsLowSpace })
+    if ($lowDisks.Count -gt 0) {
+        foreach ($ld in $lowDisks) {
+            Write-Host "  [!] Low Storage Warning: Drive $($ld.DeviceID) ($($ld.VolumeName)) has only $($ld.FreeGb) GB free ($($ld.PercentFree)%). Low free space can cause shader compiler timeouts and pagefile exhaustion." -ForegroundColor Red
+        }
     }
 
     if ($pnpIssues.Count -gt 0) {
@@ -546,6 +569,17 @@ if (-not $Quiet) {
         Write-Host "    +- Provider:       $($g.Provider) | Status: $($g.Status)$installTypeStr" -ForegroundColor DarkGray
         if ($g.CrashDefenderActive) {
             Write-Host "    +- Note: AMD Crash Defender service (AMDFendrSR) is active" -ForegroundColor DarkGray
+        }
+    }
+
+    if ($gpuHealth.RebarStatus.IsSupported) {
+        $rebarColor = if ($gpuHealth.RebarStatus.IsEnabled) { [ConsoleColor]::Green } else { [ConsoleColor]::Yellow }
+        Write-Host "  Resizable BAR: $($gpuHealth.RebarStatus.Details)" -ForegroundColor $rebarColor
+    }
+
+    if ($gpuHealth.HasGhostDrivers) {
+        foreach ($gd in $gpuHealth.GhostGpuDrivers) {
+            Write-Host "  [!] Conflicting Driver Warning: $gd" -ForegroundColor Red
         }
     }
 
@@ -842,6 +876,10 @@ $reportObject = [PSCustomObject]@{
         Gpus                       = @($gpuHealth.Gpus)
         DualGpuConflict            = $gpuHealth.DualGpuConflict
         Motherboard                = $mbHealth
+        Memory                     = $memHealth
+        Storage                    = @($storageHealth)
+        RebarStatus                = $gpuHealth.RebarStatus
+        GhostGpuDrivers            = @($gpuHealth.GhostGpuDrivers)
         PnpIssues                  = @($pnpIssues)
         Displays                   = @($displayHealth.Displays)
         HighRiskDisplays           = $displayHealth.HighRiskTimingsDetected
@@ -870,7 +908,7 @@ if ($ExportJson) {
     if ($env:USERPROFILE) {
         $jsonText = $jsonText.Replace($env:USERPROFILE, "%USERPROFILE%")
     }
-    $jsonText = $jsonText -replace '(?i)C:\\Users\\[^\\]+', '%USERPROFILE%'
+    $jsonText = $jsonText -replace '(?i)[a-zA-Z]:\\Users\\[^\\]+', '%USERPROFILE%'
     $jsonText = $jsonText -replace '\[U:\d+:\d+\]', '[U:1:REDACTED]'
     [System.IO.File]::WriteAllText($jsonFile, $jsonText, [System.Text.Encoding]::UTF8)
     if (-not $Quiet) {

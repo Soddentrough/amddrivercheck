@@ -219,6 +219,66 @@ function Get-DcEngineLogs {
         }
     }
 
+    # 6. CD Projekt Red / REDengine (Cyberpunk 2077 / Witcher 3)
+    $cdprDir = Join-Path $env:LOCALAPPDATA "CD Projekt Red"
+    if (Test-Path $cdprDir) {
+        $cdprLogs = Get-ChildItem -Path $cdprDir -Recurse -Include "stacktrace.txt", "*.log" -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -ge $Cutoff -and $_.LastWriteTime -le $EndTime }
+        foreach ($cpl in $cdprLogs) {
+            $lines = Get-Content $cpl.FullName -Tail 200 -ErrorAction SilentlyContinue
+            $critLines = $lines | Where-Object { $_ -match '(?i)Error Reason:|Expression:|Message:|Crash|Unhandled exception|GPU Crash' } | ForEach-Object { Protect-DcLogText $_ }
+            if ($critLines) {
+                $results.Add([PSCustomObject]@{
+                    Engine      = "REDengine (CD Projekt Red)"
+                    LogName     = $cpl.Name
+                    FullName    = (Protect-DcLogText $cpl.FullName)
+                    Timestamp   = $cpl.LastWriteTime
+                    ErrorLines  = @($critLines)
+                })
+            }
+        }
+    }
+
+    # 7. Bethesda / Creation Engine (Starfield / Fallout)
+    $docsGames = Join-Path $env:USERPROFILE "Documents\My Games"
+    if (Test-Path $docsGames) {
+        $bethLogs = Get-ChildItem -Path $docsGames -Recurse -Include "*.log", "CrashLog*.txt" -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -ge $Cutoff -and $_.LastWriteTime -le $EndTime }
+        foreach ($bl in $bethLogs) {
+            $lines = Get-Content $bl.FullName -Tail 200 -ErrorAction SilentlyContinue
+            $critLines = $lines | Where-Object { $_ -match '(?i)FATAL|CRASH|EXCEPTION|Error|Device Removed' } | ForEach-Object { Protect-DcLogText $_ }
+            if ($critLines) {
+                $results.Add([PSCustomObject]@{
+                    Engine      = "Creation Engine (Bethesda)"
+                    LogName     = $bl.Name
+                    FullName    = (Protect-DcLogText $bl.FullName)
+                    Timestamp   = $bl.LastWriteTime
+                    ErrorLines  = @($critLines)
+                })
+            }
+        }
+    }
+
+    # 8. Capcom RE Engine
+    $capcomDir = Join-Path $env:LOCALAPPDATA "CAPCOM"
+    if (Test-Path $capcomDir) {
+        $capcomLogs = Get-ChildItem -Path $capcomDir -Recurse -Filter "*.log" -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -ge $Cutoff -and $_.LastWriteTime -le $EndTime }
+        foreach ($ccl in $capcomLogs) {
+            $lines = Get-Content $ccl.FullName -Tail 200 -ErrorAction SilentlyContinue
+            $critLines = $lines | Where-Object { $_ -match '(?i)Fatal|Error|Exception|Crash' } | ForEach-Object { Protect-DcLogText $_ }
+            if ($critLines) {
+                $results.Add([PSCustomObject]@{
+                    Engine      = "RE Engine (Capcom)"
+                    LogName     = $ccl.Name
+                    FullName    = (Protect-DcLogText $ccl.FullName)
+                    Timestamp   = $ccl.LastWriteTime
+                    ErrorLines  = @($critLines)
+                })
+            }
+        }
+    }
+
     return $results
 }
 
