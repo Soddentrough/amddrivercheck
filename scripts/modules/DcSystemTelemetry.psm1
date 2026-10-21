@@ -13,6 +13,7 @@ function Protect-DcTelemetryText {
     if ($env:USERPROFILE) {
         $s = $s.Replace($env:USERPROFILE, "%USERPROFILE%")
     }
+    $s = $s -replace '(?i)[a-zA-Z]:\\Users\\[^\\"\r\n]+(?=\\)', '%USERPROFILE%'
     $s = $s -replace '(?i)[a-zA-Z]:\\Users\\[^\\"\r\n\s]+', '%USERPROFILE%'
     $s = $s -replace '(?i)User:\s*[^\r\n\.]+', 'User: [REDACTED]'
     return $s

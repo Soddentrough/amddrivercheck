@@ -631,6 +631,11 @@ Describe "Privacy & PII Redaction - JSON-Escaped Paths, Non-C Drives & Reliabili
         $sanitizedDrive | Should -Not -Match "SecretUser"
         $sanitizedDrive | Should -Match "%USERPROFILE%\\Games\\SomeGame\\game\.exe"
 
+        $rawSpaceDrivePath = "Faulting application path: D:\Users\Jane Doe\Games\SomeGame\game.exe"
+        $sanitizedSpaceDrive = Protect-DcTelemetryText $rawSpaceDrivePath
+        $sanitizedSpaceDrive | Should -Not -Match "Jane Doe"
+        $sanitizedSpaceDrive | Should -Match "%USERPROFILE%\\Games\\SomeGame\\game\.exe"
+
         $rawEngineLine = "LogInit: User: GAMING-RIG\SecretUser loaded from E:\Users\SecretUser\AppData\Local\Game\Saved"
         $sanitizedEngine = Protect-DcLogText $rawEngineLine
         $sanitizedEngine | Should -Not -Match "SecretUser"

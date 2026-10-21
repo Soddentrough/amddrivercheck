@@ -40,7 +40,13 @@ if ($badDevices) {
             default { "Check Windows Device Manager properties for error details." }
         }
 
-        Write-Host "  Device:      $($bd.FriendlyName)" -ForegroundColor Yellow
+        $cleanFriendlyName = if ($bd.FriendlyName) {
+            $bd.FriendlyName -replace "^.+?'s\s+", "" -replace "^.+?の\s*", ""
+        } else {
+            $bd.FriendlyName
+        }
+
+        Write-Host "  Device:      $cleanFriendlyName" -ForegroundColor Yellow
         Write-Host "  Status:      $($bd.Status) (Problem: $($bd.Problem))" -ForegroundColor Red
         Write-Host "  Error Code:  $($bd.ConfigManagerErrorCode)" -ForegroundColor DarkYellow
         Write-Host "  Instance ID: $($bd.InstanceId)" -ForegroundColor DarkGray

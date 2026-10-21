@@ -570,6 +570,7 @@ function Export-DcHtmlReport {
     if ($env:USERPROFILE) {
         $fullHtml = $fullHtml.Replace($env:USERPROFILE, "%USERPROFILE%")
     }
+    $fullHtml = $fullHtml -replace '(?i)[a-zA-Z]:\\Users\\[^\\"<>\r\n]+(?=\\)', '%USERPROFILE%'
     $fullHtml = $fullHtml -replace '(?i)[a-zA-Z]:\\Users\\[^\\"<>\r\n\s]+', '%USERPROFILE%'
     $fullHtml = $fullHtml -replace '(?i)User:\s*[^\r\n"<>\\]+\\[^\r\n"<>\.]+', 'User: [REDACTED]'
     $fullHtml = $fullHtml -replace '\[U:\d+:\d+\]', '[U:1:REDACTED]'

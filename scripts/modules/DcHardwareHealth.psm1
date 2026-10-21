@@ -262,13 +262,14 @@ function Get-DcBluetoothHealth {
     $sanitizedAudio = @($audio | ForEach-Object { Anonymize-BtDevice $_ })
 
     $problemBt = $btDevices | Where-Object { $_.Status -ne "OK" }
+    $sanitizedProblemBt = if ($problemBt) { @($problemBt | ForEach-Object { Anonymize-BtDevice $_ }) } else { @() }
 
     return [PSCustomObject]@{
         Radios        = @($radios)
         Controllers   = $sanitizedControllers
         AudioDevices  = $sanitizedAudio
-        ProblemCount  = if ($problemBt) { $problemBt.Count } else { 0 }
-        ProblemList   = if ($problemBt) { @($problemBt) } else { @() }
+        ProblemCount  = $sanitizedProblemBt.Count
+        ProblemList   = $sanitizedProblemBt
     }
 }
 
