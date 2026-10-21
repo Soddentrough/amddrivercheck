@@ -3,15 +3,20 @@
     Windows Update & Driver Installation History Audit
 .DESCRIPTION
     Audits recently installed Windows Quality Updates, driver updates, and Defender
-    definitions to identify changes that correlate with new crashes.
+    definitions to identify changes that correlate with new crashes or resolved issues.
 .PARAMETER Days
     Number of days back to inspect (default: 14).
+.PARAMETER IncludeDefinitions
+    Include daily Windows Defender Security Intelligence / Definition updates (KB2267602).
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
-    [int]$Days = 14
+    [int]$Days = 14,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$IncludeDefinitions
 )
 
 $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -35,8 +40,14 @@ try {
     $searcher = $session.CreateUpdateSearcher()
     $totalCount = $searcher.GetTotalHistoryCount()
     if ($totalCount -gt 0) {
-        $history = $searcher.QueryHistory(0, [math]::Min(30, $totalCount))
-        $recent = $history | Where-Object { $_.Date -ge $cutoff }
+        $fetchLimit = [math]::Min([math]::Max(200, $Days * 8), $totalCount)
+        $history = $searcher.QueryHistory(0, $fetchLimit)
+        $recent = $history | Where-Object {
+            $_.Date -ge $cutoff -and (
+                $IncludeDefinitions -or
+                ($_.Title -notmatch '(?i)KB2267602|Security Intelligence Update|Definition Update for Microsoft Defender|Windows Malicious Software Removal Tool')
+            )
+        } | Sort-Object Date -Descending
         if ($recent) {
             $foundUpdates = $true
             Write-Host "Recent Windows Updates (from Windows Update Agent):" -ForegroundColor Cyan
@@ -52,20 +63,28 @@ try {
 
 # 2. Query Installed Hotfixes (WMI QuickFixEngineering)
 $hotfixes = Get-CimInstance Win32_QuickFixEngineering -ErrorAction SilentlyContinue |
-    Where-Object {
+    ForEach-Object {
         $instDate = [datetime]::MinValue
-        if ([datetime]::TryParse($_.InstalledOn, [ref]$instDate)) {
-            $instDate -ge $cutoff
-        } else {
-            $true
+        $hasValidDate = ($_.InstalledOn -and [datetime]::TryParse("$($_.InstalledOn)", [ref]$instDate))
+        [PSCustomObject]@{
+            HotFixID     = $_.HotFixID
+            Description  = $_.Description
+            InstalledOn  = $_.InstalledOn
+            ParsedDate   = if ($hasValidDate) { $instDate } else { $null }
+            HasValidDate = $hasValidDate
         }
-    } | Select-Object -First 10
+    } |
+    Where-Object {
+        $_.HasValidDate -and $_.ParsedDate -ge $cutoff
+    } |
+    Sort-Object ParsedDate -Descending |
+    Select-Object -First 25
 
 if ($hotfixes) {
     $foundUpdates = $true
     Write-Host "Installed Windows Hotfixes (Win32_QuickFixEngineering):" -ForegroundColor Cyan
     foreach ($hf in $hotfixes) {
-        Write-Host "  * [$($hf.InstalledOn)] $($hf.HotFixID): $($hf.Description)" -ForegroundColor White
+        Write-Host "  * [$($hf.ParsedDate.ToString('yyyy-MM-dd'))] $($hf.HotFixID): $($hf.Description)" -ForegroundColor White
     }
     Write-Host ""
 }

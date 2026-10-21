@@ -47,6 +47,13 @@ if ($dumps.Count -gt 0) {
                 Write-Host "Exception Code:   $($parsed.ExceptionCode) ($($parsed.ExceptionMeaning))" -ForegroundColor Red
                 Write-Host "Faulting Address: $($parsed.FaultingIP)" -ForegroundColor White
             }
+            if ($parsed.GpuDriverVersion) {
+                Write-Host "GPU Driver Ver:   v$($parsed.GpuDriverVersion)" -ForegroundColor Cyan
+            }
+            if ($parsed.MainExecutable) {
+                $exeVerStr = if ($parsed.MainExecutableVersion) { " (v$($parsed.MainExecutableVersion))" } else { "" }
+                Write-Host "Executable:       $($parsed.MainExecutable)$exeVerStr" -ForegroundColor White
+            }
             if ($parsed.Assertions.Count -gt 0) {
                 Write-Host "Assertions Found:" -ForegroundColor Red
                 foreach ($a in $parsed.Assertions) {

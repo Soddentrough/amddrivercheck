@@ -14,12 +14,23 @@ def check_file(filepath: Path) -> bool:
     stack = []
     in_single_quote = False
     in_double_quote = False
+    in_here_single = False
+    in_here_double = False
     in_block_comment = False
     errors = []
 
     pairs = {')': '(', ']': '[', '}': '{'}
 
     for line_no, line in enumerate(lines, start=1):
+        if in_here_single:
+            if line.startswith("'@"):
+                in_here_single = False
+            continue
+        if in_here_double:
+            if line.startswith('"@'):
+                in_here_double = False
+            continue
+
         i = 0
         n = len(line)
         while i < n:
@@ -42,6 +53,13 @@ def check_file(filepath: Path) -> bool:
                 if c == '#':
                     # Single line comment to end of line
                     break
+                if c == '@' and i + 1 == n - 1:
+                    if line[i+1] == "'":
+                        in_here_single = True
+                        break
+                    if line[i+1] == '"':
+                        in_here_double = True
+                        break
 
             # Handle quotes
             if c == "'" and not in_double_quote:
@@ -106,7 +124,12 @@ def check_file(filepath: Path) -> bool:
 
 def main():
     root = Path(__file__).resolve().parent.parent
-    ps_files = list(root.glob("*.ps1")) + list(root.glob("scripts/*.ps1")) + list(root.glob("scripts/modules/*.psm1"))
+    ps_files = (
+        list(root.glob("*.ps1"))
+        + list(root.glob("scripts/*.ps1"))
+        + list(root.glob("scripts/modules/*.psm1"))
+        + list(root.glob("tests/*.ps1"))
+    )
 
     print("Verifying PowerShell scripts and modules...")
     all_ok = True

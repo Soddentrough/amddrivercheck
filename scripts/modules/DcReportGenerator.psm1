@@ -35,6 +35,8 @@ function Export-DcHtmlReport {
                 $assertHtml = "<div class='assert-box'>" + ($d.Assertions | ForEach-Object { "<div><code>$_</code></div>" } | Out-String) + "</div>"
             }
 
+            $drvBadgeHtml = if ($d.GpuDriverVersion) { "<div><strong>Loaded GPU Driver:</strong> <span class='badge-module'>v$($d.GpuDriverVersion)</span></div>" } else { "" }
+
             $card = "<div class='card-item'>" +
                 "<div class='card-header-row'>" +
                     "<span class='file-name'>&#x1F4C4; $($d.FileName)</span>" +
@@ -43,6 +45,7 @@ function Export-DcHtmlReport {
                 "<div class='card-body-row'>" +
                     "<div><strong>Exception:</strong> $excBadge $($d.ExceptionMeaning)</div>" +
                     "<div><strong>Faulting Module:</strong> $modBadge</div>" +
+                    $drvBadgeHtml +
                     $assertHtml +
                 "</div>" +
             "</div>"
@@ -283,7 +286,9 @@ function Export-DcHtmlReport {
 
     $ulpsStr = if ($hw -and $hw.IsUlpsEnabled) { "Enabled (Power Saving Active)" } else { "Disabled" }
     $tdrDelayStr = if ($telem -and $telem.GraphicsDriverSettings -and $telem.GraphicsDriverSettings.TdrDelay) { "$($telem.GraphicsDriverSettings.TdrDelay)s" } else { "2s (Windows Default)" }
-    $scanRangeDiscord = if ($ReportData.ScanMode -eq "LatestIncident" -and $ReportData.IncidentAnchor) {
+    $scanRangeDiscord = if ($ReportData.ScanMode -eq "InvestigateResolved") {
+        "Historical Resolution Analysis (Past $($ReportData.IncidentAnchor.LookbackDays) Days)"
+    } elseif ($ReportData.ScanMode -eq "LatestIncident" -and $ReportData.IncidentAnchor) {
         "Latest Incident (Anchored: $($ReportData.IncidentAnchor.Timestamp.ToString('yyyy-MM-dd HH:mm')) - $($ReportData.IncidentAnchor.AgeDescription))"
     } elseif ($ReportData.ScanMode -eq "LatestIncidentClean") {
         "Latest Incident (Past $($ReportData.IncidentAnchor.LookbackDays) Days - Clean)"
@@ -293,12 +298,59 @@ function Export-DcHtmlReport {
         "Past $($ReportData.HoursScanned) Hours"
     }
 
+    $resolvedRows = [System.Collections.Generic.List[string]]::new()
+    $resolvedDiscordSection = ""
+    if ($ReportData.PSObject.Properties['ResolvedHistory'] -and $ReportData.ResolvedHistory -and $ReportData.ResolvedHistory.HasResolvedEpisodes -and $ReportData.ResolvedHistory.PrimaryResolvedEpisode) {
+        $ep = $ReportData.ResolvedHistory.PrimaryResolvedEpisode
+        $histDrv = if ($ep.HistoricalDriverVersion) { "v$($ep.HistoricalDriverVersion)" } else { "Unrecorded" }
+        $currDrv = if ($ep.CurrentDriverVersion) { "v$($ep.CurrentDriverVersion)" } else { "Unknown" }
+
+        $factorRows = [System.Collections.Generic.List[string]]::new()
+        $discordFactorLines = [System.Collections.Generic.List[string]]::new()
+        if ($ep.ResolutionFactors -and $ep.ResolutionFactors.Count -gt 0) {
+            foreach ($rf in ($ep.ResolutionFactors | Select-Object -First 6)) {
+                $confBadge = switch ($rf.Confidence) {
+                    "High"   { "<span class='badge-healthy'>HIGH</span>" }
+                    "Medium" { "<span class='badge-warning'>MEDIUM</span>" }
+                    default  { "<span class='badge-neutral'>CONTEXTUAL</span>" }
+                }
+                $tsDisplay = if ($rf.Timestamp) { $rf.Timestamp.ToString('yyyy-MM-dd HH:mm') } else { "Active State" }
+                $factorRows.Add("<tr><td>$confBadge</td><td><code>$tsDisplay</code><br><span style='font-size:0.8rem;color:var(--text-muted);'>$($rf.DeltaFromLast)</span></td><td><strong>$($rf.Title)</strong><br><span style='font-size:0.85rem;color:var(--text-muted);'>$($rf.Details)</span></td><td>$($rf.Source)</td></tr>")
+                $discordFactorLines.Add("  * [$($rf.Confidence)] $($rf.Title) ($($rf.DeltaFromLast)) - $($rf.Source)")
+            }
+        }
+
+        $factorTableHtml = if ($factorRows.Count -gt 0) {
+            "<table><thead><tr><th>Confidence</th><th>Timestamp / Delta</th><th>What Changed to Resolve It</th><th>Evidence Source</th></tr></thead><tbody>" + ($factorRows -join "`n") + "</tbody></table>"
+        } else {
+            "<div class='empty-state'>No explicit driver or registry change timestamped in the post-incident window.</div>"
+        }
+
+        $resolvedCard = "<div class='card-item'>" +
+            "<div class='card-header-row'>" +
+                "<span class='file-name'>&#x1F50D; Historical Episode ($($ep.StartTime.ToString('yyyy-MM-dd HH:mm')) .. $($ep.EndTime.ToString('yyyy-MM-dd HH:mm')))</span>" +
+                "<span class='badge-healthy'>RESOLVED ($($ep.QuietDaysSinceEnd) DAYS CRASH-FREE)</span>" +
+            "</div>" +
+            "<div><strong>Incident Count:</strong> $($ep.IncidentCount) | <strong>Historical Cause:</strong> $($ep.HistoricalRootCause)</div>" +
+            "<div><strong>Driver Version Diff:</strong> <code>$histDrv</code> (at crash) &rarr; <code>$currDrv</code> (current)</div>" +
+            "<div style='margin-top: 10px;'><strong>Ranked Resolution Correlations:</strong>$factorTableHtml</div>" +
+        "</div>"
+        $resolvedRows.Add($resolvedCard)
+
+        $resolvedDiscordSection = "`n`n[Historical Timeout Resolution]`n" +
+            "Episode:     $($ep.StartTime.ToString('yyyy-MM-dd')) .. $($ep.EndTime.ToString('yyyy-MM-dd')) ($($ep.IncidentCount) incidents, $($ep.QuietDaysSinceEnd) days crash-free)`n" +
+            "Past Cause:  $($ep.HistoricalRootCause)`n" +
+            "Driver Diff: $histDrv -> $currDrv`n" +
+            "What Changed:`n" + ($discordFactorLines -join "`n")
+    }
+
     $discordText = "=== DriverCheck Diagnostic Summary ===`n" +
         "Status:      $($ReportData.RootCauseTitle)`n" +
         "Severity:    $($ReportData.RootCauseSeverity)`n" +
         "Timestamp:   $((Get-Date).ToString('yyyy-MM-dd HH:mm'))`n" +
         "Scan Range:  $scanRangeDiscord`n`n" +
-        "[Summary]`n$($ReportData.RootCauseGuidance)`n`n" +
+        "[Summary]`n$($ReportData.RootCauseGuidance)" +
+        $resolvedDiscordSection + "`n`n" +
         "[Hardware & Platform]`n" +
         "Motherboard: $mbSummaryStr`n" +
         "Chipset:     $chipsetSummaryStr`n" +
@@ -370,7 +422,9 @@ function Export-DcHtmlReport {
     $parts.Add("            <div class='header-title'>")
     $parts.Add("                <h1>DriverCheck Diagnostic Suite</h1>")
     $mbHeaderInfo = if ($hw -and $hw.Motherboard) { " | System: $($hw.Motherboard.MotherboardManufacturer) $($hw.Motherboard.MotherboardProduct)" } else { "" }
-    $scanInfo = if ($ReportData.ScanMode -eq "LatestIncident" -and $ReportData.IncidentAnchor) {
+    $scanInfo = if ($ReportData.ScanMode -eq "InvestigateResolved") {
+        "Mode: Historical Resolution Analysis (Past $($ReportData.IncidentAnchor.LookbackDays) Days)"
+    } elseif ($ReportData.ScanMode -eq "LatestIncident" -and $ReportData.IncidentAnchor) {
         "Mode: Latest Incident (Anchored: $($ReportData.IncidentAnchor.Timestamp.ToString('yyyy-MM-dd HH:mm:ss')) - $($ReportData.IncidentAnchor.AgeDescription))"
     } elseif ($ReportData.ScanMode -eq "LatestIncidentClean") {
         "Mode: Latest Incident (Scanned past $($ReportData.IncidentAnchor.LookbackDays) days: Clean - No crashes recorded)"
@@ -408,6 +462,10 @@ function Export-DcHtmlReport {
     $parts.Add("                $($ReportData.RootCauseGuidance)")
     $parts.Add("            </div>")
     $parts.Add("        </section>")
+    if ($resolvedRows.Count -gt 0) {
+        $parts.Add("        <h3 class='section-title'>[HISTORICAL RESOLUTION] Past Timeout Episode & What Changed to Resolve It</h3>")
+        $parts.Add(($resolvedRows -join "`n"))
+    }
     $parts.Add("        <h3 class='section-title'>[TIER 1] Crash Dumps & Exceptions (Primary Ground Truth)</h3>")
     $parts.Add(($dumpRows -join "`n"))
     $parts.Add("        <h3 class='section-title'>[TIER 2] Game & Platform Logs (Secondary Evidence)</h3>")

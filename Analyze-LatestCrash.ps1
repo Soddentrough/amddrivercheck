@@ -55,6 +55,8 @@
     Purge Steam CEF HTML browser cache (%LOCALAPPDATA%\Steam\htmlcache).
 .PARAMETER KillHungSteam
     Terminate lingering headless or zombie Steam processes blocking relaunch.
+.PARAMETER InvestigateResolved
+    Investigate historical timeouts/crashes (up to 365 days back by default) that have since resolved themselves, clustering historical incident episodes and correlating system changes (driver updates, BIOS, registry/power mitigations) that stopped them.
 .PARAMETER Quiet
     Suppress interactive banner output and return only the structured report object.
 #>
@@ -64,6 +66,10 @@ param(
     [Parameter(Mandatory = $false)]
     [Alias("History", "DeepScan")]
     [switch]$AllIncidents,
+
+    [Parameter(Mandatory = $false)]
+    [Alias("Resolved", "WhyResolved")]
+    [switch]$InvestigateResolved,
 
     [Parameter(Mandatory = $false)]
     [int]$MaxLookbackDays = 30,
@@ -164,8 +170,21 @@ Import-Module (Join-Path $modulesDir "DcReportGenerator.psm1") -Force
 
 # Determine Scan Mode & Temporal Windows
 $isCustomHours = ($PSBoundParameters.ContainsKey('Hours') -and $Hours -gt 0)
+if ($InvestigateResolved -and -not $PSBoundParameters.ContainsKey('MaxLookbackDays')) {
+    $MaxLookbackDays = 365
+}
 
-if ($AllIncidents) {
+if ($InvestigateResolved) {
+    $scanMode = "InvestigateResolved"
+    $incidentAnchor = Find-DcLatestIncident -MaxLookbackDays $MaxLookbackDays
+    if ($incidentAnchor.HasIncident) {
+        $cutoff = $incidentAnchor.IncidentStart
+        $endTime = $incidentAnchor.IncidentEnd
+    } else {
+        $cutoff = (Get-Date).AddDays(-$MaxLookbackDays)
+        $endTime = Get-Date
+    }
+} elseif ($AllIncidents) {
     $scanMode = "AllIncidents"
     $scanHours = if ($isCustomHours) { $Hours } else { $MaxLookbackDays * 24 }
     $cutoff = (Get-Date).AddHours(-$scanHours)
@@ -299,7 +318,14 @@ if (-not $Quiet) {
     Write-Host "  |          AUTOMATED SYSTEM & GAME CRASH DIAGNOSTIC SUITE               |" -ForegroundColor Cyan
     Write-Host "  |             4-Tier Evidence Hierarchy Engine v4.5.0                   |" -ForegroundColor Cyan
     Write-Host "  +------------------------------------------------------------------------+" -ForegroundColor Cyan
-    if ($scanMode -eq "LatestIncident") {
+    if ($scanMode -eq "InvestigateResolved") {
+        Write-Host "  Scan Mode:    Historical Resolution Analysis (Past $MaxLookbackDays Days)" -ForegroundColor Cyan
+        if ($incidentAnchor -and $incidentAnchor.HasIncident) {
+            Write-Host "  Latest Event: $($incidentAnchor.Source) ($($incidentAnchor.Timestamp.ToString('yyyy-MM-dd HH:mm:ss')) - $($incidentAnchor.AgeDescription))" -ForegroundColor Yellow
+        } else {
+            Write-Host "  Status:       Searching historical archives, DriverStore, and setup logs ($MaxLookbackDays days)..." -ForegroundColor White
+        }
+    } elseif ($scanMode -eq "LatestIncident") {
         Write-Host "  Scan Mode:    Latest Incident (Anchored: $($incidentAnchor.Timestamp.ToString('yyyy-MM-dd HH:mm:ss')) - $($incidentAnchor.AgeDescription))" -ForegroundColor Yellow
         Write-Host "  Incident:     $($incidentAnchor.Source) - $($incidentAnchor.Details)" -ForegroundColor White
         Write-Host "  Scan Window:  $($cutoff.ToString('yyyy-MM-dd HH:mm')) to $($endTime.ToString('yyyy-MM-dd HH:mm')) (Pre-crash telemetry correlated)" -ForegroundColor DarkGray
@@ -342,6 +368,9 @@ if ($dumpFiles.Count -gt 0) {
                 if ($dumpObj.ExceptionCode) {
                     Write-Host "  +- Exception:        $($dumpObj.ExceptionCode) ($($dumpObj.ExceptionMeaning))" -ForegroundColor Red
                     Write-Host "  +- Faulting Module:  $($dumpObj.FaultingIP)" -ForegroundColor White
+                }
+                if ($dumpObj.GpuDriverVersion) {
+                    Write-Host "  +- Dump GPU Driver:  v$($dumpObj.GpuDriverVersion)" -ForegroundColor Cyan
                 }
                 if ($dumpObj.Assertions.Count -gt 0) {
                     Write-Host "  +- Assertions / Error Strings Found:" -ForegroundColor Red
@@ -836,6 +865,83 @@ if ($zombieProcesses.Count -gt 0 -and $rootCauseTitle -notmatch 'ACTIVE ZOMBIE')
     $rootCauseGuidance += "`n  * Post-Crash Cleanup: steam.exe (PID: $($zombieProcesses[0].PID)) is currently stuck as a zombie process from this crash; run '.\Analyze-LatestCrash.ps1 -KillHungSteam' to terminate it before relaunching Steam."
 }
 
+# -------------------------------------------------------------------------
+# HISTORICAL RESOLVED TIMEOUT & SYSTEM CHANGE CORRELATION
+# -------------------------------------------------------------------------
+$resolvedHistory = $null
+if ($InvestigateResolved -or $scanMode -eq "LatestIncidentClean") {
+    $histLookback = if ($InvestigateResolved) { $MaxLookbackDays } else { [math]::Max($MaxLookbackDays, 180) }
+    $activeGpuDrvVer = $null
+    if ($gpuHealth -and $gpuHealth.Gpus -and $gpuHealth.Gpus.Count -gt 0) {
+        $primaryGpu = $gpuHealth.Gpus | Where-Object { -not $_.IsGeneric } | Select-Object -First 1
+        if ($primaryGpu) { $activeGpuDrvVer = $primaryGpu.DriverVersion }
+    }
+    $resolvedHistory = Find-DcResolvedIncidentHistory -LookbackDays $histLookback -CurrentGpuDriverVersion $activeGpuDrvVer
+
+    if ($resolvedHistory -and $resolvedHistory.HasResolvedEpisodes -and $resolvedHistory.PrimaryResolvedEpisode) {
+        $ep = $resolvedHistory.PrimaryResolvedEpisode
+        if ($InvestigateResolved -or $rootCauseSeverity -eq "Healthy") {
+            $rootCauseTitle = "HISTORICAL TIMEOUT EPISODE RESOLVED ($($ep.QuietDaysSinceEnd) DAYS CRASH-FREE)"
+            $drvDiffText = if ($ep.HistoricalDriverVersion -and $ep.CurrentDriverVersion -and ($ep.HistoricalDriverVersion -ne $ep.CurrentDriverVersion)) {
+                " Driver changed from v$($ep.HistoricalDriverVersion) during the crashes to v$($ep.CurrentDriverVersion) currently."
+            } elseif ($ep.CurrentDriverVersion) {
+                " Active GPU driver: v$($ep.CurrentDriverVersion)."
+            } else { "" }
+            $rootCauseDesc = "Detected a resolved historical episode of $($ep.IncidentCount) incident(s) between $($ep.StartTime.ToString('yyyy-MM-dd HH:mm')) and $($ep.EndTime.ToString('yyyy-MM-dd HH:mm')) (Historical Cause: $($ep.HistoricalRootCause)).$drvDiffText The system has been stable for $($ep.QuietDaysSinceEnd) days since the last timeout."
+            if ($ep.ResolutionFactors -and $ep.ResolutionFactors.Count -gt 0) {
+                $topFactorsText = @(
+                    $ep.ResolutionFactors | Select-Object -First 3 | ForEach-Object {
+                        "[$($_.Confidence)] $($_.Title) ($($_.DeltaFromLast)) - Source: $($_.Source)"
+                    }
+                ) -join "`n  * "
+                $rootCauseGuidance = "What Changed to Resolve It:`n  * $topFactorsText"
+            } else {
+                $rootCauseGuidance = "No explicit driver or registry change was recorded in the immediate post-incident window; resolution likely resulted from an application/game update or workload change after $($ep.EndTime.ToString('yyyy-MM-dd'))."
+            }
+            $rootCauseSeverity = "Healthy"
+        }
+    } elseif ($InvestigateResolved) {
+        $rootCauseTitle = "NO RESOLVED HISTORICAL TIMEOUT EPISODE IDENTIFIED"
+        $rootCauseDesc = $resolvedHistory.Summary
+        $rootCauseGuidance = "If historical logs were cleared by a clean Windows install or log rotation, inspect preserved minidumps or increase -MaxLookbackDays."
+    }
+
+    if (-not $Quiet -and ($InvestigateResolved -or ($resolvedHistory -and $resolvedHistory.HasResolvedEpisodes))) {
+        Write-Host "========================================================================" -ForegroundColor Magenta
+        Write-Host "  HISTORICAL TIMEOUT & RESOLUTION CORRELATION (PAST $histLookback DAYS)" -ForegroundColor Magenta
+        Write-Host "========================================================================" -ForegroundColor Magenta
+        Write-Host ""
+        if ($resolvedHistory -and $resolvedHistory.HasResolvedEpisodes -and $resolvedHistory.PrimaryResolvedEpisode) {
+            $ep = $resolvedHistory.PrimaryResolvedEpisode
+            Write-Host "  Episode Window      : $($ep.StartTime.ToString('yyyy-MM-dd HH:mm')) .. $($ep.EndTime.ToString('yyyy-MM-dd HH:mm')) ($($ep.IncidentCount) incident(s))" -ForegroundColor Yellow
+            Write-Host "  Crash-Free Duration : $($ep.QuietDaysSinceEnd) days since last incident" -ForegroundColor Green
+            Write-Host "  Historical Cause    : $($ep.HistoricalRootCause)" -ForegroundColor White
+            $histDrvStr = if ($ep.HistoricalDriverVersion) { "v$($ep.HistoricalDriverVersion)" } else { "Unrecorded" }
+            $currDrvStr = if ($ep.CurrentDriverVersion) { "v$($ep.CurrentDriverVersion)" } else { "Unknown" }
+            Write-Host "  Driver Version Diff : $histDrvStr (at crash) -> $currDrvStr (current)" -ForegroundColor Cyan
+            Write-Host ""
+            Write-Host "  Ranked 'What Changed to Resolve It' Findings:" -ForegroundColor Cyan
+            if ($ep.ResolutionFactors -and $ep.ResolutionFactors.Count -gt 0) {
+                foreach ($rf in ($ep.ResolutionFactors | Select-Object -First 6)) {
+                    $confColor = switch ($rf.Confidence) {
+                        "High"       { [ConsoleColor]::Green }
+                        "Medium"     { [ConsoleColor]::Yellow }
+                        default      { [ConsoleColor]::Gray }
+                    }
+                    $tsStr = if ($rf.Timestamp) { $rf.Timestamp.ToString('yyyy-MM-dd HH:mm') } else { "Active State" }
+                    Write-Host "    * [$($rf.Confidence)] [$tsStr | $($rf.DeltaFromLast)] $($rf.Title)" -ForegroundColor $confColor
+                    Write-Host "      Source: $($rf.Source) | $($rf.Details)" -ForegroundColor DarkGray
+                }
+            } else {
+                Write-Host "    * No timestamped driver or registry changes found in primary inflection window." -ForegroundColor DarkGray
+            }
+        } else {
+            Write-Host "  [i] $($resolvedHistory.Summary)" -ForegroundColor DarkGray
+        }
+        Write-Host ""
+    }
+}
+
 if (-not $Quiet) {
     Write-Host "========================================================================" -ForegroundColor Cyan
     Write-Host "  EXECUTIVE ROOT CAUSE SUMMARY & GUIDANCE" -ForegroundColor Cyan
@@ -867,6 +973,7 @@ $reportObject = [PSCustomObject]@{
     RootCauseDescription = $rootCauseDesc
     RootCauseGuidance    = $rootCauseGuidance
     RootCauseSeverity    = $rootCauseSeverity
+    ResolvedHistory      = $resolvedHistory
     Dumps                = @($parsedDumps)
     ZombieProcesses      = @($zombieProcesses)
     EngineLogs           = @($engineLogs)

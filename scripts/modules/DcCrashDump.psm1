@@ -13,14 +13,18 @@ function Get-DcDumpDirectories {
 
     $dirs = [System.Collections.Generic.List[string]]::new()
 
-    # 1. Windows Kernel BSOD Minidumps & LiveKernelReports (TDR Watchdog)
+    # 1. Windows Kernel BSOD Minidumps & LiveKernelReports (Non-BSOD GPU TDR Watchdog Dumps)
     $winMinidump = Join-Path $env:SystemRoot "Minidump"
     if (Test-Path $winMinidump) { $dirs.Add($winMinidump) }
 
     $liveWatchdog = Join-Path $env:SystemRoot "LiveKernelReports\WATCHDOG"
     if (Test-Path $liveWatchdog) { $dirs.Add($liveWatchdog) }
-    $liveKernel = Join-Path $env:SystemRoot "LiveKernelReports"
-    if (Test-Path $liveKernel) { $dirs.Add($liveKernel) }
+    $liveKernelReports = Join-Path $env:SystemRoot "LiveKernelReports"
+    if (Test-Path $liveKernelReports) {
+        $dirs.Add($liveKernelReports)
+        $lkrSubDirs = Get-ChildItem -Path $liveKernelReports -Directory -ErrorAction SilentlyContinue
+        foreach ($sd in $lkrSubDirs) { $dirs.Add($sd.FullName) }
+    }
 
     # 2. Windows User-Mode WER Crash Dumps
     $werDumps = Join-Path $env:LOCALAPPDATA "CrashDumps"
@@ -181,22 +185,26 @@ function Read-DcMinidump {
     $cleanFullName = $cleanFullName -replace '(?i)C:\\Users\\[^\\]+', '%USERPROFILE%'
 
     $result = [PSCustomObject]@{
-        FileName        = $fileInfo.Name
-        FullName        = $cleanFullName
-        Timestamp       = $fileInfo.LastWriteTime
-        SizeMb          = [math]::Round($fileInfo.Length / 1MB, 2)
-        Architecture    = "Unknown"
-        ExceptionCode   = $null
-        ExceptionMeaning= $null
-        FaultingModule  = $null
-        FaultingIP      = $null
-        IsGraphicsCrash = $false
-        IsShaderCompiler= $false
-        IsRogueKernelDriver = $false
-        ThreadCount     = 0
-        Modules         = @()
-        Assertions      = @()
-        IsKernelDump    = ($fileInfo.DirectoryName -match '(?i)SystemRoot|Windows\\Minidump|LiveKernelReports' -or $fileInfo.Name -match '(?i)MEMORY\.DMP|WATCHDOG')
+        FileName              = $fileInfo.Name
+        FullName              = $cleanFullName
+        Timestamp             = $fileInfo.LastWriteTime
+        SizeMb                = [math]::Round($fileInfo.Length / 1MB, 2)
+        Architecture          = "Unknown"
+        ExceptionCode         = $null
+        ExceptionMeaning      = $null
+        FaultingModule        = $null
+        FaultingIP            = $null
+        IsGraphicsCrash       = $false
+        IsShaderCompiler      = $false
+        IsRogueKernelDriver   = $false
+        ThreadCount           = 0
+        Modules               = @()
+        DriverModuleVersions  = @{}
+        GpuDriverVersion      = $null
+        MainExecutable        = $null
+        MainExecutableVersion = $null
+        Assertions            = @()
+        IsKernelDump          = ($fileInfo.DirectoryName -match '(?i)SystemRoot|Windows\\(Minidump|LiveKernelReports)' -or $fileInfo.Name -match '(?i)MEMORY\.DMP|WATCHDOG')
     }
 
     if ($fileInfo.Name -match '__sentry-event') {
@@ -272,19 +280,73 @@ function Read-DcMinidump {
                 $miscRva = $br.ReadUInt32()
                 $miscSize = $br.ReadUInt32()
                 $br.ReadBytes(16) | Out-Null
-                $mods.Add([PSCustomObject]@{ Base = $base; Size = $msize; NameRva = $nameRva; Name = "" })
+
+                $modVer = $null
+                if ($verInfo -and $verInfo.Length -ge 16) {
+                    $fileVerMS = [System.BitConverter]::ToUInt32($verInfo, 8)
+                    $fileVerLS = [System.BitConverter]::ToUInt32($verInfo, 12)
+                    if ($fileVerMS -ne 0 -or $fileVerLS -ne 0) {
+                        $vMaj = ($fileVerMS -shr 16) -band 0xFFFF
+                        $vMin = $fileVerMS -band 0xFFFF
+                        $vBld = ($fileVerLS -shr 16) -band 0xFFFF
+                        $vRev = $fileVerLS -band 0xFFFF
+                        $modVer = "$vMaj.$vMin.$vBld.$vRev"
+                    }
+                }
+
+                $linkDate = $null
+                if ($tds -gt 0 -and $tds -lt 0xFFFFFFFF) {
+                    try {
+                        $linkDate = [DateTimeOffset]::FromUnixTimeSeconds([int64]$tds).LocalDateTime
+                    } catch {}
+                }
+
+                $mods.Add([PSCustomObject]@{
+                    Base      = $base
+                    Size      = $msize
+                    NameRva   = $nameRva
+                    Name      = ""
+                    ShortName = ""
+                    Version   = $modVer
+                    LinkDate  = $linkDate
+                })
             }
+            $trackedDriverMods = @('amdkmdag.sys', 'amdxc64.dll', 'amdhdl64.dll', 'atidxx64.dll', 'nvlddmkm.sys', 'nvwgf2umx.dll', 'igdkmd64.sys', 'inpoutx64.sys', 'winring0x64.sys', 'ene.sys')
             for ($m = 0; $m -lt $mods.Count; $m++) {
                 if ($mods[$m].NameRva -gt 0 -and $mods[$m].NameRva -lt $fs.Length) {
                     $fs.Position = $mods[$m].NameRva
                     $len = $br.ReadUInt32()
                     if ($len -gt 0 -and $len -lt 2048) {
                         $nameBytes = $br.ReadBytes($len)
-                        $mods[$m].Name = ([System.Text.Encoding]::Unicode.GetString($nameBytes).TrimEnd([char]0))
+                        $fullModName = ([System.Text.Encoding]::Unicode.GetString($nameBytes).TrimEnd([char]0))
+                        $mods[$m].Name = $fullModName
+                        $shortName = [System.IO.Path]::GetFileName($fullModName)
+                        $mods[$m].ShortName = $shortName
+
+                        if ($m -eq 0 -or ($shortName -match '\.exe$' -and -not $result.MainExecutable)) {
+                            $result.MainExecutable = $shortName
+                            $result.MainExecutableVersion = $mods[$m].Version
+                        }
+
+                        if ($shortName -and ($trackedDriverMods -contains $shortName.ToLower())) {
+                            if ($mods[$m].Version) {
+                                $result.DriverModuleVersions[$shortName.ToLower()] = $mods[$m].Version
+                            } elseif ($mods[$m].LinkDate) {
+                                $result.DriverModuleVersions[$shortName.ToLower()] = "LinkDate:$($mods[$m].LinkDate.ToString('yyyy-MM-dd'))"
+                            }
+                        }
                     }
                 }
             }
             $result.Modules = $mods
+
+            # Set primary GPU driver version summary if present in loaded modules
+            foreach ($gpuModKey in @('amdkmdag.sys', 'amdxc64.dll', 'amdhdl64.dll', 'atidxx64.dll', 'nvlddmkm.sys', 'nvwgf2umx.dll', 'igdkmd64.sys')) {
+                if ($result.DriverModuleVersions.ContainsKey($gpuModKey) -and $result.DriverModuleVersions[$gpuModKey] -notmatch '^LinkDate:') {
+                    $result.GpuDriverVersion = $result.DriverModuleVersions[$gpuModKey]
+                    break
+                }
+            }
         }
 
         function Resolve-DumpAddress([UInt64]$addr, $moduleList) {
