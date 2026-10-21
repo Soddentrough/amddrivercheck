@@ -56,9 +56,10 @@ foreach ($rf in $rootFiles) {
     }
 }
 
-# Copy Scripts & Modules Directory
+# Copy Scripts & Modules Directory (excluding internal Python verification/packaging helpers)
 $destScripts = Join-Path $stageDir "scripts"
 Copy-Item -Path (Join-Path $rootDir "scripts") -Destination $destScripts -Recurse -Force
+Get-ChildItem -Path $destScripts -Recurse -Include "*.py", "*.pyc", "__pycache__" -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host "  + Staged: scripts/ directory and modules" -ForegroundColor DarkGray
 
 # Create Distributable ZIP

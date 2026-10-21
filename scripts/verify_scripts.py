@@ -4,8 +4,11 @@ verify_scripts.py - Validates PowerShell scripts and modules for basic syntax
 and balanced delimiters.
 """
 
+import re
 import sys
 from pathlib import Path
+
+PARAM_IF_RE = re.compile(r'(?i)(?:^|\s)-[a-zA-Z][a-zA-Z0-9]*\s+(?:if|switch|foreach|for|while)\s*\(')
 
 def check_file(filepath: Path) -> bool:
     content = filepath.read_text(encoding="utf-8")
@@ -33,6 +36,7 @@ def check_file(filepath: Path) -> bool:
 
         i = 0
         n = len(line)
+        unquoted_chars = []
         while i < n:
             c = line[i]
 
@@ -68,6 +72,7 @@ def check_file(filepath: Path) -> bool:
                     i += 2
                     continue
                 in_single_quote = not in_single_quote
+                unquoted_chars.append(' ')
                 i += 1
                 continue
 
@@ -81,12 +86,16 @@ def check_file(filepath: Path) -> bool:
                         i += 2
                         continue
                 in_double_quote = not in_double_quote
+                unquoted_chars.append(' ')
                 i += 1
                 continue
 
             if in_single_quote or in_double_quote:
+                unquoted_chars.append(' ')
                 i += 1
                 continue
+
+            unquoted_chars.append(c)
 
             # Check brackets
             if c in '({[':
@@ -101,6 +110,13 @@ def check_file(filepath: Path) -> bool:
                         errors.append(f"Line {line_no}:{i+1} Mismatched closing '{c}', expected matching for '{top}' from line {top_line}:{top_col}")
 
             i += 1
+
+        unquoted_line = "".join(unquoted_chars)
+        m = PARAM_IF_RE.search(unquoted_line)
+        if m:
+            errors.append(
+                f"Line {line_no}:{m.start() + 1} Unparenthesized control statement after parameter flag '{m.group(0).strip()}' (wrap in $(...))"
+            )
 
     if in_block_comment:
         errors.append("Unclosed block comment '<#' at EOF")

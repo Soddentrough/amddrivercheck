@@ -383,12 +383,21 @@ function Clear-DcShaderCache {
     }
     if ($Target -in @("AMD", "All")) {
         $paths.Add([PSCustomObject]@{ Label = "AMD DirectX Shader Cache"; Path = (Join-Path $localApp "AMD\DxCache") })
+        $paths.Add([PSCustomObject]@{ Label = "AMD DXC Shader Cache (SM6 / DX12)"; Path = (Join-Path $localApp "AMD\DxcCache") })
+        $paths.Add([PSCustomObject]@{ Label = "AMD Vulkan Shader Cache"; Path = (Join-Path $localApp "AMD\VkCache") })
         $paths.Add([PSCustomObject]@{ Label = "AMD OpenGL Shader Cache"; Path = (Join-Path $localApp "AMD\GLCache") })
         $paths.Add([PSCustomObject]@{ Label = "AMD OpenCL Cache"; Path = (Join-Path $localApp "AMD\OclCache") })
+        if ($env:USERPROFILE) {
+            $paths.Add([PSCustomObject]@{ Label = "AMD LocalLow DirectX Shader Cache"; Path = (Join-Path $env:USERPROFILE "AppData\LocalLow\AMD\DxCache") })
+            $paths.Add([PSCustomObject]@{ Label = "AMD LocalLow DXC Shader Cache"; Path = (Join-Path $env:USERPROFILE "AppData\LocalLow\AMD\DxcCache") })
+        }
     }
     if ($Target -in @("NVIDIA", "All")) {
         $paths.Add([PSCustomObject]@{ Label = "NVIDIA DXCache"; Path = (Join-Path $localApp "NVIDIA\DXCache") })
         $paths.Add([PSCustomObject]@{ Label = "NVIDIA GLCache"; Path = (Join-Path $localApp "NVIDIA\GLCache") })
+        if ($env:USERPROFILE) {
+            $paths.Add([PSCustomObject]@{ Label = "NVIDIA LocalLow PerDriverVersion DXCache"; Path = (Join-Path $env:USERPROFILE "AppData\LocalLow\NVIDIA\PerDriverVersion\DXCache") })
+        }
     }
 
     $totalPurged = 0

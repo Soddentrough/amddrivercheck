@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version tag (e.g. 4.0.0)'
+        description: 'Release version tag (e.g. 4.5.0)'
         required: true
-        default: '4.0.0'
+        default: '4.5.0'
 
 jobs:
   build-release:
@@ -46,7 +46,7 @@ jobs:
           if (-not $ver) {
             $ver = "${{ github.ref_name }}".TrimStart('v')
           }
-          if (-not $ver) { $ver = "4.0.0" }
+          if (-not $ver) { $ver = "4.5.0" }
           .\build-release.ps1 -Version $ver
 
       - name: Compute Release Checksum

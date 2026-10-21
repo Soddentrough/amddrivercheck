@@ -161,6 +161,12 @@ function Get-DcExceptionMeaning {
         "0x887A002B" { "DXGI_ERROR_DRIVER_INTERNAL_ERROR (Display Driver Internal Bug)" }
         "0xE06D7363" { "STATUS_CPP_EXCEPTION (Uncaught C++ Exception)" }
         "0x00000093" { "INVALID_KERNEL_HANDLE (Driver Attempted to Use or Close an Invalid Kernel Handle)" }
+        "0x00000141" { "LiveKernelEvent 0x141 (VIDEO_ENGINE_TDR_TIMEOUT - GPU Engine Hung & Recovered)" }
+        "0x00000117" { "LiveKernelEvent 0x117 (VIDEO_TDR_TIMEOUT_DETECTED - Display Driver Failed to Respond)" }
+        "0x00000193" { "LiveKernelEvent 0x193 (VIDEO_DXGKRNL_LIVEDUMP - DirectX Graphics Kernel Deadlock / Watchdog)" }
+        "0xA1000001" { "LiveKernelEvent 0xA1000001 (AMD_WATCHDOG - AMD Driver Hardware Hang & Watchdog Reset)" }
+        "0x000001B8" { "LiveKernelEvent 0x1B8 (VIDEO_DXGKRNL_BLACK_SCREEN_LIVEDUMP - Black Screen Watchdog)" }
+        "0x000001A8" { "LiveKernelEvent 0x1A8 (VIDEO_DXGKRNL_SYSMM_FATAL_ERROR - Graphics Memory Manager Watchdog)" }
         "0x00000000" { "STATUS_SUCCESS (External Watchdog Termination / Process Hang)" }
         "ASSERTION"  { "Fatal Engine/Platform Assertion Hit" }
         "SENTRY_FATAL" { "Sentry Native Crashpad Fatal Crash Event" }
@@ -182,7 +188,7 @@ function Read-DcMinidump {
     if ($env:USERPROFILE) {
         $cleanFullName = $cleanFullName.Replace($env:USERPROFILE, "%USERPROFILE%")
     }
-    $cleanFullName = $cleanFullName -replace '(?i)C:\\Users\\[^\\]+', '%USERPROFILE%'
+    $cleanFullName = $cleanFullName -replace '(?i)[a-zA-Z]:\\Users\\[^\\]+', '%USERPROFILE%'
 
     $result = [PSCustomObject]@{
         FileName              = $fileInfo.Name
@@ -319,8 +325,13 @@ function Read-DcMinidump {
                     if ($len -gt 0 -and $len -lt 2048) {
                         $nameBytes = $br.ReadBytes($len)
                         $fullModName = ([System.Text.Encoding]::Unicode.GetString($nameBytes).TrimEnd([char]0))
-                        $mods[$m].Name = $fullModName
                         $shortName = [System.IO.Path]::GetFileName($fullModName)
+                        $cleanModName = $fullModName
+                        if ($env:USERPROFILE) {
+                            $cleanModName = $cleanModName.Replace($env:USERPROFILE, "%USERPROFILE%")
+                        }
+                        $cleanModName = $cleanModName -replace '(?i)[a-zA-Z]:\\Users\\[^\\]+', '%USERPROFILE%'
+                        $mods[$m].Name = $cleanModName
                         $mods[$m].ShortName = $shortName
 
                         if ($m -eq 0 -or ($shortName -match '\.exe$' -and -not $result.MainExecutable)) {
@@ -385,15 +396,43 @@ function Read-DcMinidump {
             $result.IsGraphicsCrash = ($isShaderCompiler -or $isGfxDriver -or ($result.ExceptionCode -match '0x887A000[156]'))
         }
 
-        # Handle LiveKernelReports Watchdog Dumps (GPU TDR Live Dumps without user exception stream)
+        # Handle LiveKernelReports Watchdog Dumps (GPU TDR / DXGKRNL Live Dumps without user exception stream)
         if (-not $result.ExceptionCode -and ($fileInfo.DirectoryName -match '(?i)LiveKernelReports' -or $fileInfo.Name -match '(?i)WATCHDOG')) {
-            $result.ExceptionCode = "0x00000141"
-            $result.ExceptionMeaning = "LiveKernelEvent 0x141 (VIDEO_ENGINE_TDR_TIMEOUT - GPU Engine Hung & Recovered)"
+            $result.IsKernelDump = $true
             $result.IsGraphicsCrash = $true
+            $hasDxgkrnlMod = ($result.Modules | Where-Object { $_.Name -match '(?i)dxgkrnl\.sys|watchdog\.sys' } | Select-Object -First 1)
+            $gfxMod = $result.Modules | Where-Object { $_.Name -match '(?i)amdkmdag|nvlddmkm|igdkmd' } | Select-Object -First 1
+
+            # Determine specific LiveKernelEvent code from filename/path or loaded modules
+            if ($fileInfo.FullName -match '(?i)(?:^|[^0-9a-f])0*193(?:[^0-9a-f]|$)|VIDEO_DXGKRNL_LIVEDUMP|ProcessDeadlockThread' -or ($hasDxgkrnlMod -and -not $gfxMod)) {
+                $result.ExceptionCode = "0x00000193"
+            } elseif ($fileInfo.FullName -match '(?i)(?:^|[^0-9a-f])0*117(?:[^0-9a-f]|$)') {
+                $result.ExceptionCode = "0x00000117"
+            } elseif ($fileInfo.FullName -match '(?i)a1000001') {
+                $result.ExceptionCode = "0xA1000001"
+            } elseif ($fileInfo.FullName -match '(?i)(?:^|[^0-9a-f])0*1b8(?:[^0-9a-f]|$)') {
+                $result.ExceptionCode = "0x000001B8"
+            } elseif ($fileInfo.FullName -match '(?i)(?:^|[^0-9a-f])0*1a8(?:[^0-9a-f]|$)') {
+                $result.ExceptionCode = "0x000001A8"
+            } else {
+                $result.ExceptionCode = "0x00000141"
+            }
+            $result.ExceptionMeaning = Get-DcExceptionMeaning $result.ExceptionCode
+
             if (-not $result.FaultingModule) {
-                $gfxMod = $result.Modules | Where-Object { $_.Name -match '(?i)amdkmdag|nvlddmkm|igdkmd' } | Select-Object -First 1
                 if ($gfxMod) {
                     $result.FaultingModule = [System.IO.Path]::GetFileName($gfxMod.Name)
+                } elseif ($hasDxgkrnlMod) {
+                    $result.FaultingModule = [System.IO.Path]::GetFileName($hasDxgkrnlMod.Name)
+                } else {
+                    $result.FaultingModule = "dxgkrnl.sys"
+                }
+            }
+            if (-not $result.FaultingIP) {
+                $result.FaultingIP = if ($result.ExceptionCode -eq "0x00000193") {
+                    if ($gfxMod) { "dxgkrnl.sys / $($result.FaultingModule) (Kernel Watchdog)" } else { "dxgkrnl.sys (DirectX Graphics Kernel Watchdog)" }
+                } else {
+                    "$($result.FaultingModule) (Kernel Watchdog Live Dump)"
                 }
             }
         }
@@ -444,7 +483,30 @@ function Read-DcMinidump {
 
             if ($bytesRead -gt 0) {
                 $ascii = [System.Text.Encoding]::ASCII.GetString($buffer, 0, $bytesRead)
-                $matches = [regex]::Matches($ascii, '(?i)Assert(ion)?\([^\r\n]{5,180}\)|Fatal error:?\s+[^\r\n]{5,180}|DXGI_ERROR_[A-Z_]+|DeviceRemovedReason:?\s+[^\r\n]{5,120}|VK_ERROR_[A-Z_]+|D3D12 device removed') |
+                if ($result.ExceptionCode -eq "0x00000141") {
+                    if ($ascii -match '(?i)VIDEO_DXGKRNL_LIVEDUMP|ProcessDeadlockThread') {
+                        $result.ExceptionCode = "0x00000193"
+                        $result.ExceptionMeaning = Get-DcExceptionMeaning "0x00000193"
+                        $result.FaultingIP = if ($result.FaultingModule -and $result.FaultingModule -ne "dxgkrnl.sys") {
+                            "dxgkrnl.sys / $($result.FaultingModule) (Kernel Watchdog)"
+                        } else {
+                            "dxgkrnl.sys (DirectX Graphics Kernel Watchdog)"
+                        }
+                    } elseif ($ascii -match '(?i)VIDEO_TDR_TIMEOUT_DETECTED') {
+                        $result.ExceptionCode = "0x00000117"
+                        $result.ExceptionMeaning = Get-DcExceptionMeaning "0x00000117"
+                    } elseif ($ascii -match '(?i)AMD_WATCHDOG|a1000001') {
+                        $result.ExceptionCode = "0xA1000001"
+                        $result.ExceptionMeaning = Get-DcExceptionMeaning "0xA1000001"
+                    } elseif ($ascii -match '(?i)VIDEO_DXGKRNL_BLACK_SCREEN_LIVEDUMP') {
+                        $result.ExceptionCode = "0x000001B8"
+                        $result.ExceptionMeaning = Get-DcExceptionMeaning "0x000001B8"
+                    } elseif ($ascii -match '(?i)VIDEO_DXGKRNL_SYSMM_FATAL_ERROR') {
+                        $result.ExceptionCode = "0x000001A8"
+                        $result.ExceptionMeaning = Get-DcExceptionMeaning "0x000001A8"
+                    }
+                }
+                $matches = [regex]::Matches($ascii, '(?i)Assert(ion)?\([^\r\n]{5,180}\)|Fatal error:?\s+[^\r\n]{5,180}|DXGI_ERROR_[A-Z_]+|DeviceRemovedReason:?\s+[^\r\n]{5,120}|VK_ERROR_[A-Z_]+|D3D12 device removed|ProcessDeadlockThread') |
                     Select-Object -ExpandProperty Value -Unique |
                     Select-Object -First 6
                 if ($matches) {
@@ -482,7 +544,7 @@ function Read-DcMinidump {
         $result.Assertions = @($result.Assertions | ForEach-Object {
             $s = $_
             if ($env:USERPROFILE) { $s = $s.Replace($env:USERPROFILE, "%USERPROFILE%") }
-            $s -replace '(?i)C:\\Users\\[^\\]+', '%USERPROFILE%'
+            $s -replace '(?i)[a-zA-Z]:\\Users\\[^\\]+', '%USERPROFILE%'
         })
     }
 

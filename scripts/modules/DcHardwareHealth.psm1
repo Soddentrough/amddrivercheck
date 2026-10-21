@@ -26,8 +26,14 @@ function Get-DcPnpHealth {
                 default { "Problem status: $($bd.Problem) (Code $($bd.ConfigManagerErrorCode))" }
             }
 
+            $sanitizedFriendlyName = if ($bd.FriendlyName) {
+                $bd.FriendlyName -replace "^.+?'s\s+", "" -replace "^.+?の\s*", ""
+            } else {
+                $bd.FriendlyName
+            }
+
             $results.Add([PSCustomObject]@{
-                FriendlyName = $bd.FriendlyName
+                FriendlyName = $sanitizedFriendlyName
                 InstanceId   = $bd.InstanceId
                 Status       = $bd.Status
                 ErrorCode    = $bd.ConfigManagerErrorCode
@@ -130,7 +136,7 @@ function Get-DcGpuDriverHealth {
             }
         }
 
-        $isHighBoost = ($vc.Name -match '(?i)7900\s*(XTX|XT|GRE)|7800\s*XT|6950\s*XT|6900\s*XT|RTX\s*4090|RTX\s*4080')
+        $isHighBoost = ($vc.Name -match '(?i)9070\s*(XT)?|7900\s*(XTX|XT|GRE)|7800\s*XT|6950\s*XT|6900\s*XT|RTX\s*50[89]0|RTX\s*4090|RTX\s*4080')
 
         $gpuList.Add([PSCustomObject]@{
             Name                = $vc.Name
@@ -147,13 +153,28 @@ function Get-DcGpuDriverHealth {
         })
     }
 
-    # Detect Dual-GPU Configuration & Potential Version Desync
+    # Detect Dual-GPU Configuration, Potential Version Desync, and Hybrid Multi-GPU Setups
     $dualGpuConflict = $false
     $dualGpuDetails = $null
+    $hybridMultiGpu = $false
+    $hybridMultiGpuDetails = $null
+
+    $activeGpus = @($gpuList | Where-Object { -not $_.IsGeneric })
+    if ($activeGpus.Count -ge 2) {
+        $hybridMultiGpu = $true
+        $gpuSummaryNames = ($activeGpus | ForEach-Object { "$($_.Name) ($($_.Vendor) v$($_.DriverVersion))" }) -join ' + '
+        $vendors = @($activeGpus.Vendor | Select-Object -Unique)
+        if ($vendors.Count -gt 1) {
+            $hybridMultiGpuDetails = "Hybrid cross-vendor multi-GPU configuration active: $gpuSummaryNames. Cross-vendor iGPU + dGPU setups can experience DXGI adapter enumeration or HAGS / DWM presentation deadlocks (LiveKernelEvent 0x193 / 0x141) in D3D12 titles."
+        } else {
+            $hybridMultiGpuDetails = "Multi-GPU configuration active: $gpuSummaryNames."
+        }
+    }
+
     if ($gpuList.Count -ge 2) {
-        $amdGpus = $gpuList | Where-Object { $_.Vendor -eq "AMD" }
+        $amdGpus = @($gpuList | Where-Object { $_.Vendor -eq "AMD" })
         if ($amdGpus.Count -ge 2) {
-            $versions = $amdGpus.DriverVersion | Select-Object -Unique
+            $versions = @($amdGpus.DriverVersion | Select-Object -Unique)
             if ($versions.Count -gt 1) {
                 $dualGpuConflict = $true
                 $dualGpuDetails = "Dual AMD GPU driver version mismatch: Discrete GPU and Integrated GPU are running different driver versions ($($versions -join ' vs ')). This causes shared service (atieclxx.exe) crashes and 0x9F sleep hangs."
@@ -202,16 +223,18 @@ function Get-DcGpuDriverHealth {
     } catch {}
 
     return [PSCustomObject]@{
-        Gpus               = @($gpuList)
-        DualGpuConflict    = $dualGpuConflict
-        DualGpuDetails     = $dualGpuDetails
-        SearchOrderConfig  = $searchOrderConfig
-        ExcludeWUDrivers   = $excludeWUDrivers
-        IsWUDriverBlocked  = ($searchOrderConfig -eq 0 -and $excludeWUDrivers -eq 1)
-        IsUlpsEnabled      = $ulpsActive
-        RebarStatus        = (Get-DcRebarStatus)
-        GhostGpuDrivers    = @($ghostGpuDrivers)
-        HasGhostDrivers    = ($ghostGpuDrivers.Count -gt 0)
+        Gpus                  = @($gpuList)
+        DualGpuConflict       = $dualGpuConflict
+        DualGpuDetails        = $dualGpuDetails
+        HybridMultiGpu        = $hybridMultiGpu
+        HybridMultiGpuDetails = $hybridMultiGpuDetails
+        SearchOrderConfig     = $searchOrderConfig
+        ExcludeWUDrivers      = $excludeWUDrivers
+        IsWUDriverBlocked     = ($searchOrderConfig -eq 0 -and $excludeWUDrivers -eq 1)
+        IsUlpsEnabled         = $ulpsActive
+        RebarStatus           = (Get-DcRebarStatus)
+        GhostGpuDrivers       = @($ghostGpuDrivers)
+        HasGhostDrivers       = ($ghostGpuDrivers.Count -gt 0)
     }
 }
 
@@ -412,17 +435,37 @@ function Get-DcDisplayDiagnostics {
         # Signature: 1440p+ with >144Hz refresh rate, and PixelClock >= 585 MHz OR VTotal >= 1500 lines
         $hasRisk = $false
         $riskTiming = $null
+        $detailedTimings = [System.Collections.Generic.List[PSCustomObject]]::new()
+        $riskReasons = [System.Collections.Generic.List[string]]::new()
+
         foreach ($t in $timings) {
+            $vBlankLines = ($t.VTotal - $t.VActive)
+            $isModeHighRisk = ($t.PixelClockMHz -gt 580 -or $vBlankLines -gt 1500)
+            $detailedTimings.Add([PSCustomObject]@{
+                Mode          = "$($t.HActive)x$($t.VActive)@$($t.RefreshRate)Hz"
+                PixelClockMHz = $t.PixelClockMHz
+                VBlankLines   = $vBlankLines
+                IsHighRisk    = $isModeHighRisk
+            })
             if ($t.HActive -ge 2560 -and $t.VActive -ge 1440 -and $t.RefreshRate -gt 144) {
                 if ($t.PixelClockMHz -ge 585 -or $t.VTotal -ge 1500) {
                     $hasRisk = $true
-                    $riskTiming = $t
-                    break
+                    if (-not $riskTiming) { $riskTiming = $t }
                 }
             }
         }
 
         $isKnownIssueModel = ($dispName -match '(?i)Optix.*G27|MAG27|G24C')
+        $hasTimingRiskFinal = ($hasRisk -or ($isKnownIssueModel -and $currentRefresh -gt 144))
+
+        if ($hasTimingRiskFinal) {
+            if ($riskTiming) {
+                $riskReasons.Add("High-refresh overclock timing $($riskTiming.HActive)x$($riskTiming.VActive)@$($riskTiming.RefreshRate)Hz (Pixel Clock: $($riskTiming.PixelClockMHz) MHz, V-Total: $($riskTiming.VTotal) lines) approaches DisplayPort 1.2a / budget scaler saturation limits.")
+            }
+            if ($isKnownIssueModel -and $currentRefresh -gt 144) {
+                $riskReasons.Add("Known MSI Optix/MAG high-refresh DisplayPort blanking profile detected at $($currentRefresh)Hz.")
+            }
+        }
 
         $displayObj = [PSCustomObject]@{
             Name               = $dispName
@@ -432,8 +475,10 @@ function Get-DcDisplayDiagnostics {
             ActiveResolution   = $currentRes
             ActiveRefreshRate  = $currentRefresh
             Timings            = @($timings)
-            HasTimingRisk      = ($hasRisk -or ($isKnownIssueModel -and $currentRefresh -gt 144))
+            DetailedTimings    = @($detailedTimings)
+            HasTimingRisk      = $hasTimingRiskFinal
             RiskTiming         = $riskTiming
+            RiskReasons        = @($riskReasons)
             IsKnownIssueModel  = $isKnownIssueModel
         }
 

@@ -13,11 +13,12 @@ function Protect-DcLogText {
     # Redact SteamID3 ([U:1:xxxxxx]) to preserve user privacy
     $sanitized = $Text -replace '\[U:\d+:\d+\]', '[U:1:REDACTED]'
 
-    # Redact user profile directory paths (C:\Users\<username> -> %USERPROFILE%)
+    # Redact user profile directory paths (<Drive>:\Users\<username> -> %USERPROFILE%)
     if ($env:USERPROFILE) {
         $sanitized = $sanitized.Replace($env:USERPROFILE, "%USERPROFILE%")
     }
-    $sanitized = $sanitized -replace '(?i)C:\\Users\\[^\\]+', '%USERPROFILE%'
+    $sanitized = $sanitized -replace '(?i)[a-zA-Z]:\\Users\\[^\\]+', '%USERPROFILE%'
+    $sanitized = $sanitized -replace '(?i)User:\s*[^\r\n\.]+', 'User: [REDACTED]'
 
     return $sanitized
 }

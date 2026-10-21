@@ -6,12 +6,27 @@
     Kernel-Power 41, Unexpected Shutdowns 6008, Kernel-PnP 219, Storage I/O errors, Application Crashes 1000/1002).
 #>
 
+function Protect-DcTelemetryText {
+    param([string]$Text)
+    if (-not $Text) { return $Text }
+    $s = $Text
+    if ($env:USERPROFILE) {
+        $s = $s.Replace($env:USERPROFILE, "%USERPROFILE%")
+    }
+    $s = $s -replace '(?i)[a-zA-Z]:\\Users\\[^\\"\r\n\s]+', '%USERPROFILE%'
+    $s = $s -replace '(?i)User:\s*[^\r\n\.]+', 'User: [REDACTED]'
+    return $s
+}
+
 function Get-DcBugCheckMeaning {
     param([string]$CodeHex)
 
     switch -Regex ($CodeHex) {
         '0x0*116' { "VIDEO_TDR_ERROR (Display Driver Timeout & Recovery Failure)" }
         '0x0*119' { "VIDEO_SCHEDULER_INTERNAL_ERROR (DirectX Graphics Kernel Watchdog)" }
+        '0x0*193' { "VIDEO_DXGKRNL_LIVEDUMP (DirectX Graphics Kernel Deadlock / Watchdog Live Dump)" }
+        '0x0*141' { "VIDEO_ENGINE_TDR_TIMEOUT (GPU Engine Hung & Recovered)" }
+        '0x0*117' { "VIDEO_TDR_TIMEOUT_DETECTED (Display Driver Failed to Respond)" }
         '0x0*9F'  { "DRIVER_POWER_STATE_FAILURE (Driver Failed Power IRP / Sleep-Wake Deadlock)" }
         '0x0*3B'  { "SYSTEM_SERVICE_EXCEPTION (Kernel Mode Exception in Driver)" }
         '0x0*50'  { "PAGE_FAULT_IN_NONPAGED_AREA (Invalid Memory Address Referenced by Kernel/Driver)" }
@@ -404,7 +419,7 @@ function Get-DcSystemTelemetry {
                 FaultingModule  = $faultingMod
                 ExceptionCode   = $excCode
                 ExceptionMeaning= Get-DcBugCheckMeaning $excCode
-                Message         = $ae.Message.Trim()
+                Message         = (Protect-DcTelemetryText $ae.Message.Trim())
             })
         }
     }
@@ -419,7 +434,7 @@ function Get-DcSystemTelemetry {
             $results.AppHangs.Add([PSCustomObject]@{
                 TimeCreated = $ah.TimeCreated
                 Application = $hangApp
-                Message     = $ah.Message.Trim()
+                Message     = (Protect-DcTelemetryText $ah.Message.Trim())
             })
         }
     }
@@ -434,7 +449,7 @@ function Get-DcSystemTelemetry {
             $p1 = ""
             if ($we.Message -match 'P1:\s*([a-fA-F0-9]+)') { $p1 = $Matches[1].ToLower() }
 
-            if ($p1 -in @('141', '117', 'a1000001', 'a2000002', '1b8', '1a8')) {
+            if ($p1 -in @('141', '117', '193', 'a1000001', 'a2000002', '1b8', '1a8')) {
                 $attachedFile = ""
                 $dumpTime = $we.TimeCreated
                 if ($we.Message -match '(?s)Attached files:\s*(?<block>.+?)(?:\r?\n\s*\r?\n|\r?\nThese files may be available|\z)') {
@@ -449,11 +464,7 @@ function Get-DcSystemTelemetry {
                         $bestPath = $candidateLines[0]
                     }
                     if ($bestPath) {
-                        $attachedFile = $bestPath
-                        if ($env:USERPROFILE) {
-                            $attachedFile = $attachedFile.Replace($env:USERPROFILE, "%USERPROFILE%")
-                        }
-                        $attachedFile = $attachedFile -replace '(?i)C:\\Users\\[^\\]+', '%USERPROFILE%'
+                        $attachedFile = Protect-DcTelemetryText $bestPath
                         if ($attachedFile -match '(?<year>\d{4})(?<month>\d{2})(?<day>\d{2})-(?<hour>\d{2})(?<min>\d{2})') {
                             try {
                                 $dumpTime = [datetime]::new(
@@ -469,6 +480,13 @@ function Get-DcSystemTelemetry {
                     $meaning = switch ($p1) {
                         '141'      { "LiveKernelEvent 0x141 (VIDEO_ENGINE_TDR_TIMEOUT - GPU Engine Hung & Recovered)" }
                         '117'      { "LiveKernelEvent 0x117 (VIDEO_TDR_TIMEOUT_DETECTED - Display Driver Failed to Respond)" }
+                        '193'      {
+                            if ($we.Message -match 'P2:\s*(?:0x)?0*810\b') {
+                                "LiveKernelEvent 0x193 (VIDEO_DXGKRNL_LIVEDUMP - DirectX Graphics Kernel Deadlock / Watchdog [ProcessDeadlockThread (0x810)])"
+                            } else {
+                                "LiveKernelEvent 0x193 (VIDEO_DXGKRNL_LIVEDUMP - DirectX Graphics Kernel Deadlock / Watchdog)"
+                            }
+                        }
                         'a1000001' { "LiveKernelEvent 0xA1000001 (AMD_WATCHDOG - AMD Driver Hardware Hang & Watchdog Reset)" }
                         'a2000002' { "LiveKernelEvent 0xA2000002 (AMD_REPORT_UM - AMD User-Mode Driver Recovery)" }
                         default    { "LiveKernelEvent 0x$p1 (GPU Watchdog Live Dump)" }
@@ -666,9 +684,9 @@ function Get-DcWerReportArchive {
                     } elseif ($line -match '^Sig\[(\d+)\]\.Name=(.+)$') {
                         $sigNames[$Matches[1]] = $Matches[2].Trim()
                     } elseif ($line -match '^Sig\[(\d+)\]\.Value=(.+)$') {
-                        $sigs[$Matches[1]] = $Matches[2].Trim()
+                        $sigs[$Matches[1]] = (Protect-DcTelemetryText $Matches[2].Trim())
                     } elseif ($line -match '^LoadedModule\[\d+\]=(.+)$') {
-                        $modVal = $Matches[1].Trim()
+                        $modVal = Protect-DcTelemetryText $Matches[1].Trim()
                         if ($modVal) { $loadedMods.Add($modVal) }
                     }
                 }
@@ -692,22 +710,13 @@ function Get-DcWerReportArchive {
                 }
 
                 $isTdrOrGpu = (
-                    ($eventType -match '(?i)LiveKernelEvent' -and $p1 -in @('141', '117', 'a1000001', 'a2000002', '1b8', '1a8')) -or
-                    ($parentName -match '(?i)^Kernel_(141|117|a1000001|a1000002|a2000002|1b8|1a8)_') -or
+                    ($eventType -match '(?i)LiveKernelEvent' -and $p1 -in @('141', '117', '193', 'a1000001', 'a2000002', '1b8', '1a8')) -or
+                    ($parentName -match '(?i)^Kernel_(141|117|193|a1000001|a1000002|a2000002|1b8|1a8)_') -or
                     ($eventType -match '(?i)APPCRASH|BEX64' -and ($p4 -match '(?i)amdkmdag|amdxc|amdhdl|atidxx|nvlddmkm|nvwgf2|igdkmd|dxgi|d3d12|d3d11'))
                 )
 
-                $cleanReportPath = $wf.FullName
-                if ($env:USERPROFILE) {
-                    $cleanReportPath = $cleanReportPath.Replace($env:USERPROFILE, "%USERPROFILE%")
-                }
-                $cleanReportPath = $cleanReportPath -replace '(?i)C:\\Users\\[^\\]+', '%USERPROFILE%'
-
-                $cleanAppPath = $appPath
-                if ($cleanAppPath) {
-                    if ($env:USERPROFILE) { $cleanAppPath = $cleanAppPath.Replace($env:USERPROFILE, "%USERPROFILE%") }
-                    $cleanAppPath = $cleanAppPath -replace '(?i)C:\\Users\\[^\\]+', '%USERPROFILE%'
-                }
+                $cleanReportPath = Protect-DcTelemetryText $wf.FullName
+                $cleanAppPath = Protect-DcTelemetryText $appPath
 
                 $reports.Add([PSCustomObject]@{
                     ReportPath        = $cleanReportPath
@@ -802,10 +811,10 @@ function Find-DcLatestIncident {
         }
     } catch {}
 
-    # 3b. Tier 3: WER LiveKernelEvent TDR (141 / 117 / a1000001 / a2000002 / 1b8 / 1a8)
+    # 3b. Tier 3: WER LiveKernelEvent TDR (141 / 117 / 193 / a1000001 / a2000002 / 1b8 / 1a8)
     try {
         $liveEvents = Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='Windows Error Reporting'; Id=1001; StartTime=$lookbackCutoff} -ErrorAction SilentlyContinue |
-            Where-Object { $_.Message -match 'LiveKernelEvent' -and $_.Message -match 'P1:\s*(141|117|a1000001|a2000002|1b8|1a8)\b' }
+            Where-Object { $_.Message -match 'LiveKernelEvent' -and $_.Message -match 'P1:\s*(141|117|193|a1000001|a2000002|1b8|1a8)\b' }
         if ($liveEvents) {
             foreach ($liveEv in $liveEvents) {
                 $p1Code = if ($liveEv.Message -match 'P1:\s*([a-fA-F0-9]+)') { $Matches[1].ToLower() } else { "141" }
@@ -963,7 +972,7 @@ function Find-DcLatestIncident {
             HasIncident      = $true
             Timestamp        = $latest.Timestamp
             Source           = $latest.Source
-            Details          = $latest.Details
+            Details          = (Protect-DcTelemetryText $latest.Details)
             Tier             = $latest.Tier
             AgeDescription   = $ageStr
             IncidentStart    = $incStart
@@ -1505,7 +1514,7 @@ function Get-DcSystemChangeHistory {
                     Source    = "Reliability Monitor ($($ru.SourceName))"
                     Title     = "System / Driver Update Recorded ($($ru.ProductName))"
                     Version   = $null
-                    Details   = $ru.Message.Trim()
+                    Details   = (Protect-DcTelemetryText $ru.Message.Trim())
                 })
             }
         }
@@ -1675,26 +1684,27 @@ function Find-DcResolvedIncidentHistory {
             }
         } catch {}
 
-        # 4. Win32_ReliabilityRecords for historical Windows Hardware Errors (LiveKernelEvent 141/117)
+        # 4. Win32_ReliabilityRecords for historical Windows Hardware Errors (LiveKernelEvent 141/117/193)
         try {
             $relFaults = Get-CimInstance -ClassName Win32_ReliabilityRecords -ErrorAction SilentlyContinue |
                 Where-Object {
                     $_.TimeGenerated -ge $cutoff -and
-                    ($_.ProductName -match '(?i)Windows|Hardware' -or $_.Message -match '(?i)LiveKernelEvent|141|117|amdkmdag|nvlddmkm|stopped responding')
+                    ($_.ProductName -match '(?i)Windows|Hardware' -or $_.Message -match '(?i)LiveKernelEvent|141|117|193|amdkmdag|nvlddmkm|stopped responding')
                 } | Select-Object -First 50
             foreach ($rf in $relFaults) {
-                if ($rf.Message -match '(?i)141|117|a1000001|LiveKernelEvent|stopped responding') {
+                if ($rf.Message -match '(?i)141|117|193|a1000001|LiveKernelEvent|stopped responding') {
                     $dup = $allIncidents | Where-Object { [math]::Abs(($_.Timestamp - $rf.TimeGenerated).TotalMinutes) -le 5 }
                     if (-not $dup) {
+                        $relCode = if ($rf.Message -match '(?i)\b(193|117|a1000001)\b') { $Matches[1].ToLower() } else { "141" }
                         $allIncidents.Add([PSCustomObject]@{
                             Timestamp        = $rf.TimeGenerated
                             Category         = "GpuTdrTimeout"
-                            Code             = "141"
+                            Code             = $relCode
                             Source           = "Reliability Monitor"
                             Application      = $rf.ProductName
                             FaultingModule   = "Display Driver"
                             GpuDriverVersion = $null
-                            Details          = $rf.Message.Trim()
+                            Details          = (Protect-DcTelemetryText $rf.Message.Trim())
                         })
                     }
                 }
@@ -2017,4 +2027,4 @@ function Find-DcResolvedIncidentHistory {
 
 Set-Alias -Name Invoke-DcResolvedTimeoutAnalysis -Value Find-DcResolvedIncidentHistory
 
-Export-ModuleMember -Function Get-DcFastStartupStatus, Get-DcSystemTelemetry, Get-DcBugCheckMeaning, Get-DcGraphicsDriverSettings, Get-DcPciePowerManagementStatus, Find-DcLatestIncident, Get-DcWerReportArchive, Get-DcRegistryKeyLastWriteTime, Get-DcSystemChangeHistory, Find-DcResolvedIncidentHistory -Alias Invoke-DcResolvedTimeoutAnalysis
+Export-ModuleMember -Function Get-DcFastStartupStatus, Get-DcSystemTelemetry, Get-DcBugCheckMeaning, Get-DcGraphicsDriverSettings, Get-DcPciePowerManagementStatus, Find-DcLatestIncident, Get-DcWerReportArchive, Get-DcRegistryKeyLastWriteTime, Get-DcSystemChangeHistory, Find-DcResolvedIncidentHistory, Protect-DcTelemetryText -Alias Invoke-DcResolvedTimeoutAnalysis

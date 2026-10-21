@@ -11,3 +11,13 @@ dist/
 
 # Temporary debug logs
 *.log
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS & Editor metadata
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

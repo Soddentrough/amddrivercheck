@@ -213,9 +213,21 @@ function Export-DcHtmlReport {
         foreach ($disp in $hw.Displays) {
             $dispStatusBadge = if ($disp.HasTimingRisk) { "<span class='badge-critical'>TIMING RISK</span>" } else { "<span class='badge-healthy'>OK</span>" }
             $timingDetails = ""
-            if ($disp.DetailedTimings -and $disp.DetailedTimings.Count -gt 0) {
+            $detailItems = if ($disp.DetailedTimings -and $disp.DetailedTimings.Count -gt 0) {
+                $disp.DetailedTimings
+            } elseif ($disp.Timings -and $disp.Timings.Count -gt 0) {
+                @($disp.Timings | ForEach-Object {
+                    [PSCustomObject]@{
+                        Mode          = "$($_.HActive)x$($_.VActive)@$($_.RefreshRate)Hz"
+                        PixelClockMHz = $_.PixelClockMHz
+                        VBlankLines   = ($_.VTotal - $_.VActive)
+                        IsHighRisk    = ($_.PixelClockMHz -gt 580 -or ($_.VTotal - $_.VActive) -gt 1500)
+                    }
+                })
+            } else { @() }
+            if ($detailItems.Count -gt 0) {
                 $dtStrings = @()
-                foreach ($dt in $disp.DetailedTimings) {
+                foreach ($dt in $detailItems) {
                     $dtBadge = if ($dt.IsHighRisk) { "<span class='badge-critical'>$($dt.Mode) ($($dt.PixelClockMHz) MHz)</span>" } else { "$($dt.Mode) ($($dt.PixelClockMHz) MHz)" }
                     $dtStrings += $dtBadge
                 }
@@ -261,6 +273,13 @@ function Export-DcHtmlReport {
         $networkRows.Add("<div class='empty-state'>&#x2705; Network adapters reporting normal status.</div>")
     }
 
+    $cpuVal = if ($hw -and $hw.Motherboard -and $hw.Motherboard.CpuName) { $hw.Motherboard.CpuName } else { "Standard CPU" }
+    $ramVal = if ($hw -and $hw.Memory -and $hw.Memory.Summary) { $hw.Memory.Summary } else { "Audited via System" }
+    $gpuVal = if ($hw -and $hw.Gpus -and $hw.Gpus.Count -gt 0) { "$($hw.Gpus[0].Name) (v$($hw.Gpus[0].DriverVersion))" } else { "Standard Display Adapter" }
+    $rebarVal = if ($hw -and $hw.RebarStatus -and $hw.RebarStatus.Details) { $hw.RebarStatus.Details } else { "N/A" }
+    $mbVal = if ($hw -and $hw.Motherboard) { "$($hw.Motherboard.MotherboardManufacturer) $($hw.Motherboard.MotherboardProduct)" } else { "Standard Motherboard" }
+    $biosVal = if ($hw -and $hw.Motherboard -and $hw.Motherboard.BiosVersion) { " | BIOS: $($hw.Motherboard.BiosVersion)" } else { "" }
+
     $fastStartupStatusStr = if ($telem -and $telem.FastStartup.FastStartupEnabled) { 'Enabled (Risk)' } else { 'Disabled (Clean)' }
     $pcieAspmStr = if ($telem -and $telem.PciePowerManagement) { $telem.PciePowerManagement.ACSettingName } else { 'Unknown' }
     $mbSummaryStr = if ($hw -and $hw.Motherboard) {
@@ -271,7 +290,18 @@ function Export-DcHtmlReport {
         $statusNotice = if ($mb.IsHealthy) { "Healthy" } else { "Missing: " + ($mb.MissingControllers -join ', ') }
         "$($mb.Summary) [$statusNotice]"
     } else { 'Unknown' }
-    $gpuNamesStr = if ($hw -and $hw.Gpus) { ($hw.Gpus.Name -join ' | ') } else { 'None' }
+    $gpuNamesStr = if ($hw -and $hw.Gpus -and $hw.Gpus.Count -gt 0) {
+        ($hw.Gpus | ForEach-Object {
+            $instTag = if ($_.AmdInstallType) { ", $($_.AmdInstallType)" } else { "" }
+            "$($_.Name) (v$($_.DriverVersion)$instTag)"
+        }) -join ' | '
+    } else { 'None' }
+    $multiGpuNoticeHtml = ""
+    if ($hw -and $hw.DualGpuConflict -and $hw.DualGpuDetails) {
+        $multiGpuNoticeHtml = "<div class='alert-card alert-critical' style='margin-top: 8px;'><strong>&#x26A0; Dual-GPU Driver Mismatch:</strong> $($hw.DualGpuDetails)</div>"
+    } elseif ($hw -and $hw.HybridMultiGpu -and $hw.HybridMultiGpuDetails) {
+        $multiGpuNoticeHtml = "<div class='alert-card alert-warning' style='margin-top: 8px;'><strong>&#x2139; Multi-GPU Configuration:</strong> $($hw.HybridMultiGpuDetails)</div>"
+    }
     $pnpCountStr = if ($hw -and $hw.PnpIssues) { $hw.PnpIssues.Count } else { 0 }
     $dispSummaryStr = if ($hw -and $hw.Displays) {
         ($hw.Displays | ForEach-Object {
@@ -284,7 +314,8 @@ function Export-DcHtmlReport {
         if ($activeKd.Count -gt 0) { ($activeKd.FileName -join ', ') + " [HAZARD: Auto-Start]" } else { "None Active (Clean)" }
     } else { 'None (Clean)' }
 
-    $ulpsStr = if ($hw -and $hw.IsUlpsEnabled) { "Enabled (Power Saving Active)" } else { "Disabled" }
+    $ulpsStr = if (($hw -and $hw.IsUlpsEnabled) -or ($telem -and $telem.GraphicsDriverSettings -and $telem.GraphicsDriverSettings.IsUlpsEnabled)) { "Enabled (Power Saving Active)" } else { "Disabled" }
+    $hagsStr = if ($telem -and $telem.GraphicsDriverSettings -and $telem.GraphicsDriverSettings.HAGSStatus) { $telem.GraphicsDriverSettings.HAGSStatus } else { "Default" }
     $tdrDelayStr = if ($telem -and $telem.GraphicsDriverSettings -and $telem.GraphicsDriverSettings.TdrDelay) { "$($telem.GraphicsDriverSettings.TdrDelay)s" } else { "2s (Windows Default)" }
     $scanRangeDiscord = if ($ReportData.ScanMode -eq "InvestigateResolved") {
         "Historical Resolution Analysis (Past $($ReportData.IncidentAnchor.LookbackDays) Days)"
@@ -344,25 +375,35 @@ function Export-DcHtmlReport {
             "What Changed:`n" + ($discordFactorLines -join "`n")
     }
 
+    $multiGpuDiscordLine = if ($hw -and $hw.DualGpuConflict -and $hw.DualGpuDetails) {
+        "Multi-GPU:      CONFLICT - $($hw.DualGpuDetails)`n"
+    } elseif ($hw -and $hw.HybridMultiGpu -and $hw.HybridMultiGpuDetails) {
+        "Multi-GPU:      $($hw.HybridMultiGpuDetails)`n"
+    } else { "" }
+
     $discordText = "=== DriverCheck Diagnostic Summary ===`n" +
-        "Status:      $($ReportData.RootCauseTitle)`n" +
-        "Severity:    $($ReportData.RootCauseSeverity)`n" +
-        "Timestamp:   $((Get-Date).ToString('yyyy-MM-dd HH:mm'))`n" +
-        "Scan Range:  $scanRangeDiscord`n`n" +
+        "Status:         $($ReportData.RootCauseTitle)`n" +
+        "Severity:       $($ReportData.RootCauseSeverity)`n" +
+        "Timestamp:      $((Get-Date).ToString('yyyy-MM-dd HH:mm'))`n" +
+        "Scan Range:     $scanRangeDiscord`n`n" +
         "[Summary]`n$($ReportData.RootCauseGuidance)" +
         $resolvedDiscordSection + "`n`n" +
         "[Hardware & Platform]`n" +
-        "Motherboard: $mbSummaryStr`n" +
-        "Chipset:     $chipsetSummaryStr`n" +
-        "GPUs:        $gpuNamesStr`n" +
-        "Displays:    $dispSummaryStr`n" +
-        "PCIe ASPM:   $pcieAspmStr`n" +
-        "ULPS (Power): $ulpsStr`n" +
-        "TDR Delay:   $tdrDelayStr`n" +
-        "Fast Startup: $fastStartupStatusStr`n" +
+        "CPU:            $cpuVal`n" +
+        "RAM:            $ramVal`n" +
+        "Motherboard:    $mbSummaryStr`n" +
+        "Chipset:        $chipsetSummaryStr`n" +
+        "GPUs:           $gpuNamesStr`n" +
+        $multiGpuDiscordLine +
+        "Resizable BAR:  $rebarVal`n" +
+        "Displays:       $dispSummaryStr`n" +
+        "PCIe ASPM:      $pcieAspmStr`n" +
+        "HAGS / TdrDelay: $hagsStr | TdrDelay: $tdrDelayStr`n" +
+        "ULPS (Power):   $ulpsStr`n" +
+        "Fast Startup:   $fastStartupStatusStr`n" +
         "Kernel Drivers: $rogueDriversStr`n" +
-        "PnP Issues:  $pnpCountStr`n" +
-        "Crash Dumps: $($ReportData.Dumps.Count)"
+        "PnP Issues:     $pnpCountStr`n" +
+        "Crash Dumps:    $($ReportData.Dumps.Count)"
 
     # Assemble HTML
     $parts = [System.Collections.Generic.List[string]]::new()
@@ -438,13 +479,6 @@ function Export-DcHtmlReport {
     $parts.Add("            <span class='badge $statusClass'>$statusText</span>")
     $parts.Add("        </header>")
 
-    $cpuVal = if ($hw -and $hw.Motherboard -and $hw.Motherboard.CpuName) { $hw.Motherboard.CpuName } else { "Standard CPU" }
-    $ramVal = if ($hw -and $hw.Memory -and $hw.Memory.Summary) { $hw.Memory.Summary } else { "Audited via System" }
-    $gpuVal = if ($hw -and $hw.Gpus -and $hw.Gpus.Count -gt 0) { "$($hw.Gpus[0].Name) (v$($hw.Gpus[0].DriverVersion))" } else { "Standard Display Adapter" }
-    $rebarVal = if ($hw -and $hw.RebarStatus -and $hw.RebarStatus.Details) { $hw.RebarStatus.Details } else { "N/A" }
-    $mbVal = if ($hw -and $hw.Motherboard) { "$($hw.Motherboard.MotherboardManufacturer) $($hw.Motherboard.MotherboardProduct)" } else { "Standard Motherboard" }
-    $biosVal = if ($hw -and $hw.Motherboard -and $hw.Motherboard.BiosVersion) { " | BIOS: $($hw.Motherboard.BiosVersion)" } else { "" }
-
     $parts.Add("        <div class='spec-grid'>")
     $parts.Add("            <div class='spec-card'><div class='spec-label'>Processor</div><div class='spec-value'>$cpuVal</div></div>")
     $parts.Add("            <div class='spec-card'><div class='spec-label'>System Memory</div><div class='spec-value'>$ramVal</div></div>")
@@ -489,6 +523,9 @@ function Export-DcHtmlReport {
     $parts.Add(($gpuRows -join "`n"))
     $parts.Add("                </tbody>")
     $parts.Add("            </table>")
+    if ($multiGpuNoticeHtml) {
+        $parts.Add("            $multiGpuNoticeHtml")
+    }
     $parts.Add("        </div>")
     $parts.Add("        <div style='margin-top: 12px;'>")
     $parts.Add("            <strong>Connected Displays & Monitor EDID Timings:</strong>")
@@ -529,11 +566,12 @@ function Export-DcHtmlReport {
 
     $fullHtml = $parts -join "`r`n"
 
-    # Global Privacy Pass: Redact user directory paths and SteamID identifiers
+    # Global Privacy Pass: Redact user directory paths, Windows User identifiers, and SteamID identifiers
     if ($env:USERPROFILE) {
         $fullHtml = $fullHtml.Replace($env:USERPROFILE, "%USERPROFILE%")
     }
-    $fullHtml = $fullHtml -replace '(?i)[a-zA-Z]:\\Users\\[^\\]+', '%USERPROFILE%'
+    $fullHtml = $fullHtml -replace '(?i)[a-zA-Z]:\\Users\\[^\\"<>\r\n\s]+', '%USERPROFILE%'
+    $fullHtml = $fullHtml -replace '(?i)User:\s*[^\r\n"<>\\]+\\[^\r\n"<>\.]+', 'User: [REDACTED]'
     $fullHtml = $fullHtml -replace '\[U:\d+:\d+\]', '[U:1:REDACTED]'
 
     [System.IO.File]::WriteAllText($OutputPath, $fullHtml, [System.Text.Encoding]::UTF8)
@@ -568,14 +606,23 @@ function Export-DcSupportBundle {
         New-Item -Path $logsDir -ItemType Directory -Force | Out-Null
 
         foreach ($el in $ReportData.EngineLogs) {
-            if (Test-Path $el.FullName) {
+            $localLogPath = $el.FullName
+            if ($localLogPath -and $env:USERPROFILE) {
+                $localLogPath = $localLogPath.Replace("%USERPROFILE%", $env:USERPROFILE)
+            }
+            if ($localLogPath -and (Test-Path $localLogPath)) {
                 $dest = Join-Path $logsDir "$($el.Engine)_$($el.LogName)"
-                $tailLines = Get-Content $el.FullName -Tail 500 -ErrorAction SilentlyContinue
+                $tailLines = Get-Content $localLogPath -Tail 500 -ErrorAction SilentlyContinue
                 if ($tailLines) {
                     $sanitized = $tailLines | ForEach-Object {
-                        $s = $_ -replace '\[U:\d+:\d+\]', '[U:1:REDACTED]'
-                        if ($env:USERPROFILE) { $s = $s.Replace($env:USERPROFILE, "%USERPROFILE%") }
-                        $s -replace '(?i)[a-zA-Z]:\\Users\\[^\\]+', '%USERPROFILE%'
+                        if (Get-Command Protect-DcLogText -ErrorAction SilentlyContinue) {
+                            Protect-DcLogText $_
+                        } else {
+                            $s = $_ -replace '\[U:\d+:\d+\]', '[U:1:REDACTED]'
+                            if ($env:USERPROFILE) { $s = $s.Replace($env:USERPROFILE, "%USERPROFILE%") }
+                            $s = $s -replace '(?i)[a-zA-Z]:\\Users\\[^\\]+', '%USERPROFILE%'
+                            $s -replace '(?i)User:\s*[^\r\n"\\]+\\[^\r\n"\.]+', 'User: [REDACTED]'
+                        }
                     }
                     Set-Content -Path $dest -Value $sanitized -Encoding UTF8
                 }
