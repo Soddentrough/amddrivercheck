@@ -134,6 +134,18 @@ function Export-DcHtmlReport {
                 $telemRows.Add("<div class='alert-card alert-critical'><strong>&#x1F310; Network Link Drop / NCSI Issue [$($nd.TimeCreated)]:</strong> $($nd.Message)</div>")
             }
         }
+        if ($telem.PciDeviceResets -and $telem.PciDeviceResets.Count -gt 0) {
+            $hasTelemIssue = $true
+            foreach ($pr in ($telem.PciDeviceResets | Select-Object -First 3)) {
+                $telemRows.Add("<div class='alert-card alert-critical'><strong>&#x26A1; PCI Bus Hardware Reset [$($pr.TimeCreated)]:</strong> $($pr.Message)</div>")
+            }
+        }
+        if ($telem.UdpPortExhaustions -and $telem.UdpPortExhaustions.Count -gt 0) {
+            $hasTelemIssue = $true
+            foreach ($upe in ($telem.UdpPortExhaustions | Select-Object -First 3)) {
+                $telemRows.Add("<div class='alert-card alert-warning'><strong>&#x1F50C; UDP Dynamic Port Exhaustion (Event 4266) [$($upe.TimeCreated)]:</strong> $($upe.Message)</div>")
+            }
+        }
         if ($telem.WlanFailovers -and $telem.WlanFailovers.Count -gt 0) {
             $hasTelemIssue = $true
             foreach ($wf in ($telem.WlanFailovers | Select-Object -First 3)) {
@@ -157,7 +169,7 @@ function Export-DcHtmlReport {
         }
     }
     if (-not $hasTelemIssue) {
-        $telemRows.Add("<div class='empty-state'>&#x2705; No WHEA errors, GPU TDR resets, or BSOD bugchecks found in event telemetry.</div>")
+        $telemRows.Add("<div class='empty-state'>&#x2705; No WHEA errors, GPU TDR resets, network drops, or hardware errors found in event telemetry.</div>")
     }
 
     # Build Hardware HTML
@@ -267,7 +279,12 @@ function Export-DcHtmlReport {
             if ($net.IsIntel25G -and $net.PriorityVLAN -match 'Enabled') {
                 $intelNotice = "<div class='alert-card alert-warning' style='margin-top: 6px; font-size: 0.85rem;'><strong>&#x26A0; Intel 2.5G Stability Notice:</strong> Packet Priority & VLAN is enabled on $($net.Name). This is known to cause ARP probe timeouts and socket stalls. Run <code>Repair-EthernetSettings.ps1</code> to disable VLAN tagging.</div>"
             }
-            $networkRows.Add("<div class='card-item'><div class='card-header-row'><span class='file-name'>&#x1F310; $($net.Name) - $($net.InterfaceDescription)</span>$statusBadge</div><div style='font-size: 0.9rem;'>Link Speed: <strong>$($net.LinkSpeed)</strong> | Speed/Duplex: <strong>$($net.SpeedDuplex)</strong> | VLAN/Priority: <strong>$($net.PriorityVLAN)</strong></div>$intelNotice</div>")
+            $udpNotice = ""
+            if ($net.IsUdpConstrained) {
+                $udpNotice = "<div class='alert-card alert-warning' style='margin-top: 6px; font-size: 0.85rem;'><strong>&#x26A0; UDP Dynamic Port Space Constrained:</strong> UDP ephemeral ports are restricted to $($net.UdpPortRange) (vs TCP $($net.TcpPortRange)). Rapid socket bursts during Steam/game matchmaking can exhaust ports and cause connection timeouts. Run <code>Repair-EthernetSettings.ps1 -ExpandUdpPorts</code> as Admin.</div>"
+            }
+            $portInfo = if ($net.UdpPortRange) { " | UDP Ports: <strong>$($net.UdpPortRange)</strong>" } else { "" }
+            $networkRows.Add("<div class='card-item'><div class='card-header-row'><span class='file-name'>&#x1F310; $($net.Name) - $($net.InterfaceDescription)</span>$statusBadge</div><div style='font-size: 0.9rem;'>Link Speed: <strong>$($net.LinkSpeed)</strong> | Speed/Duplex: <strong>$($net.SpeedDuplex)</strong> | VLAN/Priority: <strong>$($net.PriorityVLAN)</strong>$portInfo</div>$intelNotice$udpNotice</div>")
         }
     } else {
         $networkRows.Add("<div class='empty-state'>&#x2705; Network adapters reporting normal status.</div>")
@@ -381,12 +398,31 @@ function Export-DcHtmlReport {
         "Multi-GPU:      $($hw.HybridMultiGpuDetails)`n"
     } else { "" }
 
+    $secondaryFindingsHtml = ""
+    $secondaryDiscordSection = ""
+    if ($ReportData.PSObject.Properties['SecondaryFindings'] -and $ReportData.SecondaryFindings -and $ReportData.SecondaryFindings.Count -gt 0) {
+        $secCards = [System.Collections.Generic.List[string]]::new()
+        $secDiscordLines = [System.Collections.Generic.List[string]]::new()
+        $secCards.Add("<div style='margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border);'><strong style='color: var(--yellow); font-size: 1.0rem;'>Concurrent / Secondary Findings ($($ReportData.SecondaryFindings.Count)):</strong>")
+        $idx = 2
+        foreach ($sf in $ReportData.SecondaryFindings) {
+            $sfBadge = if ($sf.Severity -eq "Critical") { "<span class='badge-critical'>CRITICAL</span>" } elseif ($sf.Severity -eq "Warning") { "<span class='badge-warning'>WARNING</span>" } else { "<span class='badge-neutral'>$($sf.Severity)</span>" }
+            $secCards.Add("<div class='card-item' style='margin-top: 10px; background: rgba(15, 23, 42, 0.7);'><div class='card-header-row'><span class='file-name'>[$idx] $($sf.Title)</span>$sfBadge</div><div style='font-size: 0.92rem; margin-bottom: 6px;'>$($sf.Description)</div><div style='font-size: 0.88rem; color: var(--green);'><strong>Fix:</strong> $($sf.Guidance)</div></div>")
+            $secDiscordLines.Add("  [$idx] [$($sf.Severity)] $($sf.Title) -> $($sf.Guidance)")
+            $idx++
+        }
+        $secCards.Add("</div>")
+        $secondaryFindingsHtml = $secCards -join "`n"
+        $secondaryDiscordSection = "`n`n[Concurrent / Secondary Findings]`n" + ($secDiscordLines -join "`n")
+    }
+
     $discordText = "=== DriverCheck Diagnostic Summary ===`n" +
         "Status:         $($ReportData.RootCauseTitle)`n" +
         "Severity:       $($ReportData.RootCauseSeverity)`n" +
         "Timestamp:      $((Get-Date).ToString('yyyy-MM-dd HH:mm'))`n" +
         "Scan Range:     $scanRangeDiscord`n`n" +
         "[Summary]`n$($ReportData.RootCauseGuidance)" +
+        $secondaryDiscordSection +
         $resolvedDiscordSection + "`n`n" +
         "[Hardware & Platform]`n" +
         "CPU:            $cpuVal`n" +
@@ -489,12 +525,15 @@ function Export-DcHtmlReport {
     $parts.Add("        <input type='text' class='filter-input' id='reportFilter' placeholder='Search report, events, drivers, exception codes, and error logs...' onkeyup='filterReport()'>")
     $parts.Add("        <section class='executive-card'>")
     $parts.Add("            <h2>Executive Root Cause & Actionable Guidance</h2>")
-    $parts.Add("            <div class='root-cause'>$($ReportData.RootCauseTitle)</div>")
+    $parts.Add("            <div class='root-cause'>[Primary] $($ReportData.RootCauseTitle)</div>")
     $parts.Add("            <p>$($ReportData.RootCauseDescription)</p>")
     $parts.Add("            <div class='guidance-box'>")
     $parts.Add("                <strong>Recommended Next Steps:</strong><br>")
     $parts.Add("                $($ReportData.RootCauseGuidance)")
     $parts.Add("            </div>")
+    if ($secondaryFindingsHtml) {
+        $parts.Add($secondaryFindingsHtml)
+    }
     $parts.Add("        </section>")
     if ($resolvedRows.Count -gt 0) {
         $parts.Add("        <h3 class='section-title'>[HISTORICAL RESOLUTION] Past Timeout Episode & What Changed to Resolve It</h3>")

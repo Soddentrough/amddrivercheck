@@ -1,12 +1,75 @@
-BeforeAll {
-    $repoRoot = Split-Path -Parent $PSScriptRoot
-    $modulesDir = Join-Path $repoRoot "scripts\modules"
-    Import-Module (Join-Path $modulesDir "DcCrashDump.psm1") -Force
-    Import-Module (Join-Path $modulesDir "DcSystemTelemetry.psm1") -Force
-    Import-Module (Join-Path $modulesDir "DcEngineLogs.psm1") -Force
-    Import-Module (Join-Path $modulesDir "DcHardwareHealth.psm1") -Force
-    Import-Module (Join-Path $modulesDir "DcRemediation.psm1") -Force
-    Import-Module (Join-Path $modulesDir "DcReportGenerator.psm1") -Force
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$modulesDir = Join-Path $repoRoot "scripts\modules"
+Import-Module (Join-Path $modulesDir "DriverCheck.psm1") -Force
+
+$pesterMod = Get-Module Pester
+if (-not $pesterMod) {
+    $pesterMod = Import-Module Pester -PassThru -ErrorAction SilentlyContinue
+}
+if ($pesterMod -and $pesterMod.Version.Major -lt 5) {
+    function Should {
+        param(
+            [Parameter(ValueFromPipeline = $true)]
+            $ActualValue,
+            [switch]$Not,
+            [switch]$BeNullOrEmpty,
+            [switch]$Be,
+            [switch]$Match,
+            [switch]$BeLessThan,
+            [switch]$BeGreaterThan,
+            [switch]$BeGreaterOrEqual,
+            [switch]$Contain,
+            [Parameter(Position = 0)]
+            $ExpectedValue
+        )
+        begin {
+            $items = [System.Collections.Generic.List[object]]::new()
+        }
+        process {
+            $items.Add($ActualValue)
+        }
+        end {
+            $val = if ($items.Count -eq 0) { $null } elseif ($items.Count -eq 1) { $items[0] } else { $items.ToArray() }
+            if ($BeNullOrEmpty) {
+                $isEmpty = ($null -eq $val) -or ($val -is [string] -and $val.Length -eq 0) -or ($val -is [System.Collections.ICollection] -and $val.Count -eq 0)
+                if ($Not -and $isEmpty) { throw "Expected value not to be null or empty, but it was null/empty." }
+                if (-not $Not -and -not $isEmpty) { throw "Expected null or empty, but got '$val'." }
+                return
+            }
+            if ($Be) {
+                if ($Not) {
+                    if ($val -eq $ExpectedValue) { throw "Expected '$val' not to be '$ExpectedValue'." }
+                } else {
+                    if ($val -ne $ExpectedValue) { throw "Expected '$ExpectedValue', but got '$val'." }
+                }
+                return
+            }
+            if ($Match) {
+                if ($Not) {
+                    if ([string]$val -match $ExpectedValue) { throw "Expected '$val' not to match '$ExpectedValue'." }
+                } else {
+                    if ([string]$val -notmatch $ExpectedValue) { throw "Expected '$val' to match '$ExpectedValue'." }
+                }
+                return
+            }
+            if ($BeLessThan) {
+                if (-not ($val -lt $ExpectedValue)) { throw "Expected '$val' to be less than '$ExpectedValue'." }
+                return
+            }
+            if ($BeGreaterThan) {
+                if (-not ($val -gt $ExpectedValue)) { throw "Expected '$val' to be greater than '$ExpectedValue'." }
+                return
+            }
+            if ($BeGreaterOrEqual) {
+                if (-not ($val -ge $ExpectedValue)) { throw "Expected '$val' to be >= '$ExpectedValue'." }
+                return
+            }
+            if ($Contain) {
+                if (@($val) -notcontains $ExpectedValue) { throw "Expected collection to contain '$ExpectedValue'." }
+                return
+            }
+        }
+    }
 }
 
 Describe "DcCrashDump - Minidump VS_FIXEDFILEINFO & LiveKernelReports" {
@@ -46,28 +109,28 @@ Describe "DcCrashDump - Minidump VS_FIXEDFILEINFO & LiveKernelReports" {
             $bw.Write([UInt32]2) # 2 modules: game.exe and amdkmdag.sys
 
             # Module 0: C:\Games\TestGame.exe (Version 1.2.3.4) -> Name at RVA 340
-            $bw.Write([UInt64]0x140000000) # BaseOfImage
-            $bw.Write([UInt32]0x01000000)  # SizeOfImage
+            $bw.Write([uint64]"0x140000000") # BaseOfImage
+            $bw.Write([uint32]"0x01000000")  # SizeOfImage
             $bw.Write([UInt32]0)           # CheckSum
             $bw.Write([UInt32]1700000000)  # TimeDateStamp
             $bw.Write([UInt32]340)         # ModuleNameRva
             # VS_FIXEDFILEINFO (52 bytes)
-            $bw.Write([UInt32]0xFEEF04BD)  # dwSignature
-            $bw.Write([UInt32]0x00010000)  # dwStrucVersion
-            $bw.Write([UInt32]0x00010002)  # dwFileVersionMS (1.2)
-            $bw.Write([UInt32]0x00030004)  # dwFileVersionLS (3.4)
+            $bw.Write([uint32]"0xFEEF04BD")  # dwSignature
+            $bw.Write([uint32]"0x00010000")  # dwStrucVersion
+            $bw.Write([uint32]"0x00010002")  # dwFileVersionMS (1.2)
+            $bw.Write([uint32]"0x00030004")  # dwFileVersionLS (3.4)
             $bw.Write([byte[]]::new(36))   # Rest of VS_FIXEDFILEINFO
             $bw.Write([byte[]]::new(32))   # CvRecord, MiscRecord, Reserved0, Reserved1
 
             # Module 1: C:\Windows\System32\drivers\amdkmdag.sys (Version 31.0.24033.1003) -> Name at RVA 400
-            $bw.Write([UInt64]0xFFFFF80010000000) # BaseOfImage
-            $bw.Write([UInt32]0x05000000)         # SizeOfImage
+            $bw.Write([uint64]"0xFFFFF80010000000") # BaseOfImage
+            $bw.Write([uint32]"0x05000000")         # SizeOfImage
             $bw.Write([UInt32]0)                  # CheckSum
             $bw.Write([UInt32]1710000000)         # TimeDateStamp
             $bw.Write([UInt32]400)                # ModuleNameRva
             # VS_FIXEDFILEINFO (52 bytes)
-            $bw.Write([UInt32]0xFEEF04BD)         # dwSignature
-            $bw.Write([UInt32]0x00010000)         # dwStrucVersion
+            $bw.Write([uint32]"0xFEEF04BD")         # dwSignature
+            $bw.Write([uint32]"0x00010000")         # dwStrucVersion
             $bw.Write([UInt32]((31 -shl 16) -bor 0))         # dwFileVersionMS (31.0)
             $bw.Write([UInt32]((24033 -shl 16) -bor 1003))   # dwFileVersionLS (24033.1003)
             $bw.Write([byte[]]::new(36))
@@ -129,7 +192,7 @@ Describe "DcSystemTelemetry - WER ReportArchive Parser" {
             )
             Set-Content -Path $werFile -Value $werContent -Encoding UTF8
 
-            $reports = Get-DcWerReportArchive -Cutoff (Get-Date).AddDays(-90) -EndTime (Get-Date) -CustomArchivePaths @($tempDir)
+            $reports = @(Get-DcWerReportArchive -Cutoff (Get-Date).AddDays(-90) -EndTime (Get-Date) -CustomArchivePaths @($tempDir))
             $reports.Count | Should -Be 1
             $reports[0].EventType | Should -Be "LiveKernelEvent"
             $reports[0].BugCheckOrCode | Should -Be "141"
@@ -337,14 +400,14 @@ Describe "DcSystemTelemetry - Episode Clustering & Resolution Correlation Engine
 
 Describe "DcSystemTelemetry - Multi-Line WER LiveKernelEvent 1001 & EndTime Enforcement" {
     It "Extracts .dmp/.wer paths and embedded YYYYMMDD-HHMM timestamps across multi-line Attached files blocks and enforces EndTime" {
-        $now = Get-Date
-        $cutoff = $now.AddDays(-30)
-        $endTime = $now.AddDays(-5)
+        $global:dcTestNow = Get-Date
+        $cutoff = $global:dcTestNow.AddDays(-30)
+        $endTime = $global:dcTestNow.AddDays(-5)
 
         # Event 1: Embedded timestamp 10 days ago (within [Cutoff, EndTime])
-        $validDumpDate = $now.AddDays(-10)
+        $validDumpDate = $global:dcTestNow.AddDays(-10)
         $validDateTag = $validDumpDate.ToString("yyyyMMdd-HHmm")
-        $msgValid = @"
+        $global:dcTestMsgValid = @"
 Fault bucket , type 0
 Event Name: LiveKernelEvent
 Response: Not available
@@ -367,9 +430,9 @@ These files may be available here:
 "@
 
         # Event 2: Embedded timestamp 1 day ago (after EndTime -> must be filtered out)
-        $lateDumpDate = $now.AddDays(-1)
+        $lateDumpDate = $global:dcTestNow.AddDays(-1)
         $lateDateTag = $lateDumpDate.ToString("yyyyMMdd-HHmm")
-        $msgLate = @"
+        $global:dcTestMsgLate = @"
 Fault bucket , type 0
 Event Name: LiveKernelEvent
 Problem signature:
@@ -380,21 +443,22 @@ Attached files:
 These files may be available here:
 "@
 
+        Mock -ModuleName DcSystemTelemetry Get-CimInstance { return @() }
         Mock -ModuleName DcSystemTelemetry Get-WinEvent {
-            param($FilterHashtable)
-            if ($FilterHashtable -and $FilterHashtable['ProviderName'] -eq 'Windows Error Reporting' -and $FilterHashtable['Id'] -eq 1001) {
+            $fh = if ($FilterHashtable -is [array]) { $FilterHashtable[0] } else { $FilterHashtable }
+            if ($fh -and $fh['ProviderName'] -eq 'Windows Error Reporting' -and ($fh['Id'] -contains 1001)) {
                 return @(
                     [PSCustomObject]@{
                         Id           = 1001
                         ProviderName = 'Windows Error Reporting'
-                        TimeCreated  = $now.AddDays(-9)
-                        Message      = $msgValid
+                        TimeCreated  = $global:dcTestNow.AddDays(-9)
+                        Message      = $global:dcTestMsgValid
                     },
                     [PSCustomObject]@{
                         Id           = 1001
                         ProviderName = 'Windows Error Reporting'
-                        TimeCreated  = $now.AddDays(-1)
-                        Message      = $msgLate
+                        TimeCreated  = $global:dcTestNow.AddDays(-1)
+                        Message      = $global:dcTestMsgLate
                     }
                 )
             }
@@ -412,10 +476,10 @@ These files may be available here:
         $now = Get-Date
         $cutoff = $now.AddDays(-15)
         $endTime = $now
-        $dumpDate = $now.AddDays(-2)
-        $dateTag = $dumpDate.ToString("yyyyMMdd-HHmm")
+        $global:dcTestDumpDate193 = $now.AddDays(-2)
+        $dateTag = $global:dcTestDumpDate193.ToString("yyyyMMdd-HHmm")
 
-        $msg193 = @"
+        $global:dcTestMsg193 = @"
 Fault bucket , type 0
 Event Name: LiveKernelEvent
 Response: Not available
@@ -431,15 +495,16 @@ Attached files:
 \\?\C:\Windows\LiveKernelReports\WATCHDOG\WATCHDOG-$dateTag-01.dmp
 "@
 
+        Mock -ModuleName DcSystemTelemetry Get-CimInstance { return @() }
         Mock -ModuleName DcSystemTelemetry Get-WinEvent {
-            param($FilterHashtable)
-            if ($FilterHashtable -and $FilterHashtable['ProviderName'] -eq 'Windows Error Reporting' -and $FilterHashtable['Id'] -eq 1001) {
+            $fh = if ($FilterHashtable -is [array]) { $FilterHashtable[0] } else { $FilterHashtable }
+            if ($fh -and $fh['ProviderName'] -eq 'Windows Error Reporting' -and ($fh['Id'] -contains 1001)) {
                 return @(
                     [PSCustomObject]@{
                         Id           = 1001
                         ProviderName = 'Windows Error Reporting'
-                        TimeCreated  = $dumpDate
-                        Message      = $msg193
+                        TimeCreated  = $global:dcTestDumpDate193
+                        Message      = $global:dcTestMsg193
                     }
                 )
             }
@@ -457,7 +522,7 @@ Attached files:
         New-Item -Path $reportFolder -ItemType Directory -Force | Out-Null
         $werFile = Join-Path $reportFolder "Report.wer"
         try {
-            $ft = $dumpDate.ToFileTime()
+            $ft = $global:dcTestDumpDate193.ToFileTime()
             $werContent = @(
                 "Version=1",
                 "EventType=LiveKernelEvent",
@@ -473,7 +538,7 @@ Attached files:
             )
             Set-Content -Path $werFile -Value $werContent -Encoding UTF8
 
-            $reports = Get-DcWerReportArchive -Cutoff $cutoff -EndTime $endTime -CustomArchivePaths @($tempDir)
+            $reports = @(Get-DcWerReportArchive -Cutoff $cutoff -EndTime $endTime -CustomArchivePaths @($tempDir))
             $reports.Count | Should -Be 1
             $reports[0].BugCheckOrCode | Should -Be "193"
             $reports[0].IsTdrOrGpu | Should -Be $true
@@ -496,8 +561,8 @@ Describe "DcCrashDump - WATCHDOG Live Dump Decoding & FaultingIP Population" {
             # Build minimal MDMP with SystemInfoStream (Type 7) + ModuleListStream (Type 4) containing amdkmdag.sys, no ExceptionStream
             $ms = New-Object System.IO.MemoryStream
             $bw = New-Object System.IO.BinaryWriter($ms)
-            $bw.Write([UInt32]0x504D444D) # 'MDMP'
-            $bw.Write([UInt32]0x0000A793)
+            $bw.Write([uint32]"0x504D444D") # 'MDMP'
+            $bw.Write([uint32]"0x0000A793")
             $bw.Write([UInt32]2)          # 2 streams
             $bw.Write([UInt32]32)         # StreamDirectoryRva
             $bw.Write([UInt32]0)
@@ -520,13 +585,13 @@ Describe "DcCrashDump - WATCHDOG Live Dump Decoding & FaultingIP Population" {
 
             # ModuleList at 120 (1 module: amdkmdag.sys at RVA 240)
             $bw.Write([UInt32]1)
-            $bw.Write([UInt64]0xFFFFF80010000000)
-            $bw.Write([UInt32]0x05000000)
+            $bw.Write([uint64]"0xFFFFF80010000000")
+            $bw.Write([uint32]"0x05000000")
             $bw.Write([UInt32]0)
             $bw.Write([UInt32]1710000000)
             $bw.Write([UInt32]240)
-            $bw.Write([UInt32]0xFEEF04BD)
-            $bw.Write([UInt32]0x00010000)
+            $bw.Write([uint32]"0xFEEF04BD")
+            $bw.Write([uint32]"0x00010000")
             $bw.Write([UInt32]((32 -shl 16) -bor 0))
             $bw.Write([UInt32]((13031 -shl 16) -bor 2001))
             $bw.Write([byte[]]::new(36))
@@ -663,5 +728,129 @@ Describe "Privacy & PII Redaction - JSON-Escaped Paths, Non-C Drives & Reliabili
     }
 }
 
+Describe "DcSystemTelemetry - Multi-Finding Diagnostic Rule Engine (Resolve-DcDiagnosticFindings)" {
+    It "Independently surfaces both PCI NIC Reset/Disconnects and Shader Runtime Crash without masking" {
+        $now = Get-Date
+        $dumpObj = [PSCustomObject]@{
+            FileName         = "ApplicationFrameHost.exe.19428.dmp"
+            Timestamp        = $now.AddHours(-22)
+            MainExecutable   = "ApplicationFrameHost.exe"
+            ExceptionCode    = "0xC0000005"
+            ExceptionMeaning = "Access Violation"
+            FaultingModule   = "amdxx64.dll"
+            FaultingIP       = "0x7ffa12345678 (in amdxx64.dll)"
+            IsShaderCompiler = $true
+            IsKernelDump     = $false
+            IsGraphicsCrash  = $true
+        }
 
+        $telemObj = [PSCustomObject]@{
+            KernelBugChecks    = @()
+            AbruptReboots      = @()
+            WheaErrors         = @()
+            PcieWheaErrors     = @()
+            TdrEvents          = @()
+            StorageErrors      = @()
+            MemoryExhaustion   = @()
+            SleepTransitions   = @()
+            PnpDriverFailures  = @()
+            AppCrashes         = @()
+            AppHangs           = @()
+            PciDeviceResets    = @(
+                [PSCustomObject]@{
+                    TimeCreated  = $now.AddHours(-2)
+                    Id           = 1
+                    FriendlyName = "PCI_DEV_15F3 (Intel(R) Ethernet Controller (3) I225-V)"
+                    DeviceLabel  = "PCI_DEV_15F3 (Intel(R) Ethernet Controller (3) I225-V)"
+                    Pdo          = "PCI_DEV_15F3"
+                    Message      = "PCI Express Bus Device Reset (Type 2)"
+                }
+            )
+            NetworkDrops       = @(
+                [PSCustomObject]@{
+                    TimeCreated   = $now.AddHours(-2)
+                    Id            = 27
+                    Provider      = "e2fnexpress"
+                    InterfaceName = "e2fnexpress"
+                    Reason        = "Hardware Link Disconnect"
+                    Message       = "Intel(R) Ethernet Controller (3) I225-V Network link is disconnected."
+                }
+            )
+            WlanFailovers      = @()
+            UdpPortExhaustions = @(
+                [PSCustomObject]@{
+                    TimeCreated = $now.AddHours(-1)
+                    Id          = 4266
+                    Provider    = "Tcpip"
+                    Message     = "A request to allocate an ephemeral port number from the global UDP port space has failed."
+                }
+            )
+        }
 
+        $result = Resolve-DcDiagnosticFindings -ParsedDumps @($dumpObj) -Telemetry $telemObj
+        $result | Should -Not -BeNullOrEmpty
+        $result.Findings.Count | Should -BeGreaterOrEqual 3
+
+        $ruleIds = @($result.Findings | ForEach-Object { $_.Id })
+        $ruleIds | Should -Contain "PCI_NIC_RESET_LINK_DROP"
+        $ruleIds | Should -Contain "SHADER_RUNTIME_CRASH"
+        $ruleIds | Should -Contain "UDP_PORT_EXHAUSTION"
+
+        $result.PrimaryFinding | Should -Not -BeNullOrEmpty
+        $result.SecondaryFindings.Count | Should -BeGreaterOrEqual 2
+    }
+}
+
+Describe "DcSystemTelemetry - Get-DcEventXmlData & Get-DcWinEventsTargeted" {
+    It "Extracts structured XML EventData key-value properties from an EventLogRecord" {
+        $fakeRecord = New-Object PSObject
+        $fakeRecord | Add-Member -MemberType ScriptMethod -Name ToXml -Value {
+            return @"
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System>
+    <Provider Name="Microsoft-Windows-PCI" />
+    <EventID>1</EventID>
+  </System>
+  <EventData>
+    <Data Name="ResetType">2</Data>
+    <Data Name="VendorId">0x8086</Data>
+    <Data Name="DeviceId">0x15F3</Data>
+  </EventData>
+</Event>
+"@
+        }
+
+        $xmlProps = Get-DcEventXmlData -EventRecord $fakeRecord
+        $xmlProps["ResetType"] | Should -Be "2"
+        $xmlProps["VendorId"] | Should -Be "0x8086"
+        $xmlProps["DeviceId"] | Should -Be "0x15F3"
+    }
+
+    It "Batches large Event ID lists into chunks of <= 12 IDs in Get-DcWinEventsTargeted" {
+        $global:dcTestBatchCount = 0
+        Mock -ModuleName DcSystemTelemetry Get-WinEvent {
+            $fh = if ($FilterHashtable -is [array]) { $FilterHashtable[0] } else { $FilterHashtable }
+            if ($fh -and $fh.ContainsKey('Id')) {
+                $global:dcTestBatchCount++
+                if ($fh['Id'].Count -gt 12) {
+                    throw "Batch size exceeded 12: $($fh['Id'].Count)"
+                }
+            }
+            return @()
+        }
+
+        $ids = 1..25
+        $res = Get-DcWinEventsTargeted -LogName "System" -Ids $ids -StartTime (Get-Date).AddHours(-1) -EndTime (Get-Date)
+        $global:dcTestBatchCount | Should -Be 3
+    }
+}
+
+Describe "DcRemediation - Non-Admin WhatIf Dry-Run Support" {
+    It "Allows Repair-DcUdpPortRange -WhatIf and Repair-DcAmdDriverAlignment -WhatIf without failing on admin checks" {
+        $udpWhatIf = Repair-DcUdpPortRange -WhatIf
+        $udpWhatIf | Should -Be $false
+
+        $amdWhatIf = Repair-DcAmdDriverAlignment -WhatIf
+        $amdWhatIf | Should -Be $false
+    }
+}

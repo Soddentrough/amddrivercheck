@@ -17,6 +17,11 @@ param(
 $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
+$modulesDir = Join-Path $PSScriptRoot "modules"
+if (Test-Path (Join-Path $modulesDir "DriverCheck.psm1")) {
+    Import-Module (Join-Path $modulesDir "DriverCheck.psm1") -Force
+}
+
 Write-Host ""
 Write-Host "========================================================================" -ForegroundColor Magenta
 Write-Host "  NETWORK ADAPTER HEALTH & LINK STABILITY AUDIT" -ForegroundColor Magenta
@@ -74,27 +79,59 @@ if ($udpNum -and $udpNum -lt 30000 -and $tcpNum -ge 30000) {
 $cutoff = (Get-Date).AddHours(-$Hours)
 Write-Host "`nNetwork Driver Telemetry & Link Flapping (Past $Hours hours):" -ForegroundColor Cyan
 
-$nicEvents = Get-WinEvent -FilterHashtable @{LogName='System'; StartTime=$cutoff} -ErrorAction SilentlyContinue |
-    Where-Object {
-        $_.ProviderName -match '(?i)e2fn?express|e1dexpress|Netwtw|rt640x64|Tcpip|DNS Client Events' -and
-        ($_.LevelDisplayName -match 'Error|Warning' -or $_.Id -in @(27, 32, 1014, 4202, 4266))
-    }
+$netIds = @(27, 32, 33, 1014, 4202, 4227, 4231, 4266, 5002, 5005, 5007, 10400)
+$rawNicEvents = if (Get-Command Get-DcWinEventsTargeted -ErrorAction SilentlyContinue) {
+    Get-DcWinEventsTargeted -LogName 'System' -Ids $netIds -StartTime $cutoff
+} else {
+    Get-WinEvent -FilterHashtable @{LogName='System'; Id=$netIds; StartTime=$cutoff} -ErrorAction SilentlyContinue
+}
+$nicEvents = $rawNicEvents | Where-Object {
+    $_.ProviderName -match '(?i)e2fn?express|e1dexpress|Netwtw|rt640x64|rt68|ndis|Tcpip|DNS Client Events' -or
+    $_.Message -match '(?i)Network link is disconnected|link has been disconnected'
+}
 
-$ncsiEvents = Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-NCSI/Operational'; StartTime=$cutoff} -ErrorAction SilentlyContinue |
-    Where-Object { $_.Id -eq 4042 -and ($_.Message -match 'Capability:\s*None|SuspectArpProbeFailed') }
+$ncsiEvents = Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-NCSI/Operational'; Id=4042; StartTime=$cutoff} -ErrorAction SilentlyContinue |
+    Where-Object { $_.Message -match 'Capability:\s*None|SuspectArpProbeFailed' }
 
-$pciResets = Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-PCI/Operational'; StartTime=$cutoff} -ErrorAction SilentlyContinue |
-    Where-Object { $_.Id -eq 1 -and $_.Message -match 'Begin state transition from STARTED to UNINITIALIZED' }
+$pciResets = Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-PCI/Operational'; Id=1; StartTime=$cutoff} -ErrorAction SilentlyContinue |
+    Where-Object { $_.Message -match 'Begin state transition from STARTED to UNINITIALIZED' }
 
-$wlanEvents = Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-WLAN-AutoConfig/Operational'; StartTime=$cutoff} -ErrorAction SilentlyContinue |
-    Where-Object { $_.Id -in @(8000, 11000) }
+$wlanEvents = Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-WLAN-AutoConfig/Operational'; Id=@(8000, 11000); StartTime=$cutoff} -ErrorAction SilentlyContinue
 
 $hasNetIssue = $false
 if ($pciResets) {
     $hasNetIssue = $true
+    # Cache PnP PCI devices by location string for hardware PDO resolution
+    $pciLocationMap = @{}
+    try {
+        $pciDevices = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object { $_.InstanceId -like 'PCI*' }
+        foreach ($pd in $pciDevices) {
+            $loc = (Get-PnpDeviceProperty -InstanceId $pd.InstanceId -KeyName 'DEVPKEY_Device_LocationInfo' -ErrorAction SilentlyContinue).Data
+            if ($loc) {
+                $pciLocationMap[$loc.Trim().ToLower()] = [PSCustomObject]@{
+                    FriendlyName = $pd.FriendlyName
+                    Location     = $loc.Trim()
+                }
+            }
+        }
+    } catch {}
+
     foreach ($pr in ($pciResets | Select-Object -First 5)) {
-        $pdo = if ($pr.Message -match '\[PDO\]\s*\((.*?)\)') { $matches[1] } else { "Unknown" }
-        Write-Host "  [!] [$($pr.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss'))] Microsoft-Windows-PCI (Event 1): Hardware PDO ($pdo) underwent bus uninitialization/reset." -ForegroundColor Red
+        $pdo = if ($pr.Message -match '\[PDO\]\s*\((.*?)\)') { $Matches[1] } else { "Unknown" }
+        $devLabel = "Hardware PDO ($pdo)"
+        if ($pdo -match '0x([0-9a-fA-F]+)\.0x([0-9a-fA-F]+)\.0x([0-9a-fA-F]+)') {
+            try {
+                $b = [Convert]::ToInt32($Matches[1], 16)
+                $d = [Convert]::ToInt32($Matches[2], 16)
+                $f = [Convert]::ToInt32($Matches[3], 16)
+                $locKey = "pci bus $b, device $d, function $f"
+                if ($pciLocationMap.ContainsKey($locKey)) {
+                    $m = $pciLocationMap[$locKey]
+                    $devLabel = "$($m.FriendlyName) ($($m.Location))"
+                }
+            } catch {}
+        }
+        Write-Host "  [!] [$($pr.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss'))] Microsoft-Windows-PCI (Event 1): $devLabel underwent bus uninitialization/reset." -ForegroundColor Red
     }
 }
 if ($nicEvents) {

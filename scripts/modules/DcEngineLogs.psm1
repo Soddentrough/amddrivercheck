@@ -17,8 +17,9 @@ function Protect-DcLogText {
     if ($env:USERPROFILE) {
         $sanitized = $sanitized.Replace($env:USERPROFILE, "%USERPROFILE%")
     }
-    $sanitized = $sanitized -replace '(?i)[a-zA-Z]:\\Users\\[^\\]+', '%USERPROFILE%'
-    $sanitized = $sanitized -replace '(?i)User:\s*[^\r\n\.]+', 'User: [REDACTED]'
+    $sanitized = $sanitized -replace '(?i)[a-zA-Z]:\\Users\\[^\\"\r\n]+(?=\\)', '%USERPROFILE%'
+    $sanitized = $sanitized -replace '(?i)[a-zA-Z]:\\Users\\[^\\"\r\n\s]+', '%USERPROFILE%'
+    $sanitized = $sanitized -replace '(?i)User:\s*[^\r\n\.\s]+\\[^\r\n\.\s]+', 'User: [REDACTED]'
 
     return $sanitized
 }

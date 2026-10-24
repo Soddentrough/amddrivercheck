@@ -15,16 +15,18 @@ function Get-DcDumpDirectories {
 
     # 1. Windows Kernel BSOD Minidumps & LiveKernelReports (Non-BSOD GPU TDR Watchdog Dumps)
     $winMinidump = Join-Path $env:SystemRoot "Minidump"
-    if (Test-Path $winMinidump) { $dirs.Add($winMinidump) }
+    try { if (Test-Path $winMinidump -ErrorAction SilentlyContinue) { $dirs.Add($winMinidump) } } catch {}
 
     $liveWatchdog = Join-Path $env:SystemRoot "LiveKernelReports\WATCHDOG"
-    if (Test-Path $liveWatchdog) { $dirs.Add($liveWatchdog) }
+    try { if (Test-Path $liveWatchdog -ErrorAction SilentlyContinue) { $dirs.Add($liveWatchdog) } } catch {}
     $liveKernelReports = Join-Path $env:SystemRoot "LiveKernelReports"
-    if (Test-Path $liveKernelReports) {
-        $dirs.Add($liveKernelReports)
-        $lkrSubDirs = Get-ChildItem -Path $liveKernelReports -Directory -ErrorAction SilentlyContinue
-        foreach ($sd in $lkrSubDirs) { $dirs.Add($sd.FullName) }
-    }
+    try {
+        if (Test-Path $liveKernelReports -ErrorAction SilentlyContinue) {
+            $dirs.Add($liveKernelReports)
+            $lkrSubDirs = Get-ChildItem -Path $liveKernelReports -Directory -ErrorAction SilentlyContinue
+            foreach ($sd in $lkrSubDirs) { $dirs.Add($sd.FullName) }
+        }
+    } catch {}
 
     # 2. Windows User-Mode WER Crash Dumps
     $werDumps = Join-Path $env:LOCALAPPDATA "CrashDumps"
@@ -301,7 +303,7 @@ function Read-DcMinidump {
                 }
 
                 $linkDate = $null
-                if ($tds -gt 0 -and $tds -lt 0xFFFFFFFF) {
+                if ($tds -gt 0 -and $tds -lt [uint32]::MaxValue) {
                     try {
                         $linkDate = [DateTimeOffset]::FromUnixTimeSeconds([int64]$tds).LocalDateTime
                     } catch {}

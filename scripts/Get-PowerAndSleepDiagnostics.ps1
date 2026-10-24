@@ -55,7 +55,7 @@ $cutoff = (Get-Date).AddHours(-$Hours)
 Write-Host "`nRecent Sleep & Power Transition Telemetry (Past $Hours hours):" -ForegroundColor Cyan
 
 # Note: Event 6008 comes from EventLog provider, Event 41 from Kernel-Power, Event 1 from Power-Troubleshooter
-$powerEvents = Get-WinEvent -FilterHashtable @{LogName='System'; StartTime=$cutoff} -ErrorAction SilentlyContinue |
+$powerEvents = Get-WinEvent -FilterHashtable @{LogName='System'; Id=@(1, 41, 42, 107, 566, 6008); StartTime=$cutoff} -ErrorAction SilentlyContinue |
     Where-Object {
         ($_.Id -in @(1, 42, 107, 566) -and $_.ProviderName -match 'Power-Troubleshooter|Kernel-Power') -or
         ($_.Id -eq 41 -and $_.ProviderName -match 'Kernel-Power') -or

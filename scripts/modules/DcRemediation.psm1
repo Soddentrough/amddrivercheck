@@ -12,6 +12,147 @@ function Test-DcIsAdmin {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Request-DcAdminElevation {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$ScriptPath,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$Arguments = @()
+    )
+
+    if (Test-DcIsAdmin) { return $true }
+    if (-not $ScriptPath -or -not (Test-Path $ScriptPath)) {
+        Write-Host "[WARNING] Cannot auto-elevate without a valid -ScriptPath." -ForegroundColor Yellow
+        return $false
+    }
+
+    try {
+        $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$ScriptPath`"")
+        if ($Arguments) { $argList += $Arguments }
+        Write-Host "[INFO] Requesting Administrator elevation via UAC..." -ForegroundColor Cyan
+        Start-Process -FilePath "powershell.exe" -ArgumentList ($argList -join " ") -Verb RunAs -Wait
+        return $true
+    } catch {
+        Write-Host "[ERROR] Elevation cancelled or failed: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    }
+}
+
+function Backup-DcRemediationState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$ActionName = "General",
+
+        [Parameter(Mandatory = $false)]
+        [string]$BackupDirectory
+    )
+
+    try {
+        if (-not $BackupDirectory) {
+            $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+            $BackupDirectory = Join-Path $repoRoot "logs"
+        }
+        if (-not (Test-Path $BackupDirectory)) {
+            New-Item -Path $BackupDirectory -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+        }
+
+        $ts = (Get-Date).ToString("yyyyMMdd-HHmmss")
+        $safeAction = ($ActionName -replace '[^a-zA-Z0-9_-]', '_')
+        $backupFile = Join-Path $BackupDirectory "Remediation-Backup-$safeAction-$ts.json"
+
+        $udpV4Raw = (& netsh int ipv4 show dynamicport udp 2>$null) | Out-String
+        $udpV6Raw = (& netsh int ipv6 show dynamicport udp 2>$null) | Out-String
+
+        $adapterSnapshot = @()
+        $adapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceDescription -match '(?i)I225|I226|Intel.*Ethernet|Realtek' -or $_.Name -eq 'Ethernet' }
+        foreach ($ad in $adapters) {
+            $spd = Get-NetAdapterAdvancedProperty -Name $ad.Name -DisplayName "Speed & Duplex" -ErrorAction SilentlyContinue
+            $vlan = Get-NetAdapterAdvancedProperty -Name $ad.Name -DisplayName "Packet Priority & VLAN" -ErrorAction SilentlyContinue
+            $adapterSnapshot += [PSCustomObject]@{
+                Name                = $ad.Name
+                InterfaceDesc       = $ad.InterfaceDescription
+                SpeedAndDuplex      = if ($spd) { $spd.DisplayValue } else { $null }
+                PacketPriorityVlan  = if ($vlan) { $vlan.DisplayValue } else { $null }
+            }
+        }
+
+        $dsKey = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching" -ErrorAction SilentlyContinue
+        $wuKey = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -ErrorAction SilentlyContinue
+        $gfxKey = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" -ErrorAction SilentlyContinue
+        $pwrKey = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" -ErrorAction SilentlyContinue
+
+        $snapshot = [PSCustomObject]@{
+            Timestamp                          = (Get-Date).ToString("o")
+            ActionName                         = $ActionName
+            UdpDynamicPortIPv4                 = if ($udpV4Raw) { $udpV4Raw.Trim() } else { $null }
+            UdpDynamicPortIPv6                 = if ($udpV6Raw) { $udpV6Raw.Trim() } else { $null }
+            NetworkAdapters                    = $adapterSnapshot
+            RegistryDriverSearchOrderConfig    = if ($dsKey -and $null -ne $dsKey.SearchOrderConfig) { $dsKey.SearchOrderConfig } else { $null }
+            RegistryExcludeWUDrivers           = if ($wuKey -and $null -ne $wuKey.ExcludeWUDriversInQualityUpdate) { $wuKey.ExcludeWUDriversInQualityUpdate } else { $null }
+            RegistryTdrDelay                   = if ($gfxKey -and $null -ne $gfxKey.TdrDelay) { $gfxKey.TdrDelay } else { $null }
+            RegistryTdrDdiDelay                = if ($gfxKey -and $null -ne $gfxKey.TdrDdiDelay) { $gfxKey.TdrDdiDelay } else { $null }
+            RegistryHiberbootEnabled           = if ($pwrKey -and $null -ne $pwrKey.HiberbootEnabled) { $pwrKey.HiberbootEnabled } else { $null }
+        }
+
+        $snapshot | ConvertTo-Json -Depth 5 | Set-Content -Path $backupFile -Encoding UTF8 -ErrorAction SilentlyContinue
+        Write-Host "  [BACKUP] Saved pre-remediation state to: $([System.IO.Path]::GetFileName($backupFile))" -ForegroundColor DarkGray
+        return $backupFile
+    } catch {
+        return $null
+    }
+}
+
+function Restore-DcRemediationState {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BackupFilePath
+    )
+
+    if (-not (Test-Path $BackupFilePath)) {
+        Write-Host "[ERROR] Backup file not found: $BackupFilePath" -ForegroundColor Red
+        return $false
+    }
+
+    if (-not (Test-DcIsAdmin) -and -not $WhatIfPreference) {
+        Write-Host "[ERROR] Administrator elevation is required to restore system state." -ForegroundColor Red
+        return $false
+    }
+
+    try {
+        $snap = Get-Content -Path $BackupFilePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($PSCmdlet.ShouldProcess($BackupFilePath, "Restore system state from snapshot ($($snap.ActionName) @ $($snap.Timestamp))")) {
+            if ($snap.NetworkAdapters) {
+                foreach ($ad in $snap.NetworkAdapters) {
+                    if ($ad.SpeedAndDuplex) {
+                        Set-NetAdapterAdvancedProperty -Name $ad.Name -DisplayName "Speed & Duplex" -DisplayValue $ad.SpeedAndDuplex -ErrorAction SilentlyContinue
+                    }
+                    if ($ad.PacketPriorityVlan) {
+                        Set-NetAdapterAdvancedProperty -Name $ad.Name -DisplayName "Packet Priority & VLAN" -DisplayValue $ad.PacketPriorityVlan -ErrorAction SilentlyContinue
+                    }
+                }
+            }
+            if ($null -ne $snap.RegistryDriverSearchOrderConfig) {
+                Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching" -Name "SearchOrderConfig" -Value ([int]$snap.RegistryDriverSearchOrderConfig) -Type DWord -Force -ErrorAction SilentlyContinue
+            }
+            if ($null -ne $snap.RegistryTdrDelay) {
+                Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" -Name "TdrDelay" -Value ([int]$snap.RegistryTdrDelay) -Type DWord -Force -ErrorAction SilentlyContinue
+            }
+            if ($null -ne $snap.RegistryHiberbootEnabled) {
+                Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" -Name "HiberbootEnabled" -Value ([int]$snap.RegistryHiberbootEnabled) -Type DWord -Force -ErrorAction SilentlyContinue
+            }
+            Write-Host "[SUCCESS] Restored remediation snapshot from $BackupFilePath" -ForegroundColor Green
+            return $true
+        }
+    } catch {
+        Write-Host "[ERROR] Failed to restore snapshot: $($_.Exception.Message)" -ForegroundColor Red
+    }
+    return $false
+}
+
 function Clear-DcGameConfig {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
@@ -211,7 +352,7 @@ function Repair-DcUdpPortRange {
         [int]$NumberOfPorts = 64511
     )
 
-    if (-not (Test-DcIsAdmin)) {
+    if (-not (Test-DcIsAdmin) -and -not $WhatIfPreference) {
         Write-Host "[ERROR] Administrator elevation is required to modify dynamic port ranges." -ForegroundColor Red
         Write-Host "Please re-run in an elevated terminal (Run as Administrator) or run:" -ForegroundColor Yellow
         Write-Host "  netsh int ipv4 set dynamicport udp start=$StartPort num=$NumberOfPorts" -ForegroundColor White
@@ -224,6 +365,7 @@ function Repair-DcUdpPortRange {
 
     $targetAction = "Expand dynamic UDP port range for IPv4 and IPv6 to StartPort=$StartPort, NumberOfPorts=$NumberOfPorts"
     if ($PSCmdlet.ShouldProcess("TCP/IP Stack", $targetAction)) {
+        Backup-DcRemediationState -ActionName "UdpPortRange" | Out-Null
         try {
             Write-Host "Configuring IPv4 UDP dynamic port range..." -NoNewline -ForegroundColor White
             $v4Out = & netsh int ipv4 set dynamicport udp start=$StartPort num=$NumberOfPorts 2>&1
@@ -267,16 +409,16 @@ function Repair-DcEthernetSettings {
     )
 
     if ($ExpandUdpPorts) {
-        $udpResult = Repair-DcUdpPortRange
+        $udpResult = Repair-DcUdpPortRange -WhatIf:$WhatIfPreference
     }
 
-    if (-not (Test-DcIsAdmin)) {
+    if (-not (Test-DcIsAdmin) -and -not $WhatIfPreference) {
         Write-Host "[ERROR] Administrator elevation is required to modify network adapter properties." -ForegroundColor Red
         Write-Host "Please re-run in an elevated terminal (Run as Administrator)." -ForegroundColor Yellow
         return $false
     }
 
-    $adapter = Get-NetAdapter | Where-Object { $_.InterfaceDescription -match '(?i)I225|I226|Intel.*Ethernet' } | Select-Object -First 1
+    $adapter = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceDescription -match '(?i)I225|I226|Intel.*Ethernet' } | Select-Object -First 1
     if (-not $adapter) { $adapter = Get-NetAdapter -Name "Ethernet" -ErrorAction SilentlyContinue }
     if (-not $adapter) {
         Write-Host "[ERROR] No suitable Ethernet adapter found to configure." -ForegroundColor Red
@@ -298,6 +440,7 @@ function Repair-DcEthernetSettings {
     }
 
     if ($PSCmdlet.ShouldProcess($adapter.Name, $actionDesc)) {
+        Backup-DcRemediationState -ActionName "EthernetSettings" | Out-Null
         if ($speedValue) {
             try {
                 Write-Host "Applying Speed & Duplex ('$speedValue')..." -NoNewline -ForegroundColor White
@@ -333,7 +476,7 @@ function Repair-DcAmdDriverAlignment {
         [switch]$BlockWindowsUpdateDrivers = $true
     )
 
-    if (-not (Test-DcIsAdmin)) {
+    if (-not (Test-DcIsAdmin) -and -not $WhatIfPreference) {
         Write-Host "[ERROR] Administrator elevation is required to modify driver policies." -ForegroundColor Red
         return $false
     }
@@ -341,6 +484,7 @@ function Repair-DcAmdDriverAlignment {
     Write-Host "=== Applying Windows Update GPU Driver Overwrite Protection ===" -ForegroundColor Cyan
     if ($BlockWindowsUpdateDrivers) {
         if ($PSCmdlet.ShouldProcess("Registry Driver Policies", "Block Windows Update from replacing graphics drivers")) {
+            Backup-DcRemediationState -ActionName "AmdDriverAlignment" | Out-Null
             try {
                 # 1. DriverSearching -> SearchOrderConfig = 0
                 $dsPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching"
@@ -465,7 +609,7 @@ function Disable-DcProblematicKernelDriver {
         [string]$DriverName
     )
 
-    if (-not (Test-DcIsAdmin)) {
+    if (-not (Test-DcIsAdmin) -and -not $WhatIfPreference) {
         Write-Host "[ERROR] Administrator elevation is required to configure kernel driver services." -ForegroundColor Red
         Write-Host "Please run this command from an elevated PowerShell terminal (Run as Administrator)." -ForegroundColor Yellow
         return $false
@@ -474,6 +618,7 @@ function Disable-DcProblematicKernelDriver {
     Write-Host "Configuring kernel driver service '$DriverName'..." -ForegroundColor Yellow
 
     if ($PSCmdlet.ShouldProcess($DriverName, "Disable service (sc.exe config $DriverName start= disabled)")) {
+        Backup-DcRemediationState -ActionName "DisableDriver_$DriverName" | Out-Null
         try {
             $configResult = & sc.exe config $DriverName start= disabled 2>&1 | Out-String
             if ($configResult -match 'SUCCESS') {
@@ -507,7 +652,7 @@ function Repair-DcGpuSleepSettings {
         [switch]$DisableFastStartup
     )
 
-    if (-not (Test-DcIsAdmin)) {
+    if (-not (Test-DcIsAdmin) -and -not $WhatIfPreference) {
         Write-Host "[ERROR] Administrator elevation is required to configure GPU sleep and TDR recovery settings." -ForegroundColor Red
         Write-Host "Please run this command from an elevated PowerShell terminal (Run as Administrator)." -ForegroundColor Yellow
         return $false
@@ -519,6 +664,7 @@ function Repair-DcGpuSleepSettings {
     # 1. Increase TdrDelay and TdrDdiDelay in GraphicsDrivers registry (Zero Power Impact)
     $gfxKey = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
     if ($PSCmdlet.ShouldProcess($gfxKey, "Set TdrDelay = $TdrDelaySeconds and TdrDdiDelay = $TdrDelaySeconds")) {
+        Backup-DcRemediationState -ActionName "GpuSleepSettings" | Out-Null
         if (-not (Test-Path $gfxKey)) { New-Item -Path $gfxKey -ItemType Directory -Force | Out-Null }
         Set-ItemProperty -Path $gfxKey -Name "TdrDelay" -Value $TdrDelaySeconds -Type DWord -Force
         Set-ItemProperty -Path $gfxKey -Name "TdrDdiDelay" -Value $TdrDelaySeconds -Type DWord -Force
@@ -563,4 +709,5 @@ function Repair-DcGpuSleepSettings {
     return $true
 }
 
-Export-ModuleMember -Function Test-DcIsAdmin, Clear-DcGameConfig, Clear-DcSteamCache, Clear-DcShaderCache, Stop-DcZombieProcesses, Repair-DcEthernetSettings, Repair-DcUdpPortRange, Repair-DcAmdDriverAlignment, Repair-DcPciePowerSettings, Disable-DcProblematicKernelDriver, Repair-DcGpuSleepSettings
+Export-ModuleMember -Function Test-DcIsAdmin, Request-DcAdminElevation, Backup-DcRemediationState, Restore-DcRemediationState, Clear-DcGameConfig, Clear-DcSteamCache, Clear-DcShaderCache, Stop-DcZombieProcesses, Repair-DcEthernetSettings, Repair-DcUdpPortRange, Repair-DcAmdDriverAlignment, Repair-DcPciePowerSettings, Disable-DcProblematicKernelDriver, Repair-DcGpuSleepSettings
+

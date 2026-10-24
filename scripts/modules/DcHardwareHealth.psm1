@@ -280,6 +280,28 @@ function Get-DcNetworkHealth {
     $adapters = Get-NetAdapter -ErrorAction SilentlyContinue
     $results = [System.Collections.Generic.List[PSCustomObject]]::new()
 
+    $udpDynamicV4 = & netsh int ipv4 show dynamicport udp 2>$null
+    $tcpDynamicV4 = & netsh int ipv4 show dynamicport tcp 2>$null
+    $udpStart = $null; $udpNum = $null
+    $tcpStart = $null; $tcpNum = $null
+
+    if ($udpDynamicV4) {
+        foreach ($line in $udpDynamicV4) {
+            if ($line -match 'Start Port\s*:\s*(\d+)') { $udpStart = [int]$Matches[1] }
+            if ($line -match 'Number of Ports\s*:\s*(\d+)') { $udpNum = [int]$Matches[1] }
+        }
+    }
+    if ($tcpDynamicV4) {
+        foreach ($line in $tcpDynamicV4) {
+            if ($line -match 'Start Port\s*:\s*(\d+)') { $tcpStart = [int]$Matches[1] }
+            if ($line -match 'Number of Ports\s*:\s*(\d+)') { $tcpNum = [int]$Matches[1] }
+        }
+    }
+
+    $isUdpConstrained = ($udpNum -and $udpNum -lt 30000 -and $tcpNum -ge 30000)
+    $udpRangeStr = if ($udpStart -and $udpNum) { "$udpStart-$($udpStart + $udpNum - 1) ($udpNum ports)" } else { "Default" }
+    $tcpRangeStr = if ($tcpStart -and $tcpNum) { "$tcpStart-$($tcpStart + $tcpNum - 1) ($tcpNum ports)" } else { "Default" }
+
     foreach ($a in $adapters) {
         $speedDuplex = Get-NetAdapterAdvancedProperty -Name $a.Name -DisplayName "Speed & Duplex" -ErrorAction SilentlyContinue
         $sdVal = if ($speedDuplex) { $speedDuplex.DisplayValue } else { "N/A" }
@@ -297,6 +319,9 @@ function Get-DcNetworkHealth {
             SpeedDuplex          = $sdVal
             PriorityVLAN         = $vlanVal
             IsIntel25G           = $isIntel25G
+            UdpPortRange         = $udpRangeStr
+            TcpPortRange         = $tcpRangeStr
+            IsUdpConstrained     = $isUdpConstrained
         })
     }
 

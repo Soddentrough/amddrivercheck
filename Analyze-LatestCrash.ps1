@@ -159,14 +159,19 @@ param(
 $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-# Import Modular Engine
+# Import Unified Modular Engine
 $modulesDir = Join-Path $PSScriptRoot "scripts\modules"
-Import-Module (Join-Path $modulesDir "DcCrashDump.psm1") -Force
-Import-Module (Join-Path $modulesDir "DcEngineLogs.psm1") -Force
-Import-Module (Join-Path $modulesDir "DcSystemTelemetry.psm1") -Force
-Import-Module (Join-Path $modulesDir "DcHardwareHealth.psm1") -Force
-Import-Module (Join-Path $modulesDir "DcRemediation.psm1") -Force
-Import-Module (Join-Path $modulesDir "DcReportGenerator.psm1") -Force
+$rootModule = Join-Path $modulesDir "DriverCheck.psm1"
+if (Test-Path $rootModule) {
+    Import-Module $rootModule -Force
+} else {
+    Import-Module (Join-Path $modulesDir "DcCrashDump.psm1") -Force
+    Import-Module (Join-Path $modulesDir "DcEngineLogs.psm1") -Force
+    Import-Module (Join-Path $modulesDir "DcSystemTelemetry.psm1") -Force
+    Import-Module (Join-Path $modulesDir "DcHardwareHealth.psm1") -Force
+    Import-Module (Join-Path $modulesDir "DcRemediation.psm1") -Force
+    Import-Module (Join-Path $modulesDir "DcReportGenerator.psm1") -Force
+}
 
 # Determine Scan Mode & Temporal Windows
 $isCustomHours = ($PSBoundParameters.ContainsKey('Hours') -and $Hours -gt 0)
@@ -532,7 +537,7 @@ if (-not $Quiet) {
         }
     }
 
-    if ($telemetry.WheaErrors.Count -eq 0 -and $telemetry.TdrEvents.Count -eq 0 -and $telemetry.KernelBugChecks.Count -eq 0 -and $telemetry.AbruptReboots.Count -eq 0 -and $telemetry.NetworkDrops.Count -eq 0) {
+    if ($telemetry.WheaErrors.Count -eq 0 -and $telemetry.TdrEvents.Count -eq 0 -and $telemetry.KernelBugChecks.Count -eq 0 -and $telemetry.AbruptReboots.Count -eq 0 -and $telemetry.NetworkDrops.Count -eq 0 -and $telemetry.PciDeviceResets.Count -eq 0 -and $telemetry.UdpPortExhaustions.Count -eq 0 -and $telemetry.CpuThrottlingEvents.Count -eq 0) {
         Write-Host "  [ OK ] No GPU driver TDR resets, Kernel BugChecks, network drops, or hardware errors in event telemetry." -ForegroundColor Green
     }
     Write-Host ""
@@ -638,289 +643,40 @@ if (-not $Quiet) {
 
     foreach ($net in $netHealth) {
         Write-Host "  Adapter: $($net.Name) ($($net.InterfaceDescription))" -ForegroundColor White
-        Write-Host "    +- Status: $($net.Status) | Speed/Duplex: $($net.SpeedDuplex) | VLAN: $($net.PriorityVLAN)" -ForegroundColor DarkGray
+        $portStr = if ($net.UdpPortRange) { " | UDP Ports: $($net.UdpPortRange)" } else { "" }
+        Write-Host "    +- Status: $($net.Status) | Speed/Duplex: $($net.SpeedDuplex) | VLAN: $($net.PriorityVLAN)$portStr" -ForegroundColor DarkGray
+        if ($net.IsUdpConstrained) {
+            Write-Host "    [!] CAUTION: UDP dynamic port space is constrained ($($net.UdpPortRange) vs TCP $($net.TcpPortRange))." -ForegroundColor Yellow
+            Write-Host "        Bursty matchmaking and server queries can exhaust UDP ports, causing socket drops." -ForegroundColor DarkYellow
+            Write-Host "        Remediation: run '.\Analyze-LatestCrash.ps1 -ExpandUdpPorts' as Administrator." -ForegroundColor DarkYellow
+        }
     }
     Write-Host ""
 }
 
 # -------------------------------------------------------------------------
-# EXECUTIVE ROOT CAUSE DETERMINATION (EVALUATED BY PRECEDENCE TIER)
+# EXECUTIVE ROOT CAUSE DETERMINATION (MULTI-FINDING RULE ENGINE)
 # -------------------------------------------------------------------------
-$rootCauseTitle = "SYSTEM HEALTHY"
-$rootCauseDesc = if ($scanMode -eq "LatestIncidentClean") {
-    "Scanned backward $MaxLookbackDays days across crash dumps, game engine logs, and event telemetry. No crash minidumps, GPU driver timeouts (TDR 4101), BSOD bugchecks, or unexpected shutdowns were detected."
-} else {
-    "No critical hardware faults, GPU driver crashes, or unhandled exceptions detected in the scan window."
-}
-$rootCauseGuidance = if ($scanMode -eq "LatestIncidentClean") {
-    "Your system has had no recorded crash dumps or driver timeouts in the past $MaxLookbackDays days. If you are experiencing in-game stutters or disconnects, check Tier 4 hardware health and game server status."
-} elseif ($scanMode -eq "LatestIncident" -and $incidentAnchor) {
-    "Telemetry surrounding the latest incident ($($incidentAnchor.Timestamp.ToString('yyyy-MM-dd HH:mm'))) reports no cascading hardware faults. If game crashes persist, verify game file integrity."
-} else {
-    "Your system is reporting normal stability telemetry. If you experienced a game crash, it may have terminated cleanly without writing a dump or occurred outside the current analysis window."
-}
-$rootCauseSeverity = "Healthy"
+$findingResult = Resolve-DcDiagnosticFindings `
+    -ParsedDumps $parsedDumps `
+    -Telemetry $telemetry `
+    -GpuHealth $gpuHealth `
+    -PnpIssues $pnpIssues `
+    -MotherboardHealth $mbHealth `
+    -DisplayHealth $displayHealth `
+    -KernelDriverHealth $kernelDriverHealth `
+    -NetworkHealth $netHealth `
+    -ZombieProcesses $zombieProcesses `
+    -ScanMode $scanMode `
+    -MaxLookbackDays $MaxLookbackDays `
+    -IncidentAnchor $incidentAnchor
 
-# Pre-screen for Steam Watchdog, Correlated Network Drops, User-Mode vs Kernel Watchdog Dumps
-$correlatedDrop = $null
-$steamWatchdogCrash = $null
-$userModeCrashes = @()
-$kernelWatchdogDumps = @()
-
-if ($parsedDumps.Count -gt 0) {
-    # Separate Kernel GPU Watchdog live dumps (LiveKernelReports / WATCHDOG / 0x141 / 0x193 / 0x117 / 0xA1000001) from User-Mode application crash dumps
-    $kernelWatchdogDumps = @($parsedDumps | Where-Object {
-        $_.ExceptionCode -match '(?i)^0x(00000141|00000193|00000117|A1000001|000001B8|000001A8)$' -or
-        ($_.IsKernelDump -and $_.FullName -match '(?i)LiveKernelReports|WATCHDOG')
-    })
-    $userModeCrashes = @($parsedDumps | Where-Object {
-        $_.ExceptionCode -and ($kernelWatchdogDumps -notcontains $_)
-    })
-
-    # Check for Steam Watchdog / Pipe Stall / MainLoop Stall signatures
-    $steamWatchdogCrash = $userModeCrashes | Where-Object {
-        ($_.Assertions -match '(?i)cross-thread pipe|pipes\.cpp|BMainLoop appears to have stalled') -or
-        ($_.ExceptionCode -eq "0x00000000" -and $_.FileName -match '(?i)crash_(steam|crimsondesert|stalker|gameoverlay)')
-    } | Select-Object -First 1
-
-    if ($steamWatchdogCrash -and ($telemetry.NetworkDrops.Count -gt 0 -or $telemetry.WlanFailovers.Count -gt 0)) {
-        $crashTime = $steamWatchdogCrash.Timestamp
-        $matchedNet = $telemetry.NetworkDrops | Where-Object {
-            [Math]::Abs(($_.TimeCreated - $crashTime).TotalMinutes) -le 10
-        } | Select-Object -First 1
-
-        if (-not $matchedNet) {
-            $matchedNet = $telemetry.WlanFailovers | Where-Object {
-                [Math]::Abs(($_.TimeCreated - $crashTime).TotalMinutes) -le 10
-            } | Select-Object -First 1
-        }
-
-        if ($matchedNet) {
-            $correlatedDrop = $matchedNet
-        }
-    }
-}
-
-$correlatedWatchdogNote = if ($kernelWatchdogDumps.Count -gt 0) {
-    $wdFirst = $kernelWatchdogDumps[0]
-    " Correlated with kernel GPU watchdog live dump $($wdFirst.FileName) ($($wdFirst.ExceptionCode) - $($wdFirst.ExceptionMeaning))."
-} else { "" }
-
-if ($steamWatchdogCrash -and $correlatedDrop) {
-    $gameTarget = if ($steamWatchdogCrash.FaultingModule -and $steamWatchdogCrash.FaultingModule -ne "Unknown") { $steamWatchdogCrash.FaultingModule } else { "the active game" }
-    $dropIface = if ($correlatedDrop.InterfaceName) { $correlatedDrop.InterfaceName } else { "Ethernet" }
-    $dropTime = $correlatedDrop.TimeCreated.ToString('HH:mm:ss')
-    
-    $rootCauseTitle = "STEAM WATCHDOG CRASH TRIGGERED BY NETWORK LINK DROP ($dropIface)"
-    $rootCauseDesc = "$gameTarget was terminated by Steam's internal watchdog assertion ('Assert( Stalled cross-thread pipe )') after Steam's engine loop stalled. Telemetry confirms this was triggered at $dropTime when $dropIface suffered an ARP probe failure (SuspectArpProbeFailed), causing Windows to initiate a Wi-Fi failover while game sockets were active."
-    $rootCauseGuidance = "1. Terminate lingering zombie Steam processes using '.\Analyze-LatestCrash.ps1 -KillHungSteam'.`n  2. (Recommended) Optimize Intel I225-V stability by running '.\Analyze-LatestCrash.ps1 -RepairNetwork' as Administrator (disables Packet Priority & VLAN while preserving active negotiated link speed, eliminating known I225-V ARP drops).`n  3. Disconnect or turn off Wi-Fi when plugged into Ethernet to prevent Windows from flapping between wired and wireless connections during gameplay."
-    $rootCauseSeverity = "Critical"
-} elseif ($steamWatchdogCrash) {
-    $gameTarget = if ($steamWatchdogCrash.FaultingModule -and $steamWatchdogCrash.FaultingModule -ne "Unknown") { $steamWatchdogCrash.FaultingModule } else { "the active game" }
-    $rootCauseTitle = "STEAM CROSS-THREAD PIPE WATCHDOG TERMINATION (pipes.cpp:672)"
-    $rootCauseDesc = "$gameTarget was terminated by Steam's internal cross-thread IPC pipe watchdog ('Assert( Stalled cross-thread pipe )'). Steam's main event loop hung or deadlocked, causing Steam to forcefully terminate itself, GameOverlay, and the attached game process."
-    $rootCauseGuidance = "1. Run '.\Analyze-LatestCrash.ps1 -KillHungSteam' to terminate lingering headless Steam processes.`n  2. Clear Steam browser cache with '.\Analyze-LatestCrash.ps1 -CleanSteamCache'.`n  3. If using an overlay or recording software, temporarily disable Steam Overlay in Steam Settings."
-    $rootCauseSeverity = "Critical"
-} elseif ($userModeCrashes.Count -gt 0) {
-    $firstCrash = $userModeCrashes | Select-Object -First 1
-    if ($firstCrash.IsShaderCompiler -or ($firstCrash.FaultingModule -match '(?i)amdxc|amdxx|nvwgf2|oo2core')) {
-        $rootCauseTitle = "SHADER COMPILATION / GRAPHICS RUNTIME CRASH ($($firstCrash.FaultingModule))"
-        $rootCauseDesc = "Exception $($firstCrash.ExceptionCode): $($firstCrash.ExceptionMeaning) in shader compiler / decompression DLL ($($firstCrash.FaultingModule)).$correlatedWatchdogNote"
-        $rootCauseGuidance = "Purge corrupt shader caches (including DX12 SM6 DxcCache) using '.\Analyze-LatestCrash.ps1 -CleanShaderCache'. Shader compilation places heavy AVX2/AVX-512 load across all CPU cores and RAM; if crashes persist, test CPU/RAM stability or disable aggressive PBO/Curve Optimizer undervolts."
-    } elseif ($firstCrash.ExceptionCode -match '0x887A0006|0x887A0005') {
-        $rootCauseTitle = "GRAPHICS DEVICE HUNG / REMOVED (0x887A0006 / 0x887A0005)"
-        $rootCauseDesc = "DirectX graphics device lost or timed out ($($firstCrash.ExceptionMeaning)) in $($firstCrash.FaultingModule) ($($firstCrash.FileName)).$correlatedWatchdogNote"
-        $hybridHint = if ($gpuHealth.HybridMultiGpu) { " On hybrid iGPU + dGPU systems, disable the unused CPU integrated GPU in BIOS or verify Windows Graphics Settings GPU preference / HAGS." } else { "" }
-        $rootCauseGuidance = "1. Purge DirectX & AMD DxcCache/DxCache shader caches using '.\Analyze-LatestCrash.ps1 -CleanShaderCache'.`n  2. Disable PCIe Link State Power Management (ASPM) using '.\Analyze-LatestCrash.ps1 -DisablePciePowerSavings'.`n  3. Check GPU temperatures and power cables, lower in-game ray tracing / VRAM texture settings, or clean reinstall GPU drivers.$hybridHint"
-    } elseif ($firstCrash.IsRogueKernelDriver -or ($firstCrash.FaultingModule -match '(?i)inpoutx64|inpout32|winring0|ene\.sys|asromgdrv|gdrv') -or $firstCrash.ExceptionCode -eq '0x00000093') {
-        $rootCauseTitle = "ROGUE KERNEL I/O DRIVER CRASH ($($firstCrash.FaultingModule) / INVALID_KERNEL_HANDLE 0x93)"
-        $rootCauseDesc = "Exception $($firstCrash.ExceptionCode): $($firstCrash.ExceptionMeaning) in legacy kernel driver '$($firstCrash.FaultingModule)' ($($firstCrash.FileName)). This legacy direct-hardware I/O port driver (commonly left behind by RGB or hardware monitoring utilities) bypasses modern Windows driver models. Under game anti-cheat engines (Easy Anti-Cheat, BattlEye, Vanguard) or Windows Memory Integrity, invalid handle usage causes game lockups (with audio continuing) or instant BSODs."
-        $rootCauseGuidance = "Disable the problematic driver service by running '.\Analyze-LatestCrash.ps1 -DisableRogueDrivers' or 'sc config inpoutx64 start= disabled' in an Administrator terminal. Modern lighting software will continue to operate normally without this legacy kernel driver."
-    } elseif ($firstCrash.ExceptionCode -match '0xC0000005') {
-        $rootCauseTitle = "APPLICATION MEMORY ACCESS VIOLATION (0xC0000005)"
-        $rootCauseDesc = "Exception 0xC0000005: Native memory access violation in $($firstCrash.FaultingModule) ($($firstCrash.FileName)).$correlatedWatchdogNote"
-        $rootCauseGuidance = "Memory access violation in $($firstCrash.FaultingModule). Verify game integrity via Steam/Launcher, purge shader caches ('`.\Analyze-LatestCrash.ps1 -CleanShaderCache'), and update Visual C++ Redistributables. If overclocked, test with stock memory/XMP timings."
-    } elseif ($firstCrash.FaultingModule -match '(?i)CrimsonDesert' -or ($telemetry.AppHangs | Where-Object { $_.Application -match '(?i)CrimsonDesert' })) {
-        $rootCauseTitle = "CRIMSON DESERT (BLACKSPACE ENGINE) GRAPHICS HANG & SHADER STALL"
-        $rootCauseDesc = "CrimsonDesert.exe stopped responding during scene/shader dispatch ($($firstCrash.ExceptionMeaning)). Mid-render TDRs leave uncommitted SQLite WAL journal files (.dxcache-wal, .dxcache-shm) in '%LOCALAPPDATA%\D3DSCache' and corrupted PSO cache blocks in '%LOCALAPPDATA%\AMD\DxCache', plus stale crash locks in Pearl Abyss DumpCache, causing subsequent game launches to fail or exit prematurely.$correlatedWatchdogNote"
-        $rootCauseGuidance = "1. Flush corrupted DirectX & AMD shader caches using '.\Analyze-LatestCrash.ps1 -CleanShaderCache'.`n  2. Purge stale crash locks and DumpCache using '.\Analyze-LatestCrash.ps1 -CleanConfig -Game CrimsonDesert'.`n  3. Fully exit and restart Steam to clear stale GameOverlay/IPC pipes.`n  4. If experiencing Intel I225-V Ethernet disconnects, run '.\Analyze-LatestCrash.ps1 -RepairNetwork' as Admin."
-    } else {
-        $rootCauseTitle = "UNHANDLED APPLICATION CRASH (Tier 1 Crash Dump)"
-        $rootCauseDesc = "Exception $($firstCrash.ExceptionCode): $($firstCrash.ExceptionMeaning) in $($firstCrash.FaultingModule) ($($firstCrash.FileName)).$correlatedWatchdogNote"
-        $rootCauseGuidance = "Verify game integrity via Steam/Launcher and report the faulting module ($($firstCrash.FaultingModule)) to the game developer."
-    }
-    $rootCauseSeverity = "Critical"
-} elseif ($telemetry.AppHangs | Where-Object { $_.Application -match '(?i)CrimsonDesert' }) {
-    $firstHang = $telemetry.AppHangs | Where-Object { $_.Application -match '(?i)CrimsonDesert' } | Select-Object -First 1
-    $rootCauseTitle = "CRIMSON DESERT (BLACKSPACE ENGINE) APPLICATION HANG (Event 1002)"
-    $rootCauseDesc = "CrimsonDesert.exe stopped interacting with Windows and was closed at $($firstHang.TimeCreated.ToString('HH:mm:ss')). Following a mid-render hang or TDR, corrupted DirectX 12/AMD shader cache files (.dxcache-wal, .dxcache-shm, .parc) and Pearl Abyss DumpCache locks prevent the game from loading."
-    $rootCauseGuidance = "1. Flush corrupted DirectX & AMD shader caches using '.\Analyze-LatestCrash.ps1 -CleanShaderCache'.`n  2. Purge stale crash locks and DumpCache using '.\Analyze-LatestCrash.ps1 -CleanConfig -Game CrimsonDesert'.`n  3. Fully exit and restart Steam to refresh GameOverlay hooks.`n  4. If experiencing Intel I225-V Ethernet disconnects, run '.\Analyze-LatestCrash.ps1 -RepairNetwork' as Admin."
-    $rootCauseSeverity = "Critical"
-} elseif ($gpuHealth.DualGpuConflict) {
-    $rootCauseTitle = "DUAL-GPU DRIVER VERSION MISMATCH"
-    $rootCauseDesc = $gpuHealth.DualGpuDetails
-    $rootCauseGuidance = "Align both AMD display drivers using '.\Analyze-LatestCrash.ps1 -FixDrivers' or disable CPU Integrated Graphics in Motherboard BIOS if not using motherboard display ports."
-    $rootCauseSeverity = "Warning"
-} elseif ($telemetry.PcieWheaErrors.Count -gt 0) {
-    $firstPcie = $telemetry.PcieWheaErrors[0]
-    $rootCauseTitle = "PCIe BUS / RISER CABLE INTEGRITY ERROR (WHEA Event 17)"
-    $rootCauseDesc = "Windows detected PCIe link communication errors ($($telemetry.PcieWheaErrors.Count) incident(s)). This is frequently caused by PCIe 4.0/5.0 riser cables, loose GPU PCIe slot seating, or motherboard PCIe signal degradation.$correlatedWatchdogNote"
-    $rootCauseGuidance = "Reseat your graphics card. If using a vertical GPU mount or PCIe riser cable, test with the GPU plugged directly into the motherboard PCIe slot, or configure PCIe link speed to Gen 3 / Gen 4 in BIOS. Also ensure PCIe Link State Power Management is Off ('`.\Analyze-LatestCrash.ps1 -DisablePciePowerSavings')."
-    $rootCauseSeverity = "Critical"
-} elseif ($telemetry.MemoryExhaustion.Count -gt 0) {
-    $rootCauseTitle = "VIRTUAL MEMORY / COMMIT LIMIT EXHAUSTION (Event 2004)"
-    $rootCauseDesc = "Windows ran out of virtual memory / pagefile commit limit while games or shader compilation were active ($($telemetry.MemoryExhaustion.Count) incident(s))."
-    $rootCauseGuidance = "Ensure your Windows Paging File (Pagefile) is set to 'System managed size' on an SSD with at least 20 GB free space. Do not disable or severely restrict pagefile size."
-    $rootCauseSeverity = "Critical"
-} elseif ($telemetry.TdrEvents.Count -gt 0 -or $kernelWatchdogDumps.Count -gt 0) {
-    $hasHighBoostGpu = @($gpuHealth.Gpus | Where-Object { $_.IsHighBoostCard }).Count -gt 0
-    $hasAmdFullInstall = @($gpuHealth.Gpus | Where-Object { $_.AmdInstallType -like "*Full*" }).Count -gt 0
-    $isUlpsActive = if ($gpuHealth.IsUlpsEnabled -or ($telemetry.GraphicsDriverSettings -and $telemetry.GraphicsDriverSettings.IsUlpsEnabled)) { $true } else { $false }
-    $has0x193 = (@($telemetry.TdrEvents | Where-Object { $_.Code -eq '193' }).Count -gt 0) -or (@($kernelWatchdogDumps | Where-Object { $_.ExceptionCode -eq '0x00000193' }).Count -gt 0)
-    $tdrCountTotal = [math]::Max($telemetry.TdrEvents.Count, $kernelWatchdogDumps.Count)
-    $dumpDetailSuffix = if ($kernelWatchdogDumps.Count -gt 0) {
-        $wd = $kernelWatchdogDumps[0]
-        " Kernel watchdog dump captured: $($wd.FileName) ($($wd.ExceptionCode) - $($wd.ExceptionMeaning) in $($wd.FaultingIP))."
-    } else { "" }
-
-    # Check if TDR / Watchdog occurred shortly after wake from sleep
-    $sleepTdr = $null
-    if ($telemetry.SleepTransitions -and $telemetry.SleepTransitions.Count -gt 0) {
-        foreach ($tdr in $telemetry.TdrEvents) {
-            $matchingWake = @($telemetry.SleepTransitions | Where-Object {
-                $sec = ($tdr.TimeCreated - $_.WakeTime).TotalSeconds
-                $sec -ge -10 -and $sec -le 180
-            })
-            if ($matchingWake.Count -gt 0) {
-                $sleepTdr = [PSCustomObject]@{
-                    Tdr  = $tdr
-                    Wake = $matchingWake[0]
-                }
-                break
-            }
-        }
-        if (-not $sleepTdr -and $kernelWatchdogDumps.Count -gt 0) {
-            foreach ($kdmp in $kernelWatchdogDumps) {
-                $matchingWake = @($telemetry.SleepTransitions | Where-Object {
-                    $sec = ($kdmp.Timestamp - $_.WakeTime).TotalSeconds
-                    $sec -ge -10 -and $sec -le 180
-                })
-                if ($matchingWake.Count -gt 0) {
-                    $sleepTdr = [PSCustomObject]@{
-                        Tdr  = [PSCustomObject]@{ TimeCreated = $kdmp.Timestamp; Meaning = $kdmp.ExceptionMeaning }
-                        Wake = $matchingWake[0]
-                    }
-                    break
-                }
-            }
-        }
-    }
-
-    if ($sleepTdr) {
-        $rootCauseTitle = "GPU DRIVER TIMEOUT ON WAKE FROM SLEEP (TDR 0x141 / AMD WATCHDOG)"
-        $diffSec = [math]::Round([math]::Abs(($sleepTdr.Tdr.TimeCreated - $sleepTdr.Wake.WakeTime).TotalSeconds))
-        $rootCauseDesc = "The GPU display driver stopped responding and triggered a watchdog recovery ($($sleepTdr.Tdr.Meaning)) at $($sleepTdr.Tdr.TimeCreated.ToString('HH:mm:ss')), within ${diffSec}s of waking from sleep (Wake Source: $($sleepTdr.Wake.WakeSource)).$dumpDetailSuffix"
-        $remedies = [System.Collections.Generic.List[string]]::new()
-        $remedies.Add("(Recommended - Zero Power Impact) Increase TdrDelay and TdrDdiDelay to 8-10 seconds in HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers. High-refresh 4K HDMI 2.1 link training and display handshakes on wake take several seconds, exceeding Windows' default 2-second watchdog threshold. Extending the timeout allows the link to finish initializing while fully preserving all sleep and power-saving states.")
-        $remedies.Add("Verify HDMI 2.1 cable integrity (Ultra High Speed 48 Gbps certified) and check TV standby / Quick Start+ settings to ensure display handshakes respond promptly.")
-        $remedies.Add("(Temporary Workaround / Last Resort Only) If timeouts persist after optimizing TdrDelay, test disabling Ultra-Low Power State (ULPS) via '.\scripts\Repair-GpuSleepSettings.ps1 -DisableUlps' to isolate deep-sleep wake latency. Re-enable after testing to maintain system power efficiency.")
-        $remedies.Add("Run '.\Analyze-LatestCrash.ps1 -RepairGpuSleep' or '.\scripts\Repair-GpuSleepSettings.ps1' as Administrator to apply the zero-power-impact TDR timeout fix.")
-        $rootCauseGuidance = $remedies -join "`n  * "
-        $rootCauseSeverity = "Critical"
-    } elseif ($telemetry.PciePowerManagement.IsEnabled) {
-        $codeLabel = if ($has0x193) { "TDR 0x141 / DXGKRNL 0x193" } else { "TDR / 0x141" }
-        $rootCauseTitle = "GPU DISPLAY DRIVER TIMEOUT ($codeLabel) - PCIE POWER SAVINGS ACTIVE"
-        $rootCauseDesc = "The GPU display driver stopped responding or hit a DirectX graphics kernel watchdog timeout ($tdrCountTotal incident(s)).$dumpDetailSuffix Windows PCIe Link State Power Management (ASPM) is currently ENABLED ('$($telemetry.PciePowerManagement.ACSettingName)') in power plan '$($telemetry.PciePowerManagement.SchemeName)'. When the PCIe link enters low-power L0s/L1 states during idle or bursty D3D12 load, resumption latency spikes cause the graphics watchdog to timeout."
-        $remedyList = [System.Collections.Generic.List[string]]::new()
-        $remedyList.Add("Disable PCIe Link State Power Management using '.\Analyze-LatestCrash.ps1 -DisablePciePowerSavings' or '.\scripts\Repair-PciePowerSettings.ps1'.")
-        $remedyList.Add("Purge DirectX & AMD DxcCache/DxCache shader caches using '.\Analyze-LatestCrash.ps1 -CleanShaderCache' (corrupt UE5 / D3D12 SM6 shaders frequently trigger mid-render TDRs and 0x193 deadlocks).")
-        $remedyList.Add("If using a PCIe Gen 5 GPU (e.g. RX 9070 XT / RTX 50-series) on a PCIe Gen 4/5 motherboard or riser cable, manually set PCIEX16 Link Speed to Gen 4 in BIOS to eliminate link retraining stalls.")
-        if ($hasHighBoostGpu) {
-            $remedyList.Add("Enthusiast High-Boost GPU Detected: Test applying a -100 MHz to -150 MHz Max Frequency offset in AMD Software Tuning to prevent transient voltage droop under bursty UE5 D3D12 loads.")
-        }
-        if ($gpuHealth.HybridMultiGpu) {
-            $remedyList.Add("Hybrid Multi-GPU Detected: Disable the unused CPU integrated GPU (iGPU) in Motherboard BIOS or test toggling Hardware-Accelerated GPU Scheduling (HAGS) in Windows Graphics Settings to prevent dxgkrnl cross-adapter synchronization deadlocks (0x193).")
-        }
-        $rootCauseGuidance = $remedyList -join "`n  * "
-        $rootCauseSeverity = "Critical"
-    } else {
-        $codeLabel = if ($has0x193) { "TDR 0x141 / DXGKRNL 0x193 WATCHDOG" } else { "TDR / 0x141" }
-        $rootCauseTitle = "GPU DISPLAY DRIVER TIMEOUT ($codeLabel)"
-        $rootCauseDesc = "The GPU display driver stopped responding or experienced a DirectX graphics kernel watchdog timeout ($tdrCountTotal incident(s)).$dumpDetailSuffix"
-        $remedyList = [System.Collections.Generic.List[string]]::new()
-        $remedyList.Add("Purge DirectX & AMD DxcCache/DxCache shader caches using '.\Analyze-LatestCrash.ps1 -CleanShaderCache' (corrupt UE5 / D3D12 SM6 shaders frequently trigger mid-render TDRs and 0x193 ProcessDeadlockThread dumps).")
-        $remedyList.Add("Clean reinstall your graphics driver using AMD Clean Utility or DDU in Safe Mode.")
-        $remedyList.Add("If using a PCIe Gen 5 GPU (e.g. RX 9070 XT / RTX 50-series) on a PCIe Gen 4/5 motherboard or riser cable, manually configure PCIEX16 Link Speed to Gen 4 in BIOS to eliminate link negotiation hangs.")
-        if ($hasHighBoostGpu) {
-            $remedyList.Add("Enthusiast GPU Detected: Factory boost targets often exceed silicon stability in bursty UE5 D3D12 workloads. Test applying a -100 MHz offset or capping Max Frequency in AMD Software Tuning to prevent transient voltage droop.")
-        }
-        if ($gpuHealth.HybridMultiGpu) {
-            $remedyList.Add("Hybrid Multi-GPU Detected: Disable the unused CPU integrated GPU (iGPU) in Motherboard BIOS or test toggling Hardware-Accelerated GPU Scheduling (HAGS) in Windows Graphics Settings to prevent dxgkrnl cross-adapter deadlocks (0x193).")
-        }
-        if ($hasAmdFullInstall) {
-            $remedyList.Add("AMD Adrenalin Full Install: Test a clean 'Driver Only' installation to eliminate potential background overlay and hook contention.")
-        }
-        $rootCauseGuidance = $remedyList -join "`n  * "
-    }
-    $rootCauseSeverity = "Critical"
-} elseif ($telemetry.KernelBugChecks.Count -gt 0) {
-    $firstBc = $telemetry.KernelBugChecks[0]
-    $rootCauseTitle = "KERNEL BUGCHECK BSOD ($($firstBc.Code))"
-    $rootCauseDesc = "$($firstBc.Meaning) - $($firstBc.Message)"
-    $rootCauseGuidance = "A kernel driver caused a fatal system fault. Check Tier 4 hardware devices for missing or uninstalled drivers."
-    $rootCauseSeverity = "Critical"
-} elseif ($telemetry.WheaErrors.Count -gt 0) {
-    $firstWhea = $telemetry.WheaErrors[0]
-    $rootCauseTitle = "WHEA HARDWARE ARCHITECTURE ERROR (Event $($firstWhea.Id))"
-    $rootCauseDesc = "A fatal or corrected hardware exception was reported by the CPU/motherboard hardware subsystem ($($firstWhea.Message))."
-    $rootCauseGuidance = "This indicates hardware or bus instability (CPU undervolt, unstable memory EXPO/XMP, or overheating). Disable CPU Curve Optimizer or RAM overclocks to restore baseline stability."
-    $rootCauseSeverity = "Critical"
-} elseif ($telemetry.AbruptReboots.Count -gt 0 -and ($telemetry.AbruptReboots | Where-Object { $_.BugcheckCode -eq 0 })) {
-    $rootCauseTitle = "DIRTY POWER RESET / INSTANT BLACK SCREEN (Event 41 BugcheckCode 0)"
-    $rootCauseDesc = "The system lost power or restarted abruptly without generating a BugCheck crash dump ($($telemetry.AbruptReboots.Count) incident(s))."
-    $rootCauseGuidance = "When occurring during gaming or 3D load, this typically points to PSU transient spike trips (GPU power draw exceeding PSU peak wattage), loose 12VHPWR/PCIe 8-pin power cables, or aggressive GPU power limits."
-    $rootCauseSeverity = "Warning"
-} elseif ($pnpIssues.Count -gt 0) {
-    $rootCauseTitle = "HARDWARE DEVICE ERRORS / MISSING DRIVERS"
-    $rootCauseDesc = "$($pnpIssues.Count) device(s) are reporting errors or missing drivers in Windows Device Manager."
-    $rootCauseGuidance = "Install official motherboard chipset drivers and check Device Manager for yellow exclamation marks."
-    $rootCauseSeverity = "Warning"
-} elseif ($mbHealth -and -not $mbHealth.IsHealthy) {
-    $rootCauseTitle = "MISSING MOTHERBOARD CHIPSET CONTROLLERS"
-    $rootCauseDesc = "One or more core motherboard platform controllers ($($mbHealth.MissingControllers -join ', ')) are missing official drivers or reporting errors. This can cause PCIe link instability, USB disconnects, and intermittent driver hangs."
-    $rootCauseGuidance = "Download and install the latest official chipset drivers from your motherboard manufacturer's support site or AMD.com / Intel.com ($($mbHealth.Summary))."
-    $rootCauseSeverity = "Warning"
-} elseif ($telemetry.FastStartup.FastStartupEnabled -and $telemetry.AbruptReboots.Count -gt 0) {
-    $rootCauseTitle = "ABRUPT REBOOT WITH FAST STARTUP ENABLED"
-    $rootCauseDesc = "The system experienced unexpected reboots while Windows Fast Startup was enabled."
-    $rootCauseGuidance = "Disable Windows Fast Startup (Control Panel -> Power Options -> Choose what the power buttons do -> Turn off Fast Startup) to ensure clean cold reboots."
-    $rootCauseSeverity = "Warning"
-} elseif ($displayHealth.HighRiskTimingsDetected) {
-    $rootCauseTitle = "DISPLAYPORT BANDWIDTH / MONITOR SCALER INSTABILITY (EDID OVERCLOCK)"
-    $rootCauseDesc = if ($displayHealth.RiskSummary) { $displayHealth.RiskSummary } else { "Connected display has aggressive factory overclock timings exceeding DisplayPort 1.2a / scaler bandwidth thresholds." }
-    $rootCauseGuidance = if ($displayHealth.Guidance) { $displayHealth.Guidance } else { "Lower monitor refresh rate (e.g. from 165Hz to 144Hz) in Windows Advanced Display Settings, or configure CVT-Reduced Blanking (CVT-RB) in Custom Resolution Utility (CRU) to reduce pixel clock below 580 MHz." }
-    $rootCauseSeverity = "Warning"
-} elseif ($kernelDriverHealth.RogueDriversDetected) {
-    $rootCauseTitle = "ROGUE KERNEL I/O DRIVER HAZARD (RGB / DIRECT PORT ACCESS)"
-    $rootCauseDesc = $kernelDriverHealth.RiskSummary
-    $rootCauseGuidance = $kernelDriverHealth.Guidance
-    $rootCauseSeverity = "Warning"
-} elseif ($telemetry.PciePowerManagement.IsEnabled -and ($telemetry.AbruptReboots.Count -gt 0 -or $telemetry.UnexpectedShutdowns.Count -gt 0)) {
-    $rootCauseTitle = "PCIE LINK STATE POWER MANAGEMENT (ASPM) INSTABILITY"
-    $rootCauseDesc = "The system experienced unexpected reboots or sleep-wake issues while PCIe Link State Power Management was enabled ($($telemetry.PciePowerManagement.ACSettingName))."
-    $rootCauseGuidance = "Disable PCIe Link State Power Management using '.\Analyze-LatestCrash.ps1 -DisablePciePowerSavings' or '.\scripts\Repair-PciePowerSettings.ps1'."
-    $rootCauseSeverity = "Warning"
-} elseif ($zombieProcesses.Count -gt 0) {
-    $rootCauseTitle = "ACTIVE ZOMBIE / HUNG STEAM PROCESS"
-    $rootCauseDesc = "steam.exe (PID: $($zombieProcesses[0].PID)) is lingering headless in background, blocking the single-instance mutex and preventing relaunch."
-    $rootCauseGuidance = "Run '.\Analyze-LatestCrash.ps1 -KillHungSteam' or terminate steam.exe in Task Manager."
-    $rootCauseSeverity = "Warning"
-}
-
-# Post-Crash Zombie Process Advisory
-if ($zombieProcesses.Count -gt 0 -and $rootCauseTitle -notmatch 'ACTIVE ZOMBIE') {
-    $rootCauseGuidance += "`n  * Post-Crash Cleanup: steam.exe (PID: $($zombieProcesses[0].PID)) is currently stuck as a zombie process from this crash; run '.\Analyze-LatestCrash.ps1 -KillHungSteam' to terminate it before relaunching Steam."
-}
+$rootCauseTitle = $findingResult.RootCauseTitle
+$rootCauseDesc = $findingResult.RootCauseDescription
+$rootCauseGuidance = $findingResult.RootCauseGuidance
+$rootCauseSeverity = $findingResult.RootCauseSeverity
+$allFindings = @($findingResult.Findings)
+$secondaryFindings = @($findingResult.SecondaryFindings)
 
 # -------------------------------------------------------------------------
 # HISTORICAL RESOLVED TIMEOUT & SYSTEM CHANGE CORRELATION
@@ -1005,12 +761,28 @@ if (-not $Quiet) {
     Write-Host "========================================================================" -ForegroundColor Cyan
     Write-Host ""
     $color = if ($rootCauseSeverity -eq "Critical") { [ConsoleColor]::Red } elseif ($rootCauseSeverity -eq "Warning") { [ConsoleColor]::Yellow } else { [ConsoleColor]::Green }
-    Write-Host "  [ $rootCauseTitle ]" -ForegroundColor $color
+    Write-Host "  [ PRIMARY FINDING: $rootCauseTitle ]" -ForegroundColor $color
     Write-Host "  $rootCauseDesc" -ForegroundColor White
     Write-Host ""
     Write-Host "  [ ACTIONABLE GUIDANCE ]:" -ForegroundColor Green
     Write-Host "  * $rootCauseGuidance" -ForegroundColor White
     Write-Host ""
+
+    if ($secondaryFindings.Count -gt 0) {
+        Write-Host "  ----------------------------------------------------------------------" -ForegroundColor DarkGray
+        Write-Host "  [ CONCURRENT / SECONDARY FINDINGS ($($secondaryFindings.Count)) ]:" -ForegroundColor Yellow
+        Write-Host ""
+        $secIdx = 2
+        foreach ($sf in $secondaryFindings) {
+            $sfColor = if ($sf.Severity -eq "Critical") { [ConsoleColor]::Red } elseif ($sf.Severity -eq "Warning") { [ConsoleColor]::Yellow } else { [ConsoleColor]::Cyan }
+            Write-Host "  [$secIdx] [$($sf.Severity.ToUpper())] $($sf.Title)" -ForegroundColor $sfColor
+            Write-Host "      $($sf.Description)" -ForegroundColor Gray
+            Write-Host "      Fix: $($sf.Guidance)" -ForegroundColor DarkCyan
+            Write-Host ""
+            $secIdx++
+        }
+    }
+
     Write-Host "========================================================================" -ForegroundColor Cyan
     Write-Host "  DIAGNOSTIC REPORT COMPLETE" -ForegroundColor Cyan
     Write-Host "========================================================================" -ForegroundColor Cyan
@@ -1030,6 +802,8 @@ $reportObject = [PSCustomObject]@{
     RootCauseDescription = $rootCauseDesc
     RootCauseGuidance    = $rootCauseGuidance
     RootCauseSeverity    = $rootCauseSeverity
+    Findings             = $allFindings
+    SecondaryFindings    = $secondaryFindings
     ResolvedHistory      = $resolvedHistory
     Dumps                = @($parsedDumps)
     ZombieProcesses      = @($zombieProcesses)
