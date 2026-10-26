@@ -153,7 +153,13 @@ param(
     [switch]$KillHungSteam,
 
     [Parameter(Mandatory = $false)]
-    [switch]$Quiet
+    [switch]$Quiet,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$NoInteractive,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$PassThru
 )
 
 $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -171,6 +177,89 @@ if (Test-Path $rootModule) {
     Import-Module (Join-Path $modulesDir "DcHardwareHealth.psm1") -Force
     Import-Module (Join-Path $modulesDir "DcRemediation.psm1") -Force
     Import-Module (Join-Path $modulesDir "DcReportGenerator.psm1") -Force
+}
+
+$isCustomHours = ($PSBoundParameters.ContainsKey('Hours') -and $Hours -gt 0)
+
+# Execute Dedicated Remediation or Audit Switches Immediately (Fast-Path before Event Log Scans)
+$ranDedicatedSwitch = $false
+if ($KillHungSteam -and -not $CleanSteamCache) {
+    Write-Host "`n=== HUNG / ZOMBIE PROCESS TERMINATOR ===" -ForegroundColor Magenta
+    Stop-DcZombieProcesses
+    Write-Host "`n[DONE] Process termination routine complete." -ForegroundColor Green
+    $ranDedicatedSwitch = $true
+}
+if ($CleanSteamCache) {
+    Write-Host "`n=== STEAM CEF HTML BROWSER CACHE CLEANER ===" -ForegroundColor Magenta
+    Clear-DcSteamCache -KillRunningSteam:$KillHungSteam
+    $ranDedicatedSwitch = $true
+}
+if ($CleanShaderCache) {
+    Write-Host "`n=== DIRECTX & GPU SHADER CACHE PURGE ===" -ForegroundColor Magenta
+    Clear-DcShaderCache -Target $ShaderTarget
+    Write-Host "`n[DONE] Shader cache cleaning complete." -ForegroundColor Green
+    $ranDedicatedSwitch = $true
+}
+if ($CleanConfig) {
+    Write-Host "`n=== GAME CONFIGURATION & CACHE CLEANER (WITH BACKUPS) ===" -ForegroundColor Magenta
+    Clear-DcGameConfig -Game $Game -Backup
+    Write-Host "`n[DONE] Game configuration cleaning complete." -ForegroundColor Green
+    $ranDedicatedSwitch = $true
+}
+if ($DisablePciePowerSavings) {
+    & (Join-Path $PSScriptRoot "scripts\Repair-PciePowerSettings.ps1")
+    $ranDedicatedSwitch = $true
+}
+if ($RepairNetwork) {
+    Write-Host "`n=== NETWORK ADAPTER STABILITY OPTIMIZER ===" -ForegroundColor Magenta
+    Repair-DcEthernetSettings -Speed $Speed -ExpandUdpPorts:$ExpandUdpPorts
+    $ranDedicatedSwitch = $true
+}
+if ($ExpandUdpPorts -and -not $RepairNetwork) {
+    Write-Host "`n=== WINDOWS UDP EPHEMERAL PORT SPACE OPTIMIZER ===" -ForegroundColor Magenta
+    Repair-DcUdpPortRange
+    $ranDedicatedSwitch = $true
+}
+if ($RepairGpuSleep) {
+    & (Join-Path $PSScriptRoot "scripts\Repair-GpuSleepSettings.ps1") -DisableUlps:$DisableUlps
+    $ranDedicatedSwitch = $true
+}
+if ($FixDrivers) {
+    Write-Host "`n=== GPU DRIVER STORE ALIGNMENT & DOWNGRADE PROTECTION ===" -ForegroundColor Magenta
+    Repair-DcAmdDriverAlignment -BlockWindowsUpdateDrivers
+    $ranDedicatedSwitch = $true
+}
+if ($DisableRogueDrivers) {
+    & (Join-Path $PSScriptRoot "scripts\Disable-RogueKernelDrivers.ps1")
+    $ranDedicatedSwitch = $true
+}
+if ($ranDedicatedSwitch) {
+    exit 0
+}
+if ($AuditPower) {
+    $pwrHours = if ($isCustomHours) { $Hours } else { 48 }
+    & (Join-Path $PSScriptRoot "scripts\Get-PowerAndSleepDiagnostics.ps1") -Hours $pwrHours
+    exit 0
+}
+if ($AuditDevices) {
+    & (Join-Path $PSScriptRoot "scripts\Get-PnpDeviceDiagnostics.ps1")
+    exit 0
+}
+if ($AuditBluetooth) {
+    & (Join-Path $PSScriptRoot "scripts\Get-BluetoothDiagnostics.ps1")
+    exit 0
+}
+if ($AuditDisplays) {
+    & (Join-Path $PSScriptRoot "scripts\Get-DisplayDiagnostics.ps1")
+    exit 0
+}
+if ($AuditKernelDrivers) {
+    & (Join-Path $PSScriptRoot "scripts\Disable-RogueKernelDrivers.ps1")
+    exit 0
+}
+if ($AuditMotherboard) {
+    & (Join-Path $PSScriptRoot "scripts\Get-MotherboardAndChipsetDiagnostics.ps1")
+    exit 0
 }
 
 # Determine Scan Mode & Temporal Windows
@@ -320,8 +409,8 @@ if ($AuditMotherboard) {
 if (-not $Quiet) {
     Write-Host ""
     Write-Host "  +------------------------------------------------------------------------+" -ForegroundColor Cyan
-    Write-Host "  |          AUTOMATED SYSTEM & GAME CRASH DIAGNOSTIC SUITE               |" -ForegroundColor Cyan
-    Write-Host "  |             4-Tier Evidence Hierarchy Engine v4.5.0                   |" -ForegroundColor Cyan
+    Write-Host "  |            DriverCheck - Game & PC Crash Troubleshooter              |" -ForegroundColor Cyan
+    Write-Host "  |                  Crash Check & Report (v4.5.0)                       |" -ForegroundColor Cyan
     Write-Host "  +------------------------------------------------------------------------+" -ForegroundColor Cyan
     if ($scanMode -eq "InvestigateResolved") {
         Write-Host "  Scan Mode:    Historical Resolution Analysis (Past $MaxLookbackDays Days)" -ForegroundColor Cyan
@@ -352,7 +441,7 @@ if (-not $Quiet) {
 # -------------------------------------------------------------------------
 if (-not $Quiet) {
     Write-Host "========================================================================" -ForegroundColor Magenta
-    Write-Host "  TIER 1: CRASH DUMPS & BINARY THREAD INSPECTOR (PRIMARY GROUND TRUTH)" -ForegroundColor Magenta
+    Write-Host "  [1/4] CHECKING CRASH DUMPS" -ForegroundColor Magenta
     Write-Host "========================================================================" -ForegroundColor Magenta
     Write-Host ""
 }
@@ -422,7 +511,7 @@ if (-not $Quiet) { Write-Host "" }
 # -------------------------------------------------------------------------
 if (-not $Quiet) {
     Write-Host "========================================================================" -ForegroundColor Magenta
-    Write-Host "  TIER 2: APPLICATION & GAME ENGINE LOGS (SECONDARY EVIDENCE)" -ForegroundColor Magenta
+    Write-Host "  [2/4] CHECKING GAME & STEAM LOGS" -ForegroundColor Magenta
     Write-Host "========================================================================" -ForegroundColor Magenta
     Write-Host ""
 }
@@ -457,7 +546,7 @@ if (-not $Quiet) { Write-Host "" }
 # -------------------------------------------------------------------------
 if (-not $Quiet) {
     Write-Host "========================================================================" -ForegroundColor Magenta
-    Write-Host "  TIER 3: SYSTEM LOGS & HARDWARE TELEMETRY (TERTIARY TELEMETRY)" -ForegroundColor Magenta
+    Write-Host "  [3/4] CHECKING WINDOWS EVENT LOGS (GPU, POWER & NETWORK)" -ForegroundColor Magenta
     Write-Host "========================================================================" -ForegroundColor Magenta
     Write-Host ""
 }
@@ -548,7 +637,7 @@ if (-not $Quiet) {
 # -------------------------------------------------------------------------
 if (-not $Quiet) {
     Write-Host "========================================================================" -ForegroundColor Magenta
-    Write-Host "  TIER 4: SYSTEM CONFIGURATION & HARDWARE INVENTORY (CONTEXTUAL AUDIT)" -ForegroundColor Magenta
+    Write-Host "  [4/4] CHECKING HARDWARE & DRIVER STATUS" -ForegroundColor Magenta
     Write-Host "========================================================================" -ForegroundColor Magenta
     Write-Host ""
 }
@@ -757,27 +846,43 @@ if ($InvestigateResolved -or $scanMode -eq "LatestIncidentClean") {
 
 if (-not $Quiet) {
     Write-Host "========================================================================" -ForegroundColor Cyan
-    Write-Host "  EXECUTIVE ROOT CAUSE SUMMARY & GUIDANCE" -ForegroundColor Cyan
+    Write-Host "  CRASH CHECK SUMMARY & HOW TO FIX IT" -ForegroundColor Cyan
     Write-Host "========================================================================" -ForegroundColor Cyan
     Write-Host ""
     $color = if ($rootCauseSeverity -eq "Critical") { [ConsoleColor]::Red } elseif ($rootCauseSeverity -eq "Warning") { [ConsoleColor]::Yellow } else { [ConsoleColor]::Green }
-    Write-Host "  [ PRIMARY FINDING: $rootCauseTitle ]" -ForegroundColor $color
+    Write-Host "  Main Issue: $rootCauseTitle" -ForegroundColor $color
     Write-Host "  $rootCauseDesc" -ForegroundColor White
     Write-Host ""
-    Write-Host "  [ ACTIONABLE GUIDANCE ]:" -ForegroundColor Green
-    Write-Host "  * $rootCauseGuidance" -ForegroundColor White
+    Write-Host "  How to Fix:" -ForegroundColor Green
+    $primaryStepsToPrint = if ($findingResult.PrimaryFinding -and $findingResult.PrimaryFinding.PSObject.Properties['Steps'] -and $findingResult.PrimaryFinding.Steps.Count -gt 0 -and ($rootCauseGuidance -eq $findingResult.RootCauseGuidance)) {
+        @($findingResult.PrimaryFinding.Steps)
+    } else {
+        @($rootCauseGuidance -split '(?:\r?\n\s*(?:\*|\d+\.)\s*)|(?:\s+\*\s+)|(?:^\s*(?:\*|\d+\.)\s*)' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
+    $stepNum = 1
+    foreach ($st in $primaryStepsToPrint) {
+        Write-Host "    $stepNum. $($st.Trim())" -ForegroundColor White
+        $stepNum++
+    }
     Write-Host ""
 
     if ($secondaryFindings.Count -gt 0) {
         Write-Host "  ----------------------------------------------------------------------" -ForegroundColor DarkGray
-        Write-Host "  [ CONCURRENT / SECONDARY FINDINGS ($($secondaryFindings.Count)) ]:" -ForegroundColor Yellow
+        Write-Host "  Other Issues Found ($($secondaryFindings.Count)):" -ForegroundColor Yellow
         Write-Host ""
         $secIdx = 2
         foreach ($sf in $secondaryFindings) {
             $sfColor = if ($sf.Severity -eq "Critical") { [ConsoleColor]::Red } elseif ($sf.Severity -eq "Warning") { [ConsoleColor]::Yellow } else { [ConsoleColor]::Cyan }
             Write-Host "  [$secIdx] [$($sf.Severity.ToUpper())] $($sf.Title)" -ForegroundColor $sfColor
             Write-Host "      $($sf.Description)" -ForegroundColor Gray
-            Write-Host "      Fix: $($sf.Guidance)" -ForegroundColor DarkCyan
+            $sfStepsToPrint = if ($sf.PSObject.Properties['Steps'] -and $sf.Steps.Count -gt 0) {
+                @($sf.Steps)
+            } else {
+                @($sf.Guidance -split '(?:\r?\n\s*(?:\*|\d+\.)\s*)|(?:\s+\*\s+)|(?:^\s*(?:\*|\d+\.)\s*)' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            }
+            foreach ($sfs in $sfStepsToPrint) {
+                Write-Host "      -> $($sfs.Trim())" -ForegroundColor DarkCyan
+            }
             Write-Host ""
             $secIdx++
         }
@@ -870,4 +975,130 @@ if ($ExportZip) {
     }
 }
 
-return $reportObject
+$recommendedActions = if ($findingResult.PSObject.Properties['RecommendedActions'] -and $findingResult.RecommendedActions) {
+    @($findingResult.RecommendedActions)
+} else {
+    @()
+}
+
+if (-not $Quiet -and -not $NoInteractive -and $recommendedActions.Count -gt 0) {
+    Write-Host ""
+    Write-Host "========================================================================" -ForegroundColor Green
+    Write-Host "  RECOMMENDED FIXES (SELECT TO APPLY NOW)" -ForegroundColor Green
+    Write-Host "========================================================================" -ForegroundColor Green
+    Write-Host ""
+    $isAdminNow = Test-DcIsAdmin
+    for ($i = 0; $i -lt $recommendedActions.Count; $i++) {
+        $act = $recommendedActions[$i]
+        $num = $i + 1
+        $adminTag = if ($act.RequiresAdmin -and -not $isAdminNow) { " [Requires Admin - UAC Prompt]" } elseif ($act.RequiresAdmin) { " [Admin]" } else { "" }
+        Write-Host "  [$num] $($act.Label)$adminTag" -ForegroundColor Yellow
+        Write-Host "      $($act.Description)" -ForegroundColor Gray
+    }
+    if ($recommendedActions.Count -gt 1) {
+        Write-Host "  [A] Apply All Recommended Fixes (1-$($recommendedActions.Count))" -ForegroundColor Cyan
+    }
+    Write-Host "  [Q] Skip / Exit without applying changes" -ForegroundColor DarkGray
+    Write-Host ""
+
+    $promptLabel = if ($recommendedActions.Count -gt 1) {
+        "Select fix(es) to run now (e.g. 1, 1,2, A=All, or Enter/Q to skip)"
+    } else {
+        "Run recommended fix [1] now? (1/Y=Run, Enter/Q=Skip)"
+    }
+
+    $choice = $null
+    try {
+        if ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
+            $choice = Read-Host "  $promptLabel"
+        }
+    } catch {
+        $choice = $null
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($choice)) {
+        $trimmedChoice = $choice.Trim()
+        $selectedActions = [System.Collections.Generic.List[object]]::new()
+
+        if ($trimmedChoice -match '^(?i)(a|all)$') {
+            foreach ($act in $recommendedActions) { $selectedActions.Add($act) }
+        } elseif ($trimmedChoice -match '^(?i)(y|yes)$' -and $recommendedActions.Count -eq 1) {
+            $selectedActions.Add($recommendedActions[0])
+        } elseif ($trimmedChoice -notmatch '^(?i)(q|quit|n|no|skip|exit)$') {
+            $tokens = $trimmedChoice -split '[,\s]+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+            foreach ($tok in $tokens) {
+                $idxNum = 0
+                if ([int]::TryParse($tok, [ref]$idxNum)) {
+                    if ($idxNum -ge 1 -and $idxNum -le $recommendedActions.Count) {
+                        $candidate = $recommendedActions[$idxNum - 1]
+                        if (-not ($selectedActions | Where-Object { $_.Id -eq $candidate.Id })) {
+                            $selectedActions.Add($candidate)
+                        }
+                    }
+                }
+            }
+        }
+
+        if ($selectedActions.Count -gt 0) {
+            Write-Host ""
+            $elevatedSwitches = [System.Collections.Generic.List[string]]::new()
+            foreach ($act in $selectedActions) {
+                if ($act.RequiresAdmin -and -not (Test-DcIsAdmin)) {
+                    switch ($act.Id) {
+                        "RepairNetwork"       { if (-not $elevatedSwitches.Contains("-RepairNetwork")) { $elevatedSwitches.Add("-RepairNetwork") } }
+                        "ExpandUdpPorts"      { if (-not $elevatedSwitches.Contains("-ExpandUdpPorts")) { $elevatedSwitches.Add("-ExpandUdpPorts") } }
+                        "RepairGpuSleep"      { if (-not $elevatedSwitches.Contains("-RepairGpuSleep")) { $elevatedSwitches.Add("-RepairGpuSleep") } }
+                        "FixDrivers"          { if (-not $elevatedSwitches.Contains("-FixDrivers")) { $elevatedSwitches.Add("-FixDrivers") } }
+                        "DisableRogueDrivers" { if (-not $elevatedSwitches.Contains("-DisableRogueDrivers")) { $elevatedSwitches.Add("-DisableRogueDrivers") } }
+                    }
+                    continue
+                }
+
+                Write-Host "  [RUNNING] $($act.Label)..." -ForegroundColor Cyan
+                switch ($act.Id) {
+                    "CleanShaderCache" {
+                        Clear-DcShaderCache -Target $ShaderTarget
+                    }
+                    "CleanConfigCrimsonDesert" {
+                        Clear-DcGameConfig -Game "CrimsonDesert" -Backup
+                    }
+                    "CleanSteamCache" {
+                        Clear-DcSteamCache
+                    }
+                    "KillHungSteam" {
+                        Stop-DcZombieProcesses
+                    }
+                    "DisablePciePowerSavings" {
+                        & (Join-Path $PSScriptRoot "scripts\Repair-PciePowerSettings.ps1")
+                    }
+                    "RepairNetwork" {
+                        Repair-DcEthernetSettings -Speed $Speed
+                    }
+                    "ExpandUdpPorts" {
+                        Repair-DcUdpPortRange
+                    }
+                    "RepairGpuSleep" {
+                        & (Join-Path $PSScriptRoot "scripts\Repair-GpuSleepSettings.ps1") -DisableUlps:$DisableUlps
+                    }
+                    "FixDrivers" {
+                        Repair-DcAmdDriverAlignment -BlockWindowsUpdateDrivers
+                    }
+                    "DisableRogueDrivers" {
+                        & (Join-Path $PSScriptRoot "scripts\Disable-RogueKernelDrivers.ps1")
+                    }
+                }
+            }
+
+            if ($elevatedSwitches.Count -gt 0) {
+                Write-Host "  [ADMIN ELEVATION] Launching elevated session for: $($elevatedSwitches -join ' ')..." -ForegroundColor Yellow
+                [void](Request-DcAdminElevation -ScriptPath $PSCommandPath -Arguments @($elevatedSwitches) -Wait)
+            }
+            Write-Host ""
+            Write-Host "  [COMPLETE] Selected remediation actions finished." -ForegroundColor Green
+        }
+    }
+}
+
+if ($Quiet -or $PassThru) {
+    return $reportObject
+}

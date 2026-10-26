@@ -398,16 +398,66 @@ function Export-DcHtmlReport {
         "Multi-GPU:      $($hw.HybridMultiGpuDetails)`n"
     } else { "" }
 
+    $formatGuidanceHtml = {
+        param([string]$RawGuidance, [object[]]$Steps = $null, [object[]]$Actions = $null)
+        $stepItems = [System.Collections.Generic.List[string]]::new()
+        if ($Steps -and $Steps.Count -gt 0) {
+            foreach ($st in $Steps) {
+                if (-not [string]::IsNullOrWhiteSpace($st)) { $stepItems.Add($st.Trim()) }
+            }
+        } elseif (-not [string]::IsNullOrWhiteSpace($RawGuidance)) {
+            $splitParts = @($RawGuidance -split '(?:\r?\n\s*(?:\*|\d+\.)\s*)|(?:\s+\*\s+)|(?:^\s*(?:\*|\d+\.)\s*)' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            foreach ($sp in $splitParts) {
+                $stepItems.Add($sp.Trim())
+            }
+        }
+        if ($stepItems.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($RawGuidance)) {
+            $stepItems.Add($RawGuidance.Trim())
+        }
+
+        $htmlLines = [System.Collections.Generic.List[string]]::new()
+        $htmlLines.Add("<ul class='guidance-list'>")
+        foreach ($item in $stepItems) {
+            $escaped = [System.Net.WebUtility]::HtmlEncode($item)
+            $escaped = $escaped -replace '^([^:]{3,52}):\s+', '<strong>$1:</strong> '
+            $escaped = $escaped -replace '^\((Recommended[^)]*)\)\s*', '<span class="badge-healthy" style="font-size:0.75rem;padding:2px 8px;border-radius:999px;margin-right:6px;">$1</span>'
+            $escaped = $escaped -replace "(&#39;|')(\.\\[^']+?)(&#39;|')", "<code class='badge-code'>`$2</code>"
+            $htmlLines.Add("<li>$escaped</li>")
+        }
+        $htmlLines.Add("</ul>")
+
+        if ($Actions -and $Actions.Count -gt 0) {
+            $pills = [System.Collections.Generic.List[string]]::new()
+            foreach ($act in $Actions) {
+                $admTag = if ($act.RequiresAdmin) { " (Admin)" } else { "" }
+                $lbl = [System.Net.WebUtility]::HtmlEncode("$($act.Label)$admTag")
+                $sw  = [System.Net.WebUtility]::HtmlEncode($act.SwitchHint)
+                $fullCmd = ".\Analyze-LatestCrash.ps1 $($act.SwitchHint)"
+                $fullCmdAttr = [System.Net.WebUtility]::HtmlEncode($fullCmd)
+                $pills.Add("<button type='button' class='action-pill' data-cmd='$fullCmdAttr' onclick='copyCliFix(this)' title='Click to copy command: $fullCmdAttr (or select in DriverCheck terminal menu)'>&#9889; $lbl <code>$sw</code> <span class='copy-hint'>[Copy Fix Cmd]</span></button>")
+            }
+            $htmlLines.Add("<div class='action-pill-row'><span class='action-pill-label'>Quick Fixes (click to copy command, or select in terminal):</span> " + ($pills -join " ") + "</div>")
+        }
+        return ($htmlLines -join "`n")
+    }
+
+    $primarySteps = if ($ReportData.PSObject.Properties['Findings'] -and $ReportData.Findings -and $ReportData.Findings.Count -gt 0 -and $ReportData.Findings[0].PSObject.Properties['Steps'] -and ($ReportData.RootCauseGuidance -eq $ReportData.Findings[0].Guidance)) { $ReportData.Findings[0].Steps } else { $null }
+    $primaryActions = if ($ReportData.PSObject.Properties['Findings'] -and $ReportData.Findings -and $ReportData.Findings.Count -gt 0 -and $ReportData.Findings[0].PSObject.Properties['Actions']) { $ReportData.Findings[0].Actions } else { $null }
+    $primaryGuidanceHtml = & $formatGuidanceHtml $ReportData.RootCauseGuidance $primarySteps $primaryActions
+
     $secondaryFindingsHtml = ""
     $secondaryDiscordSection = ""
     if ($ReportData.PSObject.Properties['SecondaryFindings'] -and $ReportData.SecondaryFindings -and $ReportData.SecondaryFindings.Count -gt 0) {
         $secCards = [System.Collections.Generic.List[string]]::new()
         $secDiscordLines = [System.Collections.Generic.List[string]]::new()
-        $secCards.Add("<div style='margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border);'><strong style='color: var(--yellow); font-size: 1.0rem;'>Concurrent / Secondary Findings ($($ReportData.SecondaryFindings.Count)):</strong>")
+        $secCards.Add("<div style='margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border);'><strong style='color: var(--yellow); font-size: 1.0rem;'>Other Issues Found ($($ReportData.SecondaryFindings.Count)):</strong>")
         $idx = 2
         foreach ($sf in $ReportData.SecondaryFindings) {
             $sfBadge = if ($sf.Severity -eq "Critical") { "<span class='badge-critical'>CRITICAL</span>" } elseif ($sf.Severity -eq "Warning") { "<span class='badge-warning'>WARNING</span>" } else { "<span class='badge-neutral'>$($sf.Severity)</span>" }
-            $secCards.Add("<div class='card-item' style='margin-top: 10px; background: rgba(15, 23, 42, 0.7);'><div class='card-header-row'><span class='file-name'>[$idx] $($sf.Title)</span>$sfBadge</div><div style='font-size: 0.92rem; margin-bottom: 6px;'>$($sf.Description)</div><div style='font-size: 0.88rem; color: var(--green);'><strong>Fix:</strong> $($sf.Guidance)</div></div>")
+            $sfSteps = if ($sf.PSObject.Properties['Steps']) { $sf.Steps } else { $null }
+            $sfActs  = if ($sf.PSObject.Properties['Actions']) { $sf.Actions } else { $null }
+            $sfGuidanceFormatted = & $formatGuidanceHtml $sf.Guidance $sfSteps $sfActs
+            $secCards.Add("<div class='card-item' style='margin-top: 10px; background: rgba(15, 23, 42, 0.7);'><div class='card-header-row'><span class='file-name'>[$idx] $($sf.Title)</span>$sfBadge</div><div style='font-size: 0.92rem; margin-bottom: 8px;'>$($sf.Description)</div><div class='guidance-box' style='margin-top: 6px; padding: 10px 14px;'><strong>Recommended Fix:</strong>$sfGuidanceFormatted</div></div>")
             $secDiscordLines.Add("  [$idx] [$($sf.Severity)] $($sf.Title) -> $($sf.Guidance)")
             $idx++
         }
@@ -467,7 +517,17 @@ function Export-DcHtmlReport {
     $parts.Add("        .executive-card { background: linear-gradient(135deg, rgba(35, 48, 82, 0.5) 0%, rgba(19, 27, 46, 0.8) 100%); border: 1px solid var(--border); border-radius: 12px; padding: 24px; margin-bottom: 24px; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3); }")
     $parts.Add("        .executive-card h2 { font-size: 1.3rem; margin-bottom: 8px; color: var(--cyan); }")
     $parts.Add("        .executive-card .root-cause { font-size: 1.15rem; font-weight: 600; color: #fff; margin-bottom: 12px; }")
-    $parts.Add("        .guidance-box { background: rgba(0, 0, 0, 0.3); border-left: 4px solid var(--green); padding: 12px 16px; margin-top: 12px; border-radius: 0 6px 6px 0; font-size: 0.95rem; }")
+    $parts.Add("        .guidance-box { background: rgba(0, 0, 0, 0.3); border-left: 4px solid var(--green); padding: 14px 18px; margin-top: 12px; border-radius: 0 8px 8px 0; font-size: 0.95rem; }
+        .guidance-list { margin: 8px 0 4px 20px; padding: 0; list-style-type: disc; }
+        .guidance-list li { margin-bottom: 8px; line-height: 1.55; color: #e2e8f0; }
+        .guidance-list li:last-child { margin-bottom: 0; }
+        .guidance-list li strong { color: var(--green); }
+        .action-pill-row { margin-top: 12px; padding-top: 10px; border-top: 1px dashed rgba(74, 222, 128, 0.25); display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+        .action-pill-label { font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--green); margin-right: 4px; }
+        .action-pill { display: inline-flex; align-items: center; gap: 6px; background: rgba(74, 222, 128, 0.12); border: 1px solid rgba(74, 222, 128, 0.35); color: #bbf7d0; padding: 6px 12px; border-radius: 6px; font-size: 0.82rem; font-weight: 600; cursor: pointer; font-family: inherit; transition: all 0.15s ease; }
+        .action-pill:hover { background: rgba(74, 222, 128, 0.25); border-color: var(--green); transform: translateY(-1px); }
+        .action-pill .copy-hint { font-size: 0.72rem; color: var(--green); opacity: 0.85; margin-left: 2px; }
+        .action-pill code { background: rgba(0, 0, 0, 0.4); color: var(--cyan); padding: 1px 5px; border-radius: 4px; font-family: monospace; font-size: 0.78rem; }")
     $parts.Add("        .section-title { font-size: 1.15rem; margin: 24px 0 12px 0; color: var(--magenta); display: flex; align-items: center; gap: 8px; }")
     $parts.Add("        .card-item { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 18px; margin-bottom: 12px; }")
     $parts.Add("        .card-header-row { display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 0.95rem; }")
@@ -524,28 +584,28 @@ function Export-DcHtmlReport {
     $parts.Add("        </div>")
     $parts.Add("        <input type='text' class='filter-input' id='reportFilter' placeholder='Search report, events, drivers, exception codes, and error logs...' onkeyup='filterReport()'>")
     $parts.Add("        <section class='executive-card'>")
-    $parts.Add("            <h2>Executive Root Cause & Actionable Guidance</h2>")
-    $parts.Add("            <div class='root-cause'>[Primary] $($ReportData.RootCauseTitle)</div>")
+    $parts.Add("            <h2>Crash Check Summary & How to Fix It</h2>")
+    $parts.Add("            <div class='root-cause'>Main Issue: $($ReportData.RootCauseTitle)</div>")
     $parts.Add("            <p>$($ReportData.RootCauseDescription)</p>")
     $parts.Add("            <div class='guidance-box'>")
-    $parts.Add("                <strong>Recommended Next Steps:</strong><br>")
-    $parts.Add("                $($ReportData.RootCauseGuidance)")
+    $parts.Add("                <strong>How to Fix:</strong>")
+    $parts.Add("                $primaryGuidanceHtml")
     $parts.Add("            </div>")
     if ($secondaryFindingsHtml) {
         $parts.Add($secondaryFindingsHtml)
     }
     $parts.Add("        </section>")
     if ($resolvedRows.Count -gt 0) {
-        $parts.Add("        <h3 class='section-title'>[HISTORICAL RESOLUTION] Past Timeout Episode & What Changed to Resolve It</h3>")
+        $parts.Add("        <h3 class='section-title'>Past Crash History & What Fixed It</h3>")
         $parts.Add(($resolvedRows -join "`n"))
     }
-    $parts.Add("        <h3 class='section-title'>[TIER 1] Crash Dumps & Exceptions (Primary Ground Truth)</h3>")
+    $parts.Add("        <h3 class='section-title'>1. Crash Dumps</h3>")
     $parts.Add(($dumpRows -join "`n"))
-    $parts.Add("        <h3 class='section-title'>[TIER 2] Game & Platform Logs (Secondary Evidence)</h3>")
+    $parts.Add("        <h3 class='section-title'>2. Game & Steam Logs</h3>")
     $parts.Add(($logRows -join "`n"))
-    $parts.Add("        <h3 class='section-title'>[TIER 3] System Logs & Telemetry (Tertiary Telemetry)</h3>")
+    $parts.Add("        <h3 class='section-title'>3. Windows System & Event Logs</h3>")
     $parts.Add(($telemRows -join "`n"))
-    $parts.Add("        <h3 class='section-title'>[TIER 4] Hardware & Driver Health (Contextual Audit)</h3>")
+    $parts.Add("        <h3 class='section-title'>4. Hardware & Driver Status</h3>")
     if ($mbRows.Count -gt 0) {
         $parts.Add("        <div style='margin-bottom: 12px;'>")
         $parts.Add("            <strong>Motherboard, BIOS & Platform Chipset Drivers:</strong>")
@@ -599,7 +659,27 @@ function Export-DcHtmlReport {
     $parts.Add("            el.style.display = txt.indexOf(q) !== -1 ? '' : 'none';")
     $parts.Add("        });")
     $parts.Add("    }")
-    $parts.Add("    </script>")
+    $parts.Add("    function copyCliFix(btn) {
+        var cmd = btn.getAttribute('data-cmd') || '';
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(cmd);
+        } else {
+            var ta = document.createElement('textarea');
+            ta.value = cmd;
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+        }
+        var hint = btn.querySelector('.copy-hint');
+        if (hint) {
+            var orig = hint.textContent;
+            hint.textContent = '[Copied to Clipboard!]';
+            hint.style.color = '#fff';
+            setTimeout(function() { hint.textContent = orig; hint.style.color = ''; }, 2000);
+        }
+    }
+    </script>")
     $parts.Add("</body>")
     $parts.Add("</html>")
 

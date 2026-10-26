@@ -30,7 +30,7 @@ Import-Module (Join-Path $modulesDir "DcRemediation.psm1") -Force
 
 Write-Host ""
 Write-Host "========================================================================" -ForegroundColor Cyan
-Write-Host "  GPU DRIVER DIAGNOSTICS & DOWNGRADE PREVENTION TOOL" -ForegroundColor Cyan
+Write-Host "  CHECK GPU DRIVER STATUS & VERSION" -ForegroundColor Cyan
 Write-Host "========================================================================" -ForegroundColor Cyan
 Write-Host ""
 

@@ -1,92 +1,77 @@
 ========================================================================
-  DRIVERCHECK - GPU & SYSTEM CRASH DIAGNOSTIC SUITE
+  DriverCheck - Game & PC Crash Troubleshooter
 ========================================================================
 
-QUICK START GUIDE:
+QUICK START:
 1. Extract all contents of this ZIP file to a folder.
 2. Double-click "Run-Diagnostics.bat"
-3. Select Option [1] "Diagnose Latest Crash & Open HTML Report" (Recommended).
-   (Or select Option [2] "Scan Full Incident History" for full 30-day incident logs).
-4. An interactive dark-mode HTML report (CrashReport_<timestamp>.html)
-   will automatically generate and open in your default browser.
+3. Select Option [1] "Crash check and Report".
+   (Or select Option [2] "Check full crash history" to scan all recent incidents).
+4. An HTML report (CrashReport_<timestamp>.html) will open in your browser,
+   and the terminal will show a numbered menu of any recommended fixes you
+   can apply right away.
 
 ------------------------------------------------------------------------
-WHAT THIS TOOL DIAGNOSES:
+WHAT THIS TOOL CHECKS:
 ------------------------------------------------------------------------
-1. GPU Driver Timeouts (TDR / Event 4101 / 0x141)
-   - Checks if the display driver hung or stopped responding.
-   - Diagnoses TdrDelay, TdrLevel, and Hardware Accelerated Scheduling.
+1. GPU Driver Timeouts (TDR / Event 4101 / 0x141 / 0x193)
+   - Checks if the display driver stopped responding or hit a watchdog timeout.
+   - Checks TdrDelay, TdrLevel, and Hardware-Accelerated GPU Scheduling.
 
-2. Shader Compilation Crashes & Shader Timeouts
+2. Shader Compilation Crashes & Corrupted Shader Caches
    - Identifies crashes in shader compiler DLLs (amdxc64.dll, amdxx64.dll,
      nvwgf2umx.dll, oo2core_*.dll).
-   - Distinguishes between corrupt shader caches and CPU/RAM instability
-     during heavy AVX2/AVX-512 shader compilation.
+   - Provides one-step shader cache cleanup (DirectX D3DSCache, AMD DxCache,
+     DxcCache, VkCache, and NVIDIA DXCache).
 
-3. Black Screens & Instant Reboots
-   - Correlates Kernel-Power Event 41 (BugcheckCode 0), unexpected shutdowns
-     (Event 6008), and PSU transient spike power trips.
+3. Black Screens & Unexpected Reboots
+   - Checks Kernel-Power Event 41 (BugcheckCode 0) and unexpected shutdowns
+     (Event 6008).
 
 4. PCIe Bus & Riser Cable Errors (WHEA Event 17)
-   - Scans WHEA-Logger for PCIe root port link communication errors caused
-     by PCIe 4.0/5.0 riser cables or loose GPU slot seating.
+   - Scans WHEA-Logger for PCIe link communication errors caused by riser
+     cables or slot seating issues.
 
 5. Out-of-Memory / Pagefile Exhaustion (Event 2004)
-   - Flags when games crash due to Windows running out of commit limit or
-     disabled/insufficient Windows Paging File.
+   - Flags when games crash because Windows ran out of virtual memory commit
+     space or has a disabled/undersized pagefile.
 
-6. Dual-GPU Driver Desync & Downgrade Prevention
-   - Detects driver version conflicts between AMD discrete Radeon GPUs and
-     integrated CPU graphics.
-   - Provides 1-click protection against Windows Update silently replacing
-     official graphics drivers with older OEM drivers.
+6. GPU Driver Status & Windows Update Overwrite Protection
+   - Detects driver version mismatches between discrete GPUs and integrated
+     CPU graphics.
+   - Can lock Windows Update from silently overwriting your GPU driver with
+     an older version.
 
-7. Game Engine Logs & Minidumps
-   - Inspects Unreal Engine (D3D device lost), Unity, idTech, Godot, and
-     binary crash minidumps (0xC0000005, 0x887A0006 DXGI device lost).
+7. Game Engine Logs & Crash Dumps
+   - Inspects Unreal Engine, Unity, idTech, Godot, Steam, Windows WER, and
+     kernel watchdog crash dumps (0xC0000005, 0x887A0006, 0x141, 0x193).
 
-8. DisplayPort 1.2a Scaler Saturation & EDID Factory Overclocks
-   - Detects monitors with aggressive factory overclocks (e.g., 1440p 165Hz
-     with bloated vertical blanking >1500 lines, pixel clock >585 MHz)
-     saturating budget monitor scalers and causing periodic 2-3s blackouts
-     (HPD renegotiations) with NO Windows TDRs or crash dumps.
+8. Monitor Refresh Rate & DisplayPort Bandwidth Limits
+   - Checks monitor EDID timings for high pixel clocks or vertical blanking
+     that can cause brief 2-3s black screens on DisplayPort 1.2a monitors.
 
-9. PCIe Link State Power Management (ASPM) Timeouts
-   - Detects when aggressive PCIe ASPM power saving states (Moderate/Maximum)
-     cause high bus resumption latencies on PCIe 4.0/5.0 motherboards,
-     triggering GPU display driver timeouts (TDR 4101 / 0x141) during low-load
-     scenarios (web browsing, YouTube, Discord).
-   - Provides 1-click remediation via "Run-Diagnostics.bat" -> Maintenance [6].
+9. PCIe Slot Power Saving (ASPM) Timeouts
+   - Checks if PCIe Link State Power Management is enabled and causing GPU
+     driver timeouts when waking the PCIe link.
 
-10. Rogue Kernel Port I/O Drivers & INVALID_KERNEL_HANDLE (0x93)
-   - Audits legacy/rogue direct hardware port I/O drivers (inpoutx64.sys,
-     WinRing0, ene.sys, AsrOmgDrv.sys, gdrv.sys) left behind by RGB/fan tools.
-   - Diagnoses anti-cheat collisions (Easy Anti-Cheat, BattlEye, Vanguard)
-     that cause full-system game freezes (where audio keeps playing) or
-     instant BugCheck 0x93 BSODs.
-   - Provides 1-click disabling via "Run-Diagnostics.bat" -> Maintenance [7].
+10. Conflicting RGB / Hardware Monitor Kernel Drivers (0x93)
+   - Checks for legacy direct port I/O drivers (inpoutx64.sys, WinRing0,
+     ene.sys, AsrOmgDrv.sys, gdrv.sys) that conflict with game anti-cheat.
 
-11. Motherboard, BIOS & Platform Chipset Driver Health
-   - Audits motherboard model and BIOS release version/date to identify
-     outdated firmware (>3 years) lacking PCIe 4.0/5.0 AGESA stability fixes.
-   - Audits official AMD Chipset Software / Intel Chipset Device Software
-     installations and verifies core platform controllers (AMD GPIO, I2C,
-     PCI Device Driver, PSP, and 3D V-Cache Optimizer).
+11. Motherboard, BIOS & Chipset Drivers
+   - Checks motherboard model, BIOS date, AMD/Intel chipset driver versions,
+     and Device Manager error codes (Code 28 / Code 43).
 
-12. Steam Watchdog IPC Hangs & Network Link Drops
-   - Diagnoses Steam engine stalls and cross-thread pipe watchdog terminations
-     (Assert( Stalled cross-thread pipe )) which abruptly terminate games.
-   - Correlates socket hangs with network ARP probe failures (NCSI Event 4042)
-     and wireless failovers on Intel 2.5GbE adapters (I225-V / I226-V).
-   - Provides safe 1-click remediation via "Run-Diagnostics.bat" -> Maintenance [5]
-     to disable Packet Priority & VLAN while preserving active negotiated link speed.
+12. Network Connection Drops & UDP Port Exhaustion
+   - Checks for PCI network controller resets (Event 1), Ethernet link drops
+     (Event 4042), Steam watchdog pipe stalls, and UDP port exhaustion
+     (Event 4266).
 
 ------------------------------------------------------------------------
-HOW TO SHARE FOR TECHNICAL SUPPORT (DISCORD / REDDIT):
+SHARING RESULTS FOR TECH SUPPORT (DISCORD / REDDIT):
 ------------------------------------------------------------------------
-- Run Option [3] in "Run-Diagnostics.bat" to generate a Support Bundle ZIP
-  containing your HTML report and sanitized engine logs.
-- Or copy the pre-formatted summary text directly from the bottom of your
-  HTML report!
+- Select Option [3] in "Run-Diagnostics.bat" to create a support ZIP
+  containing your HTML report and sanitized logs.
+- Or copy the summary text from the bottom of the HTML report.
 
-For more details, refer to README.md.
+For more details, see README.md.

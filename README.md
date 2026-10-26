@@ -1,43 +1,43 @@
-# Automated Game & System Crash Diagnostic Suite (`drivercheck`)
+# DriverCheck — Game & PC Crash Troubleshooter (`drivercheck`)
 
-> **Evidence-based Windows PC gaming diagnostics.** Pinpoint the exact root cause of game crashes, GPU driver timeouts (TDR 4101), black screens, and sudden reboots in 30 seconds — without guessing, wiping configs, or blindly reinstalling Windows.
+> **Windows PC & game crash diagnostics.** Find the cause of game crashes, GPU driver timeouts (TDR 4101 / 0x141), black screens, network drops, and unexpected reboots, and apply targeted fixes directly from the terminal.
 
 ---
 
-## ⚡ Quick Start (30 Seconds)
+## Quick Start
 
-### Option 1: Interactive Launcher (Recommended for Gamers)
+### Option 1: Interactive Menu (`Run-Diagnostics.bat`)
 1. Download and extract the latest release package.
 2. Double-click **`Run-Diagnostics.bat`**.
-3. Press **`[1]`** (Diagnose Latest Crash & Open HTML Report).
-4. A dark-mode **HTML Report** (`CrashReport_<timestamp>.html`) will generate and automatically open in your default browser.
+3. Press **`[1]`** (**Crash check and Report**).
+4. An **HTML Report** (`CrashReport_<timestamp>.html`) will open in your browser, and the terminal will display an interactive menu of any recommended fixes you can apply immediately.
 
 ```text
 ========================================================================
-  AUTOMATED GAME & SYSTEM CRASH DIAGNOSTIC SUITE (v4.5.0)
-  Evidence-Based Engine (Crash Dumps, Logs, Telemetry, Hardware)
+  DriverCheck - Game & PC Crash Troubleshooter (v4.5.0)
 ========================================================================
 
-  [1] Diagnose Latest Crash & Open HTML Report (Recommended)
-  [2] Scan Full Incident History (All Recent Incidents)
-  [3] Export Support Bundle (HTML Report + ZIP for Discord/Support)
-  [4] Motherboard, Chipset Drivers & PnP Hardware Health Audit
-  [5] Display, EDID Timings & DP Scaler Saturation Audit
-  [6] GPU Driver Health & Downgrade Prevention Audit
-  [7] Apply GPU Downgrade Protection (Lock Windows Update Drivers)
-  [8] Power, Fast Startup & Sleep Transition Audit
-  [9] Maintenance & Cache Cleaning Tools
+  [1] Crash check and Report (Recommended)
+  [2] Check full crash history
+  [3] Create support ZIP (for Discord / tech support)
+  [4] Check motherboard, chipset, and device drivers
+  [5] Check monitor and refresh rate settings
+  [6] Check GPU driver status and version
+  [7] Stop Windows Update from overwriting GPU drivers
+  [8] Check power and sleep settings
+  [9] Check network connection and drops
+  [M] Fixes and cleanup tools
   [0] Exit
 ========================================================================
 ```
 
-Selecting Option **`[1]`** automatically scans backward in time (up to 30 days) to find the most recent crash or fault incident, tightly correlates pre-crash telemetry around that event, and opens the HTML report. Option **`[2]`** expands the analysis across full historical incidents over the past 30 days.
+Selecting Option **`[1]`** scans backward up to 30 days to locate the most recent crash or driver timeout, correlates Windows event logs around that timestamp, opens the HTML report, and lets you run recommended fixes directly from the terminal. Option **`[2]`** scans all incidents across the past 30 days.
 
-### Option 2: PowerShell CLI (Power Users & Tech Support)
+### Option 2: PowerShell Command Line
 Run directly from PowerShell (no administrator privileges required for scanning):
 
 ```powershell
-# Default: Incident-Anchored Scan for Latest Crash with HTML Report
+# Default: Crash check and HTML report (with interactive fix prompt)
 PowerShell.exe -ExecutionPolicy Bypass -File .\Analyze-LatestCrash.ps1 -ExportHtml -OpenReport
 
 # Investigate Resolved Historical Timeouts (Clusters past episodes & correlates what fixed them)
@@ -55,147 +55,110 @@ PowerShell.exe -ExecutionPolicy Bypass -File .\Analyze-LatestCrash.ps1 -ExportJs
 
 ---
 
-## 🔍 What `drivercheck` Checks & Reports On
+## What `drivercheck` Checks & Reports On
 
-`drivercheck` runs a full audit of your gaming software stack, hardware telemetry, and Windows system policies:
+`drivercheck` checks crash dumps, game logs, Windows event logs, and hardware configuration:
 
-| Diagnostic Domain | Exact Checks & What It Reports On |
+| Diagnostic Area | Checks Performed |
 | :--- | :--- |
-| **Windows Driver Overwrites** | • Audits Windows Update driver searching policy (`SearchOrderConfig`).<br>• Audits Windows Quality Update driver exclusion policies (`ExcludeWUDriversInQualityUpdate`) to identify if Windows Update is silently replacing official GPU drivers with outdated OEM builds. |
-| **Mismatched & Desynced Drivers** | • Detects **Dual-GPU driver version mismatch** between discrete AMD Radeon GPUs and integrated CPU graphics (primary cause of `atieclxx.exe` crashes and `0x9F` sleep hangs).<br>• Detects generic display adapter fallbacks (Microsoft Basic Display Adapter).<br>• Identifies AMD Software installation type (Driver Only vs Adrenalin Full GUI) and active AMD Crash Defender services. |
-| **Recent Windows Updates & Hotfixes** | • Queries Windows Update Agent session history (filtering out daily Defender definition noise) for recently installed Windows Quality Updates and driver packages.<br>• Audits installed Windows Hotfixes (`Win32_QuickFixEngineering`) to correlate new crashes or resolved issues with recent system changes. |
-| **Historical Timeout Resolution Tracking (`-InvestigateResolved`)** | • Reconstructs historical timeout/crash episodes (`[T_first .. T_last]`) across up to 365 days using Event Logs, `WER\ReportArchive`, `LiveKernelReports`, and minidump `VS_FIXEDFILEINFO` module versions.<br>• Correlates the exact inflection point (`T_last`) against timestamped GPU/chipset driver installs (`Kernel-PnP`, `setupapi.dev.log`, `DriverStore\FileRepository`), BIOS updates, Windows Quality Updates, and registry/power mitigations (`TdrDelay`, PCIe ASPM, Fast Startup, ULPS, disabled rogue kernel drivers) to establish what changed to resolve past timeouts. |
-| **Windows Event Logs (Crashes & Timeouts)** | • **GPU Driver Resets**: Display driver timeouts (Event `4101` / `0x141` / `0x117` / `0xA1000001` / `VIDEO_TDR_ERROR`).<br>• **PCIe Bus & Riser Errors**: `WHEA-Logger` PCIe Root Port link communication faults (Event `17`).<br>• **Kernel BugChecks**: System BSOD crash codes (`WER-SystemErrorReporting` Event `1001`).<br>• **Unexpected Shutdowns & Power Cuts**: Kernel-Power Event `41` (transient PSU trips/hard freezes) and Event `6008`.<br>• **Virtual Memory Exhaustion**: Windows commit limit / pagefile exhaustion (`Resource-Exhaustion-Detector` Event `2004`).<br>• **Network Drops**: NCSI internet capability drops (Event `4042`), Intel 2.5GbE ARP probe failures, and Wi-Fi failovers. |
-| **Application & Binary Crash Dumps** | • Deep binary minidump parser (`MDMP`) across Windows Kernel BSODs (`C:\Windows\Minidump`, `MEMORY.DMP`), non-BSOD GPU watchdog dumps (`C:\Windows\LiveKernelReports`), User-Mode WER dumps (`%LOCALAPPDATA%\CrashDumps`), Steam dumps (`Steam\dumps`), Unreal Engine (`Saved\Crashes`), and Unity.<br>• Extracts exact Exception Codes (`0xC0000005`, `0x887A0006`, `0xC0000409`, `0x00000000`), faulting module addresses, `VS_FIXEDFILEINFO` loaded driver/module versions, and in-binary assertion strings.<br>• Detects zombie/deadlocked background processes (e.g. headless `steam.exe` blocking relaunch mutexes). |
-| **Motherboard, BIOS & Chipset Drivers** | • Audits motherboard manufacturer, product model, and BIOS release date (flags firmware >3 years old lacking PCIe/AGESA stability fixes).<br>• Audits official AMD Chipset Software / Intel Chipset Device Software installations.<br>• Verifies core platform controller health (AMD GPIO, I2C, PCI Device Driver, PSP, 3D V-Cache / Intel MEI).<br>• Scans Plug and Play (PnP) devices for missing drivers (Code 28) and device failures (Code 43). |
-| **Display EDID Timings & Scaler Saturation** | • Parses binary EDID Detailed Timing Descriptors (DTDs) across HDMI and DisplayPort.<br>• Calculates pixel clocks (MHz) and vertical blanking lines to flag aggressive factory overclocks (e.g. 1440p 165Hz with vertical blanking >1500 lines) that saturate DP 1.2a scalers and cause periodic 2-3s blackouts without generating TDRs. |
-| **Rogue Kernel I/O Driver Audit** | • Scans for legacy direct port I/O drivers (`inpoutx64.sys`, `WinRing0x64.sys`, `ene.sys`, `AsrOmgDrv.sys`, `gdrv.sys`) left behind by RGB or hardware monitoring software.<br>• Diagnoses collisions with anti-cheat engines (Easy Anti-Cheat, BattlEye, Vanguard) and Windows Memory Integrity that cause `INVALID_KERNEL_HANDLE (0x93)` BSODs or video freeze lockups. |
-| **Power & PCIe ASPM Link States** | • Audits Windows **Fast Startup** configuration (`HiberbootEnabled`), which frequently triggers recurring `0x9F` sleep/wake crashes.<br>• Audits **PCIe Link State Power Management (ASPM)** across active power plans, identifying low-power bus states that trigger GPU driver timeouts (TDR 4101) during idle or video load. |
+| **Windows Driver Overwrites** | • Checks Windows Update driver searching policy (`SearchOrderConfig`).<br>• Checks Windows Quality Update driver exclusion policies (`ExcludeWUDriversInQualityUpdate`) to see if Windows Update is replacing GPU drivers with older OEM versions. |
+| **Mismatched & Desynced Drivers** | • Detects **Dual-GPU driver version mismatch** between discrete AMD Radeon GPUs and integrated CPU graphics (a common cause of `atieclxx.exe` crashes and `0x9F` sleep hangs).<br>• Detects generic display adapter fallbacks (Microsoft Basic Display Adapter).<br>• Identifies AMD Software installation type (Driver Only vs Adrenalin Full) and active AMD Crash Defender services. |
+| **Recent Windows Updates & Hotfixes** | • Queries Windows Update Agent history (filtering out daily Defender definition updates) for recently installed Windows Quality Updates and driver packages.<br>• Checks installed Windows Hotfixes (`Win32_QuickFixEngineering`) to correlate new crashes or resolved issues with recent updates. |
+| **Historical Timeout Resolution Tracking (`-InvestigateResolved`)** | • Reconstructs historical timeout/crash episodes (`[T_first .. T_last]`) across up to 365 days using Event Logs, `WER\ReportArchive`, `LiveKernelReports`, and minidump `VS_FIXEDFILEINFO` module versions.<br>• Correlates the last incident (`T_last`) against timestamped GPU/chipset driver installs (`Kernel-PnP`, `setupapi.dev.log`, `DriverStore\FileRepository`), BIOS updates, Windows Quality Updates, and registry/power settings (`TdrDelay`, PCIe ASPM, Fast Startup, ULPS, disabled kernel drivers) to show what changed when past timeouts stopped. |
+| **Windows Event Logs (Crashes & Timeouts)** | • **GPU Driver Resets**: Display driver timeouts (Event `4101` / `0x141` / `0x117` / `0xA1000001` / `VIDEO_TDR_ERROR` / `0x193`).<br>• **PCIe Bus & Riser Errors**: `WHEA-Logger` PCIe Root Port link communication faults (Event `17`).<br>• **Kernel BugChecks**: System BSOD crash codes (`WER-SystemErrorReporting` Event `1001`).<br>• **Unexpected Shutdowns & Power Cuts**: Kernel-Power Event `41` and Event `6008`.<br>• **Virtual Memory Exhaustion**: Windows commit limit / pagefile exhaustion (`Resource-Exhaustion-Detector` Event `2004`).<br>• **Network Drops & Port Exhaustion**: NCSI connectivity drops (Event `4042`), PCI bus device resets (Event `1`), TCP/IP UDP ephemeral port exhaustion (Event `4266`), and Wi-Fi failovers. |
+| **Application & Binary Crash Dumps** | • Binary minidump parser (`MDMP`) across Windows Kernel BSODs (`C:\Windows\Minidump`), GPU watchdog live dumps (`C:\Windows\LiveKernelReports`), User-Mode WER dumps (`%LOCALAPPDATA%\CrashDumps`), Steam dumps (`Steam\dumps`), Unreal Engine (`Saved\Crashes`), and Unity.<br>• Extracts Exception Codes (`0xC0000005`, `0x887A0006`, `0xC0000409`, `0x00000000`), faulting module addresses, `VS_FIXEDFILEINFO` loaded driver/module versions, and assertion strings.<br>• Detects stuck background processes (such as headless `steam.exe` blocking relaunch). |
+| **Motherboard, BIOS & Chipset Drivers** | • Checks motherboard manufacturer, model, and BIOS release date (flags firmware >3 years old).<br>• Checks AMD Chipset Software / Intel Chipset Device Software versions.<br>• Verifies platform controller status (AMD GPIO, I2C, PCI Device Driver, PSP, 3D V-Cache / Intel MEI).<br>• Scans Plug and Play (PnP) devices for missing drivers (Code 28) and device errors (Code 43). |
+| **Display EDID Timings & Scaler Bandwidth** | • Parses binary EDID Detailed Timing Descriptors (DTDs) across HDMI and DisplayPort.<br>• Calculates pixel clocks (MHz) and vertical blanking lines to flag factory overclocks (such as 1440p 165Hz with vertical blanking >1500 lines) that exceed DisplayPort 1.2a scaler bandwidth and cause brief black screens without TDR events. |
+| **Legacy Kernel I/O Driver Check** | • Scans for legacy direct port I/O drivers (`inpoutx64.sys`, `WinRing0x64.sys`, `ene.sys`, `AsrOmgDrv.sys`, `gdrv.sys`) installed by RGB or hardware monitoring utilities.<br>• Identifies conflicts with anti-cheat software (Easy Anti-Cheat, BattlEye, Vanguard) and Windows Memory Integrity that cause `INVALID_KERNEL_HANDLE (0x93)` BSODs or freezes. |
+| **Power & PCIe ASPM Link States** | • Checks Windows **Fast Startup** (`HiberbootEnabled`), which can cause `0x9F` sleep/wake crashes.<br>• Checks **PCIe Link State Power Management (ASPM)** across active power plans, identifying low-power link states that can trigger GPU driver timeouts (TDR 4101) during idle or bursty loads. |
 
 ---
 
-## 🎯 What Symptoms Does This Diagnose?
+## Common Symptoms & What They Point To
 
-| Symptom | Detected Root Causes & Diagnostic Check |
+| Symptom | Typical Causes Checked |
 | :--- | :--- |
-| **GPU Driver Timeout (TDR 4101 / 0x141)** | PCIe ASPM bus wake latency, shader compiler crash loops, short TdrDelay, or dual-GPU driver desync. |
-| **Black Screen for 2–3s (No crash dump)** | DisplayPort 1.2a scaler saturation / bloated EDID factory vertical blanking (>1500 lines) exceeding monitor scaler limits. |
-| **Game Freezes with Audio Still Playing** | Anti-cheat collision with legacy RGB/fan kernel I/O drivers (`inpoutx64.sys`, `WinRing0`, `ene.sys`, `0x93`). |
-| **Silent Game Crash to Desktop** | Steam watchdog cross-thread pipe kill (`pipes.cpp`), engine unhandled assertions, or Intel 2.5GbE ARP link drops. |
-| **PC Instantly Reboots or Powers Off** | Kernel-Power Event 41 (BugcheckCode 0), PSU transient spike trips, or Fast Startup hybrid session corruption. |
-| **Out-of-Memory / D3D Device Lost** | Windows commit limit exhaustion (Event 2004) or missing/disabled System-Managed Pagefile. |
-| **BSOD 0x9F DRIVER_POWER_STATE_FAILURE** | Dual-GPU driver desync (AMD iGPU vs dGPU) or sleep/wake power transition failure with Fast Startup. |
-| **Micro-Stuttering & Input Lag Spikes** | Background Windows Quality Updates, Bluetooth RF interference, or uninitialized motherboard chipset controllers. |
+| **GPU Driver Timeout (TDR 4101 / 0x141 / 0x193)** | PCIe ASPM wake latency, corrupted shader caches, short `TdrDelay` on wake, or dual-GPU driver mismatch. |
+| **Black Screen for 2–3s (No crash dump)** | DisplayPort 1.2a scaler bandwidth limit / high EDID vertical blanking (>1500 lines). |
+| **Game Freezes with Audio Still Playing** | Anti-cheat conflict with legacy RGB/fan kernel I/O drivers (`inpoutx64.sys`, `WinRing0`, `ene.sys`, `0x93`). |
+| **Game Closes to Desktop Without Error** | Steam watchdog cross-thread pipe stall (`pipes.cpp`), engine assertions, or Ethernet link drops. |
+| **PC Instantly Reboots or Powers Off** | Kernel-Power Event 41 (BugcheckCode 0), PSU transient power trips, or Fast Startup state issues. |
+| **Out-of-Memory / D3D Device Lost** | Windows commit limit exhaustion (Event 2004) or disabled/undersized pagefile. |
+| **BSOD 0x9F DRIVER_POWER_STATE_FAILURE** | Dual-GPU driver mismatch (AMD iGPU vs dGPU) or sleep/wake power transition failure with Fast Startup. |
 
 ---
 
-## 📊 What You Get: Diagnostic Report
+## Diagnostic Report & Interactive Fixes
 
-Running `drivercheck` generates a self-contained, responsive HTML report featuring:
+Running `drivercheck` provides:
 
-1. **Executive Root Cause & Actionable Guidance**:
-   Direct, evidence-backed conclusion with step-by-step resolution instructions (no vague "reinstall Windows" suggestions).
-2. **Tiered Evidence Breakdown**:
-   Exact exception codes (`0xC0000005`, `0x887A0006`), faulting DLLs, binary assertion strings, and correlated Windows event logs.
-3. **Hardware & Configuration Audit**:
-   Motherboard BIOS age (>3 yrs flagged), AMD/Intel platform chipset driver health, EDID monitor timings, PCIe power states, and active GPU configuration.
-4. **1-Click Community Tech Support Export**:
-   Pre-formatted markdown block ready to copy and paste directly to **Reddit** (r/AMDHelp, r/techsupport) or **Discord**.
+1. **Crash Check Summary & How to Fix It**:
+   Primary and secondary findings ranked by evidence, with numbered steps and an interactive terminal prompt to apply recommended fixes immediately.
+2. **Detailed Evidence Breakdown**:
+   Exception codes (`0xC0000005`, `0x887A0006`, `0x141`, `0x193`), faulting modules, assertion strings, and correlated Windows event logs.
+3. **Hardware & Driver Status**:
+   Motherboard BIOS age, chipset driver versions, EDID monitor timings, PCIe power settings, network adapter health, and active GPU configuration.
+4. **Support Summary Export**:
+   A pre-formatted summary block at the bottom of the HTML report that can be copied for **Discord** or **Reddit**, plus clickable buttons to copy individual fix commands.
 
 ---
 
-## 💬 Sharing for Community Tech Support
+## Sharing Results for Troubleshooting
 
-When asking for help online, you never need to screenshot multiple windows:
+To share your diagnostic results:
 
-1. **Clipboard Summary**: Scroll to the bottom of your HTML report and click the **"Copy Summary for Discord / Reddit"** box.
-2. **Support Bundle ZIP**: Select Option **`[3]`** in `Run-Diagnostics.bat` (or run `-ExportZip`). This creates a small `DriverCheck_SupportBundle_<timestamp>.zip` containing your HTML report and engine log excerpts.
+1. **Clipboard Summary**: Scroll to the bottom of the HTML report and click the **"Copy Summary for Discord / Reddit / Technical Support"** box.
+2. **Support ZIP**: Select Option **`[3]`** in `Run-Diagnostics.bat` (or run `-ExportZip`). This creates `DriverCheck_SupportBundle_<timestamp>.zip` containing the HTML report and sanitized log excerpts.
 
-### 🔒 Privacy Guarantee
-* **100% Offline & Local**: No data is ever sent to external servers or telemetry endpoints.
-* **Automated PII Redaction**: Diagnostic reports, JSON exports, and support bundles automatically redact personal identifiers:
+### Privacy & Redaction
+* **100% Local**: No data is sent over the network.
+* **Automatic Redaction**: Reports, JSON exports, and support bundles redact:
   * Windows usernames and user profile paths (`C:\Users\<username>` → `%USERPROFILE%`)
-  * Personal Wi-Fi network SSIDs (`[Redacted Wi-Fi Network]`)
+  * Wi-Fi network SSIDs (`[Redacted Wi-Fi Network]`)
   * Steam Account IDs (`[U:1:REDACTED]`)
-  * Personal possessive names on Bluetooth audio devices
+  * Possessive names on Bluetooth audio devices
 
 ---
 
-## 🏛️ How It Works: The 4-Tier Diagnostic Hierarchy
+## Standalone Scripts (`scripts/`)
 
-`drivercheck` strictly prioritizes concrete binary crash artifacts over generalized system logs:
+Each script in `scripts/` can also be run individually:
 
-1. **Tier 1: Crash Dumps & Binary Thread Inspector (Primary Ground Truth)**
-   * Inspects binary minidump streams (`MDMP`) across Windows Kernel BSODs (`C:\Windows\Minidump`), Windows Error Reporting (`%LOCALAPPDATA%\CrashDumps`), Steam dumps, Unreal Engine (`Saved\Crashes`), and Unity dumps.
-   * Architecture-aware parsing across **64-bit (x64)** and **32-bit (x86)** processes.
-   * Extracts exact Exception Codes (`0xC0000005`, `0x887A0006`, `0xC0000409`, `0x80000003`, `0xC000001D`, `0x00000000`), faulting module addresses, and in-binary assertion callouts.
-   * Audits live processes for **zombie / deadlocked background processes** (e.g. headless `steam.exe` instances blocking relaunch mutexes).
-
-2. **Tier 2: Application & Game Engine Logs (Secondary Evidence)**
-   * Discovers and analyzes engine logs across **Unreal Engine**, **Unity** (`Player.log`), **idTech** (`qconsole.log`), **Source 2**, and **Godot**.
-   * Inspects Steam Overlay, CEF WebHelper, and IPC pipe logs (`gameoverlay_ui.txt`, `webhelper.txt`, `connection_log.txt`) while intelligently suppressing clean game exit teardown events (`GameOverlayRenderer.dll detaching`).
-
-3. **Tier 3: System Logs & Hardware Telemetry (Tertiary Telemetry)**
-   * Correlates Windows Event Logs timestamp-aligned to crash incidents:
-     * `WHEA-Logger` CPU, bus, and PCIe hardware errors (detects PCIe 4.0/5.0 riser cable packet loss / WHEA Event `17`).
-     * GPU driver TDR timeouts (Event `4101` / `0x141` / `VIDEO_TDR_ERROR`).
-     * Virtual memory / commit limit exhaustion (`Resource-Exhaustion-Detector` Event `2004`).
-     * Kernel BugChecks (`WER-SystemErrorReporting` BSOD codes).
-     * Unexpected shutdowns (Event `6008`) and dirty reboots / instant power trips (Kernel-Power Event `41`).
-     * Driver load failures (Kernel-PnP Event `219`) and storage/NVMe timeouts (`stornvme`, `disk`).
-   * Audits Windows **Fast Startup** configuration (`HiberbootEnabled`), which frequently causes recurring `0x9F` driver power state crashes.
-   * Audits **PCIe Link State Power Management (ASPM)** settings across active power plans (`SUB_PCIEXPRESS`), identifying low-power bus transition latency spikes that trigger GPU driver timeouts (TDR 4101 / 0x141) during idle or video playback.
-
-4. **Tier 4: System Hardware & Configuration (Contextual Audit)**
-   * Audits **Motherboard, BIOS Firmware & Platform Chipset Drivers** (Manufacturer, Model, BIOS release date, AMD Chipset Software / Intel Chipset Device Software version, and core controllers: AMD GPIO, I2C, PCI, PSP, and 3D V-Cache Optimizer).
-   * Audits **Plug and Play (PnP) Hardware Health** across all system devices for missing drivers (Code 28 `CM_PROB_FAILED_INSTALL`), failed devices (Code 43), and uninitialized chipset devices.
-   * Audits **Rogue & Legacy Kernel I/O Drivers** (`inpoutx64.sys`, `WinRing0x64.sys`, `ene.sys`, `AsrOmgDrv.sys`, `gdrv.sys`) left by RGB or fan tools, diagnosing collisions with anti-cheat software (Easy Anti-Cheat, BattlEye, Vanguard) and Windows Memory Integrity that cause `INVALID_KERNEL_HANDLE (0x93)` BSODs or video freeze lockups.
-   * Audits active graphics hardware (`Win32_VideoController`), detects **Dual-GPU driver version conflicts** (e.g. AMD Ryzen integrated graphics vs. discrete Radeon graphics), AMD Software installation type (Driver Only vs Adrenalin Full Install), and checks Windows Update driver overwrite policies (`SearchOrderConfig`, `ExcludeWUDriversInQualityUpdate`).
-   * Audits **Connected Displays & EDID Detailed Timings** via WMI and Registry, detecting aggressive factory overclocks (e.g. 1440p 165Hz with bloated vertical blanking >1500 lines or pixel clock >585 MHz) saturating DisplayPort 1.2a budget scalers and causing periodic 2-3s blackouts without generating Windows TDRs or crash dumps.
-   * Audits graphics subsystem configuration (TdrDelay, TdrLevel, Hardware-Accelerated GPU Scheduling).
-   * Audits Bluetooth gaming controllers (DualSense, Xbox, VR, Stadia) and network adapter stability.
-
----
-## 🛠️ Modular Tools (`scripts/`)
-
-Every tool in the `scripts/` directory can be executed independently as an isolated, standalone diagnostic:
-
-| Script | Category | Description |
+| Script | Area | Description |
 | :--- | :--- | :--- |
-| **`Inspect-CrashDumps.ps1`** | Crash Dumps | Direct binary inspector for BSOD, WER, Steam, Unreal, and Unity minidumps. |
-| **`Inspect-GameLogs.ps1`** | Logs | Scans Unreal, Unity, idTech, Source 2, and Godot logs for fatal errors and asserts. |
-| **`Inspect-SteamLogs.ps1`** | Logs | Analyzes Steam IPC pipes, CEF browser errors, and sleep/wake crashes. |
-| **`Get-PnpDeviceDiagnostics.ps1`** | Hardware | Scans all active hardware for missing drivers (Code 28) and device errors (Code 43). |
-| **`Get-MotherboardAndChipsetDiagnostics.ps1`** | Hardware | Audits motherboard model, BIOS version/date, and platform chipset drivers (AMD/Intel). |
-| **`Get-GPUDriverDiagnostics.ps1`** | GPU | Audits display adapters, detects driver downgrades, and locks Windows Update driver policies. |
-| **`Get-DisplayDiagnostics.ps1`** | Display | Audits connected displays, EDID detailed timings, and DP 1.2a scaler saturation hazards. |
-| **`Get-PowerAndSleepDiagnostics.ps1`** | Power | Audits Windows Fast Startup, unexpected shutdowns (6008), and sleep/wake transitions. |
-| **`Get-BluetoothDiagnostics.ps1`** | Peripherals | Audits Bluetooth radios, gaming controllers, and connection reset errors. |
-| **`Get-NetworkDiagnostics.ps1`** | Network | Audits network adapter link speed, duplex negotiation, and link flapping events. |
-| **`Get-WindowsUpdateHistory.ps1`** | System | Audits recently installed Windows Quality Updates and driver packages. |
-| **`Clean-ShaderCache.ps1`** | Remediation | Purges DirectX, AMD, and NVIDIA shader caches to resolve shader compile crash loops. |
-| **`Clean-GameConfig.ps1`** | Remediation | Purges stale game configs and shader caches (**creates automatic `.bak` backups**). |
-| **`Clean-SteamCache.ps1`** | Remediation | Purges the Steam CEF HTML browser cache (`%LOCALAPPDATA%\Steam\htmlcache`). |
-| **`Repair-EthernetSettings.ps1`** | Remediation | Applies stability settings to Intel/Realtek Ethernet adapters (disables VLAN/Priority). |
-| **`Repair-PciePowerSettings.ps1`** | Remediation | Disables PCIe Link State Power Management (ASPM) on active power scheme to eliminate TDRs. |
-| **`Repair-GpuSleepSettings.ps1`** | Remediation | Optimizes GPU watchdog timeout (TdrDelay = 8s) for 4K/high-refresh display wake stability. |
-| **`Disable-RogueKernelDrivers.ps1`** | Remediation | Scans for and disables problematic kernel I/O drivers (`inpoutx64`, `winring0`, etc.). |
+| **`Inspect-CrashDumps.ps1`** | Crash Dumps | Binary inspector for BSOD, LiveKernelReports, WER, Steam, Unreal, and Unity minidumps. |
+| **`Inspect-GameLogs.ps1`** | Logs | Scans Unreal, Unity, idTech, Source 2, and Godot logs for errors and assertions. |
+| **`Inspect-SteamLogs.ps1`** | Logs | Analyzes Steam IPC pipes, browser cache errors, and connection drops. |
+| **`Get-PnpDeviceDiagnostics.ps1`** | Hardware | Checks devices for missing drivers (Code 28) and errors (Code 43). |
+| **`Get-MotherboardAndChipsetDiagnostics.ps1`** | Hardware | Checks motherboard model, BIOS version/date, and chipset drivers (AMD/Intel). |
+| **`Get-GPUDriverDiagnostics.ps1`** | GPU | Checks GPU driver status/version and Windows Update driver overwrite settings. |
+| **`Get-DisplayDiagnostics.ps1`** | Display | Checks connected monitors, EDID timings, and DisplayPort bandwidth limits. |
+| **`Get-PowerAndSleepDiagnostics.ps1`** | Power | Checks Windows Fast Startup, unexpected shutdowns (6008), and sleep/wake history. |
+| **`Get-BluetoothDiagnostics.ps1`** | Peripherals | Checks Bluetooth radios, controllers, and connection resets. |
+| **`Get-NetworkDiagnostics.ps1`** | Network | Checks network adapter speed, duplex settings, PCI resets, and link drops. |
+| **`Get-WindowsUpdateHistory.ps1`** | System | Lists recently installed Windows Quality Updates and driver updates. |
+| **`Clean-ShaderCache.ps1`** | Fix / Cleanup | Clears DirectX, AMD (`DxCache`/`DxcCache`/`VkCache`), and NVIDIA shader caches. |
+| **`Clean-GameConfig.ps1`** | Fix / Cleanup | Clears stuck game crash locks and shader caches (creates `.bak` backups first). |
+| **`Clean-SteamCache.ps1`** | Fix / Cleanup | Clears the Steam browser cache (`%LOCALAPPDATA%\Steam\htmlcache`). |
+| **`Repair-EthernetSettings.ps1`** | Fix / Cleanup | Disables Packet Priority & VLAN on Intel/Realtek adapters while keeping link speed, and expands UDP ports. |
+| **`Repair-PciePowerSettings.ps1`** | Fix / Cleanup | Turns off PCIe Link State Power Management (ASPM) on the active power plan. |
+| **`Repair-GpuSleepSettings.ps1`** | Fix / Cleanup | Sets GPU watchdog timeout (`TdrDelay = 8s`) for 4K / HDMI 2.1 display wake stability. |
+| **`Disable-RogueKernelDrivers.ps1`** | Fix / Cleanup | Disables conflicting legacy kernel I/O drivers (`inpoutx64`, `winring0`, etc.). |
 
 ---
 
-## 🛡️ Safe Remediation & Non-Destructive Principles
+## Safety & Backups
 
-Diagnostic scans are **100% read-only**. Optional remediation tools adhere to strict safety guardrails:
+All diagnostic scans are **read-only**. When you choose to run a fix, the following safeguards apply:
 
-* **Automatic Backups**: Before modifying or deleting any configuration (`.cfg`, `.local`, `user_engine_option_save.xml`), `Clean-GameConfig.ps1` generates an exact `.bak` copy in the same folder. Your keybindings, sensitivities, and custom settings are never lost.
-* **GPU Downgrade Protection**: `Get-GPUDriverDiagnostics.ps1 -ApplyFix` sets standard Windows registry policies (`SearchOrderConfig = 0`, `ExcludeWUDriversInQualityUpdate = 1`) to prevent Windows Update from silently overwriting official graphics drivers with outdated OEM builds.
-* **Zero Power-Impact Defaults**: `Repair-GpuSleepSettings.ps1` resolves display wake TDRs by increasing watchdog tolerance (TdrDelay = 8s) rather than disabling GPU sleep states, preserving full idle power efficiency.
-* **Non-Destructive Kernel Driver Disabling**: `Disable-RogueKernelDrivers.ps1` configures driver autostart services to `disabled` via Windows Service Control Manager (`sc.exe`) without deleting system files, immediately resolving anti-cheat conflicts and BugCheck 0x93.
+* **Automatic Backups**: Registry, power plan, network adapter, and service state changes are backed up to `%LOCALAPPDATA%\DriverCheck\Backups` before changes are applied (and can be restored with `Restore-DcRemediationState`). Game configuration cleanup (`Clean-GameConfig.ps1`) creates `.bak` file copies in the same folder.
+* **Preserved Link Speed & Power Efficiency**: `Repair-EthernetSettings.ps1` preserves your active negotiated Ethernet link speed by default, and `Repair-GpuSleepSettings.ps1` extends `TdrDelay` to 8 seconds without disabling GPU sleep states.
+* **Non-Destructive Driver Disabling**: `Disable-RogueKernelDrivers.ps1` sets legacy driver services to `disabled` via Service Control Manager (`sc.exe`) without deleting files.
 
 ---
 
-## 📋 System Requirements
+## System Requirements
 
 * **Operating System:** Windows 10 or Windows 11 (64-bit or 32-bit).
-* **PowerShell:** Windows PowerShell 5.1 (pre-installed on Windows) or PowerShell Core (7.x+).
-* **Privileges:** Standard user privileges are sufficient for all diagnostic scans and HTML report generation. Administrator privileges are only required when explicitly applying system policy changes (e.g. locking Windows Update driver policies or reconfiguring Ethernet adapter properties).
+* **PowerShell:** Windows PowerShell 5.1 (included with Windows) or PowerShell 7+.
+* **Permissions:** Standard user permissions are sufficient for all scans, reports, and cache cleanup. Administrator permissions are only needed when applying system-level fixes (such as network adapter settings, UDP port range expansion, or Windows Update driver policies).

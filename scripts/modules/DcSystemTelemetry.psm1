@@ -2603,17 +2603,17 @@ function Resolve-DcDiagnosticFindings {
         } else {
             $codeLabel = if ($has0x193) { "TDR 0x141 / DXGKRNL 0x193 WATCHDOG" } else { "TDR / 0x141" }
             $remedyList = [System.Collections.Generic.List[string]]::new()
-            $remedyList.Add("Purge DirectX & AMD DxcCache/DxCache shader caches using '.\Analyze-LatestCrash.ps1 -CleanShaderCache' (corrupt UE5 / D3D12 SM6 shaders frequently trigger mid-render TDRs and 0x193 ProcessDeadlockThread dumps).")
-            $remedyList.Add("Clean reinstall your graphics driver using AMD Clean Utility or DDU in Safe Mode.")
-            $remedyList.Add("If using a PCIe Gen 5 GPU (e.g. RX 9070 XT / RTX 50-series) on a PCIe Gen 4/5 motherboard or riser cable, manually configure PCIEX16 Link Speed to Gen 4 in BIOS to eliminate link negotiation hangs.")
+            $remedyList.Add("Clear Shader Caches: Clear your DirectX and AMD shader caches (corrupted shader files often cause mid-game GPU freezes and driver timeouts).")
+            $remedyList.Add("Reinstall GPU Driver: If clearing the shader cache does not help, do a clean GPU driver reinstall using AMD Cleanup Utility or DDU in Safe Mode.")
+            $remedyList.Add("Check PCIe Slot Speed in BIOS: If using a PCIe Gen 5 GPU (like RX 9070 XT or RTX 50-series) or a riser cable, set PCIEX16 Link Speed to Gen 4 in BIOS to prevent connection drops.")
             if ($hasHighBoostGpu) {
-                $remedyList.Add("Enthusiast GPU Detected: Factory boost targets often exceed silicon stability in bursty UE5 D3D12 workloads. Test applying a -100 MHz offset or capping Max Frequency in AMD Software Tuning to prevent transient voltage droop.")
+                $remedyList.Add("Lower GPU Max Boost Clock Slightly: Factory-overclocked cards can boost too high during heavy Unreal Engine 5 scenes. Try a -100 MHz Max Frequency offset in AMD Software Tuning.")
             }
             if ($GpuHealth -and $GpuHealth.HybridMultiGpu) {
-                $remedyList.Add("Hybrid Multi-GPU Detected: Disable the unused CPU integrated GPU (iGPU) in Motherboard BIOS or test toggling Hardware-Accelerated GPU Scheduling (HAGS) in Windows Graphics Settings to prevent dxgkrnl cross-adapter deadlocks (0x193).")
+                $remedyList.Add("Disable Unused Integrated Graphics: Turn off the CPU's built-in graphics (iGPU) in BIOS if your monitor is plugged into your main graphics card.")
             }
             if ($hasAmdFullInstall) {
-                $remedyList.Add("AMD Adrenalin Full Install: Test a clean 'Driver Only' installation to eliminate potential background overlay and hook contention.")
+                $remedyList.Add("Try a 'Driver Only' Install: If crashes continue, reinstall the AMD driver using the 'Driver Only' option to rule out background overlays.")
             }
 
             $findings.Add([PSCustomObject]@{
@@ -2840,7 +2840,127 @@ function Resolve-DcDiagnosticFindings {
         })
     }
 
+    $actionCatalog = @{
+        "CleanShaderCache" = [PSCustomObject]@{
+            Id            = "CleanShaderCache"
+            Label         = "Clear DirectX and GPU shader caches"
+            Description   = "Deletes cached shaders so games rebuild them cleanly (fixes shader freezes and GPU timeouts)."
+            SwitchHint    = "-CleanShaderCache"
+            RequiresAdmin = $false
+        }
+        "RepairNetwork" = [PSCustomObject]@{
+            Id            = "RepairNetwork"
+            Label         = "Fix Ethernet adapter drops"
+            Description   = "Turns off Packet Priority & VLAN on your network card to stop random disconnects (keeps your link speed)."
+            SwitchHint    = "-RepairNetwork"
+            RequiresAdmin = $true
+        }
+        "ExpandUdpPorts" = [PSCustomObject]@{
+            Id            = "ExpandUdpPorts"
+            Label         = "Expand Windows network port limit"
+            Description   = "Increases available UDP ports so multiplayer games and server browsers do not lose connection."
+            SwitchHint    = "-ExpandUdpPorts"
+            RequiresAdmin = $true
+        }
+        "DisablePciePowerSavings" = [PSCustomObject]@{
+            Id            = "DisablePciePowerSavings"
+            Label         = "Turn off PCIe slot power saving"
+            Description   = "Stops the PCIe slot from going into low-power sleep during games, preventing GPU timeouts."
+            SwitchHint    = "-DisablePciePowerSavings"
+            RequiresAdmin = $false
+        }
+        "RepairGpuSleep" = [PSCustomObject]@{
+            Id            = "RepairGpuSleep"
+            Label         = "Increase GPU wake timeout (8 seconds)"
+            Description   = "Gives your GPU and monitor extra time to wake from sleep without crashing (no extra power use)."
+            SwitchHint    = "-RepairGpuSleep"
+            RequiresAdmin = $true
+        }
+        "KillHungSteam" = [PSCustomObject]@{
+            Id            = "KillHungSteam"
+            Label         = "Close stuck Steam and game processes"
+            Description   = "Closes background Steam processes that are stuck and stopping games from launching."
+            SwitchHint    = "-KillHungSteam"
+            RequiresAdmin = $false
+        }
+        "CleanSteamCache" = [PSCustomObject]@{
+            Id            = "CleanSteamCache"
+            Label         = "Clear Steam browser cache"
+            Description   = "Clears Steam's built-in browser cache and overlay state."
+            SwitchHint    = "-CleanSteamCache"
+            RequiresAdmin = $false
+        }
+        "CleanConfigCrimsonDesert" = [PSCustomObject]@{
+            Id            = "CleanConfigCrimsonDesert"
+            Label         = "Reset Crimson Desert crash locks and cache"
+            Description   = "Backs up and clears stuck crash locks and cache files so the game can launch."
+            SwitchHint    = "-CleanConfig -Game CrimsonDesert"
+            RequiresAdmin = $false
+        }
+        "FixDrivers" = [PSCustomObject]@{
+            Id            = "FixDrivers"
+            Label         = "Stop Windows Update from overwriting GPU drivers"
+            Description   = "Locks your GPU driver so Windows Update does not silently replace it with an older version."
+            SwitchHint    = "-FixDrivers"
+            RequiresAdmin = $true
+        }
+        "DisableRogueDrivers" = [PSCustomObject]@{
+            Id            = "DisableRogueDrivers"
+            Label         = "Disable conflicting RGB / hardware monitor drivers"
+            Description   = "Turns off old kernel drivers (inpoutx64 / WinRing0) that cause crashes with game anti-cheat."
+            SwitchHint    = "-DisableRogueDrivers"
+            RequiresAdmin = $true
+        }
+    }
+
+    $findingActionMap = @{
+        "STEAM_WATCHDOG_NETWORK_DROP" = @("KillHungSteam", "RepairNetwork", "ExpandUdpPorts")
+        "STEAM_WATCHDOG_PIPE_STALL"   = @("KillHungSteam", "CleanSteamCache")
+        "SHADER_RUNTIME_CRASH"        = @("CleanShaderCache")
+        "GRAPHICS_DEVICE_REMOVED"     = @("CleanShaderCache", "DisablePciePowerSavings")
+        "ROGUE_KERNEL_DRIVER_CRASH"   = @("DisableRogueDrivers")
+        "ROGUE_KERNEL_DRIVER_HAZARD"  = @("DisableRogueDrivers")
+        "APP_ACCESS_VIOLATION"        = @("CleanShaderCache")
+        "CRIMSON_DESERT_CRASH"        = @("CleanShaderCache", "CleanConfigCrimsonDesert")
+        "CRIMSON_DESERT_APP_HANG"     = @("CleanShaderCache", "CleanConfigCrimsonDesert")
+        "PCIE_WHEA_ERROR"             = @("DisablePciePowerSavings")
+        "PCIE_ASPM_INSTABILITY"       = @("DisablePciePowerSavings")
+        "GPU_TDR_WAKE_FROM_SLEEP"     = @("RepairGpuSleep", "CleanShaderCache")
+        "GPU_TDR_PCIE_ASPM"           = @("DisablePciePowerSavings", "CleanShaderCache")
+        "GPU_TDR_TIMEOUT"             = @("CleanShaderCache")
+        "PCI_NIC_RESET_LINK_DROP"     = @("RepairNetwork", "ExpandUdpPorts")
+        "PCI_DEVICE_RESET"            = @("RepairNetwork")
+        "NETWORK_LINK_DROP"           = @("RepairNetwork")
+        "UDP_PORT_EXHAUSTION"         = @("ExpandUdpPorts")
+        "UDP_PORT_SPACE_CONSTRAINED"  = @("ExpandUdpPorts")
+        "DUAL_GPU_MISMATCH"           = @("FixDrivers")
+        "ZOMBIE_STEAM_PROCESS"        = @("KillHungSteam")
+    }
+
     $sortedFindings = @($findings | Sort-Object -Property PriorityScore -Descending)
+    $recommendedActions = [System.Collections.Generic.List[object]]::new()
+    $seenActionIds = @{}
+    foreach ($f in $sortedFindings) {
+        $rawParts = @($f.Guidance -split '(?:\r?\n\s*(?:\*|\d+\.)\s*)|(?:\s+\*\s+)|(?:^\s*(?:\*|\d+\.)\s*)' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        $cleanSteps = [System.Collections.Generic.List[string]]::new()
+        foreach ($p in $rawParts) { $cleanSteps.Add($p.Trim()) }
+        $f | Add-Member -NotePropertyName Steps -NotePropertyValue @($cleanSteps) -Force
+
+        $fActions = [System.Collections.Generic.List[object]]::new()
+        if ($findingActionMap.ContainsKey($f.Id)) {
+            foreach ($actId in $findingActionMap[$f.Id]) {
+                if ($actionCatalog.ContainsKey($actId)) {
+                    $actObj = $actionCatalog[$actId]
+                    $fActions.Add($actObj)
+                    if (-not $seenActionIds.ContainsKey($actId)) {
+                        $seenActionIds[$actId] = $true
+                        $recommendedActions.Add($actObj)
+                    }
+                }
+            }
+        }
+        $f | Add-Member -NotePropertyName Actions -NotePropertyValue @($fActions) -Force
+    }
 
     if ($sortedFindings.Count -gt 0) {
         $primary = $sortedFindings[0]
@@ -2853,6 +2973,7 @@ function Resolve-DcDiagnosticFindings {
             PrimaryFinding       = $primary
             SecondaryFindings    = $secondary
             Findings             = $sortedFindings
+            RecommendedActions   = @($recommendedActions)
             RootCauseTitle       = $primary.Title
             RootCauseDescription = $primary.Description
             RootCauseGuidance    = $guidanceText
@@ -2882,6 +3003,8 @@ function Resolve-DcDiagnosticFindings {
         Title             = "SYSTEM HEALTHY"
         Description       = $defaultDesc
         Guidance          = $defaultGuidance
+        Steps             = @($defaultGuidance)
+        Actions           = @()
         Timestamp         = (Get-Date)
         AffectedComponent = "System"
     }
@@ -2890,6 +3013,7 @@ function Resolve-DcDiagnosticFindings {
         PrimaryFinding       = $healthyFinding
         SecondaryFindings    = @()
         Findings             = @($healthyFinding)
+        RecommendedActions   = @()
         RootCauseTitle       = $healthyFinding.Title
         RootCauseDescription = $healthyFinding.Description
         RootCauseGuidance    = $healthyFinding.Guidance

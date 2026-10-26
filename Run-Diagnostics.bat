@@ -1,6 +1,6 @@
 @echo off
 setlocal EnableDelayedExpansion
-title Automated Game ^& System Crash Diagnostics
+title DriverCheck - Game ^& PC Crash Troubleshooter
 cd /d "%~dp0"
 
 :: Auto-unblock extracted scripts on Windows to bypass Mark-of-the-Web restrictions
@@ -9,20 +9,19 @@ PowerShell.exe -NoProfile -ExecutionPolicy Bypass -Command "Get-ChildItem -Path 
 :menu
 cls
 echo ========================================================================
-echo   AUTOMATED GAME ^& SYSTEM CRASH DIAGNOSTIC SUITE (v4.5.0)
-echo   Multi-Finding Engine (Crash Dumps, Logs, Telemetry, Hardware, Network)
+echo   DriverCheck - Game ^& PC Crash Troubleshooter (v4.5.0)
 echo ========================================================================
 echo.
-echo   [1] Diagnose Latest Crash ^& Open HTML Report (Recommended)
-echo   [2] Scan Full Incident History (All Recent Incidents)
-echo   [3] Export Support Bundle (HTML Report + ZIP for Discord/Support)
-echo   [4] Motherboard, Chipset Drivers ^& PnP Hardware Health Audit
-echo   [5] Display, EDID Timings ^& DP Scaler Saturation Audit
-echo   [6] GPU Driver Health ^& Downgrade Prevention Audit
-echo   [7] Apply GPU Downgrade Protection (Lock Windows Update Drivers)
-echo   [8] Power, Fast Startup ^& Sleep Transition Audit
-echo   [9] Network Adapter, PCI Bus Reset ^& UDP Port Exhaustion Audit
-echo   [M] Maintenance ^& Safe Remediation Utilities
+echo   [1] Crash check and Report (Recommended)
+echo   [2] Check full crash history
+echo   [3] Create support ZIP (for Discord / tech support)
+echo   [4] Check motherboard, chipset, and device drivers
+echo   [5] Check monitor and refresh rate settings
+echo   [6] Check GPU driver status and version
+echo   [7] Stop Windows Update from overwriting GPU drivers
+echo   [8] Check power and sleep settings
+echo   [9] Check network connection and drops
+echo   [M] Fixes and cleanup tools
 echo   [0] Exit
 echo.
 echo ========================================================================
@@ -46,19 +45,19 @@ goto menu
 
 :latest_scan
 cls
-echo [INFO] Scanning backward for latest crash incident and generating HTML report...
+echo Checking for recent crashes and creating your report...
 PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Analyze-LatestCrash.ps1" -ExportHtml -OpenReport
 goto finish
 
 :history_scan
 cls
-echo [INFO] Scanning full system incident history and generating HTML report...
+echo Checking full crash history and creating your report...
 PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Analyze-LatestCrash.ps1" -AllIncidents -ExportHtml -OpenReport
 goto finish
 
 :export_bundle
 cls
-echo [INFO] Analyzing crashes and creating support bundle ZIP...
+echo Running crash check and saving support ZIP...
 PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Analyze-LatestCrash.ps1" -ExportZip -ExportHtml -OpenReport
 goto finish
 
@@ -79,7 +78,7 @@ goto finish
 
 :gpu_fix
 cls
-echo [INFO] Applying GPU Driver Downgrade Protection (Requires Admin)...
+echo Stopping Windows Update from overwriting your GPU drivers (Admin)...
 PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Get-GPUDriverDiagnostics.ps1" -ApplyFix
 goto finish
 
@@ -96,17 +95,17 @@ goto finish
 :maintenance
 cls
 echo ========================================================================
-echo   MAINTENANCE ^& REMEDIATION UTILITIES
+echo   Fixes ^& Cleanup Tools
 echo ========================================================================
-echo   [1] Purge DirectX ^& GPU Shader Caches (Fix Shader Timeouts / Hangs)
-echo   [2] Clean Stale Game Configs ^& Shader Caches (with .bak backup)
-echo   [3] Purge Steam CEF Browser HTML Cache
-echo   [4] Terminate Hung / Zombie Steam Processes
-echo   [5] Optimize Ethernet Adapter ^& Expand UDP Port Range (Requires Admin)
-echo   [6] Disable PCIe Link State Power Management (Fix GPU Timeouts ^& Sleep Crashes)
-echo   [7] Scan ^& Disable Rogue Kernel I/O Drivers (Fix inpoutx64 / 0x93 BSODs)
-echo   [8] Optimize GPU Watchdog Timeout (Increase TdrDelay to 8s - Zero Power Impact)
-echo   [0] Return to Main Menu
+echo   [1] Clear shader caches (fixes game freezes and GPU timeouts)
+echo   [2] Reset game configs and crash locks (keeps .bak backups)
+echo   [3] Clear Steam browser cache
+echo   [4] Close stuck Steam processes
+echo   [5] Fix Ethernet drops and expand network ports (Admin)
+echo   [6] Turn off PCIe power saving (fixes GPU timeouts)
+echo   [7] Disable conflicting RGB / hardware drivers (Admin)
+echo   [8] Increase GPU wake timeout for 4K / HDMI 2.1 displays (Admin)
+echo   [0] Back to Main Menu
 echo.
 set "mchoice="
 set /p mchoice="Select an option [0-8]: "
@@ -125,7 +124,7 @@ goto menu
 :finish
 echo.
 echo ========================================================================
-echo Action completed. Review any findings or open reports above.
+echo Done. Review the results above or press any key to return to the menu.
 echo ========================================================================
 pause
 goto menu

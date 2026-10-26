@@ -74,7 +74,7 @@ if ($pesterMod -and $pesterMod.Version.Major -lt 5) {
 
 Describe "DcCrashDump - Minidump VS_FIXEDFILEINFO & LiveKernelReports" {
     It "Decodes VS_FIXEDFILEINFO module versions, LinkDate, and GPU driver versions from binary MDMP stream" {
-        $tempDump = Join-Path ([System.IO.Path]::GetTempPath()) ("test_mdmp_" + [guid]::NewGuid().ToString("N") + ".dmp")
+        $tempDump = Join-Path $PSScriptRoot ("test_mdmp_" + [guid]::NewGuid().ToString("N") + ".dmp")
         try {
             $ms = New-Object System.IO.MemoryStream
             $bw = New-Object System.IO.BinaryWriter($ms)
@@ -168,7 +168,7 @@ Describe "DcCrashDump - Minidump VS_FIXEDFILEINFO & LiveKernelReports" {
 
 Describe "DcSystemTelemetry - WER ReportArchive Parser" {
     It "Parses Report.wer FILETIME EventTime, LiveKernelEvent 141 signature, and LoadedModules" {
-        $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("wer_test_" + [guid]::NewGuid().ToString("N"))
+        $tempDir = Join-Path $PSScriptRoot ("wer_test_" + [guid]::NewGuid().ToString("N"))
         $reportFolder = Join-Path $tempDir "Kernel_141_1a2b3c4d"
         New-Item -Path $reportFolder -ItemType Directory -Force | Out-Null
         $werFile = Join-Path $reportFolder "Report.wer"
@@ -207,7 +207,7 @@ Describe "DcSystemTelemetry - WER ReportArchive Parser" {
 
 Describe "DcSystemTelemetry - SetupAPI & DriverStore Change History" {
     It "Extracts historical GPU and Chipset driver installations from setupapi.dev.log and DriverStore FileRepository" {
-        $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("chg_test_" + [guid]::NewGuid().ToString("N"))
+        $tempRoot = Join-Path $PSScriptRoot ("chg_test_" + [guid]::NewGuid().ToString("N"))
         $fakeStore = Join-Path $tempRoot "FileRepository"
         $fakePkg = Join-Path $fakeStore "u0401234.inf_amd64_abcdef123456"
         New-Item -Path $fakePkg -ItemType Directory -Force | Out-Null
@@ -852,5 +852,35 @@ Describe "DcRemediation - Non-Admin WhatIf Dry-Run Support" {
 
         $amdWhatIf = Repair-DcAmdDriverAlignment -WhatIf
         $amdWhatIf | Should -Be $false
+    }
+
+    It "Populates structured Steps, Actions, and RecommendedActions on findings and formats HTML guidance as a clean list" {
+        $now = Get-Date
+        $telemetry = [PSCustomObject]@{
+            KernelBugChecks      = @()
+            PcieWheaErrors       = @()
+            WheaErrors           = @()
+            MemoryExhaustion     = @()
+            TdrEvents            = @([PSCustomObject]@{ TimeCreated = $now.AddMinutes(-5); Code = "141"; Meaning = "VIDEO_ENGINE_TIMEOUT_DETECTED" })
+            SleepTransitions     = @()
+            PciePowerManagement  = [PSCustomObject]@{ IsEnabled = $false; ACSettingName = "Off"; SchemeName = "Balanced" }
+            PciDeviceResets      = @([PSCustomObject]@{ TimeCreated = $now.AddMinutes(-4); Pdo = "PCI_0"; DeviceLabel = "Intel I225-V"; FriendlyName = "Intel(R) Ethernet Controller (3) I225-V"; Message = "Started -> Uninitialized" })
+            NetworkDrops         = @([PSCustomObject]@{ TimeCreated = $now.AddMinutes(-4); InterfaceName = "Ethernet"; Message = "Link disconnected" })
+            WlanFailovers        = @()
+            UdpPortExhaustions   = @()
+            AppHangs             = @()
+            AbruptReboots        = @()
+            UnexpectedShutdowns  = @()
+            FastStartup          = [PSCustomObject]@{ FastStartupEnabled = $false }
+        }
+
+        $res = Resolve-DcDiagnosticFindings -ParsedDumps @() -Telemetry $telemetry -ScanMode "LatestIncident" -MaxLookbackDays 30
+        $res.PrimaryFinding.Id | Should -Be "GPU_TDR_TIMEOUT"
+        $res.PrimaryFinding.Steps.Count | Should -BeGreaterOrEqual 3
+        $res.PrimaryFinding.Actions.Count | Should -Be 1
+        $res.PrimaryFinding.Actions[0].Id | Should -Be "CleanShaderCache"
+
+        $res.RecommendedActions.Count | Should -Be 3
+        ($res.RecommendedActions | ForEach-Object { $_.Id }) -join "," | Should -Be "CleanShaderCache,RepairNetwork,ExpandUdpPorts"
     }
 }

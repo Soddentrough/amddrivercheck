@@ -30,7 +30,7 @@ function Get-DcDumpDirectories {
 
     # 2. Windows User-Mode WER Crash Dumps
     $werDumps = Join-Path $env:LOCALAPPDATA "CrashDumps"
-    if (Test-Path $werDumps) { $dirs.Add($werDumps) }
+    if (Test-Path $werDumps -ErrorAction SilentlyContinue) { $dirs.Add($werDumps) }
 
     # 3. Steam Minidumps (Dynamic SteamPath lookup with fallback)
     $steamPath = $null
@@ -53,7 +53,7 @@ function Get-DcDumpDirectories {
     if (Test-Path $env:LOCALAPPDATA) {
         $ueDirs = Get-ChildItem "$env:LOCALAPPDATA" -Directory -ErrorAction SilentlyContinue |
             ForEach-Object { Join-Path $_.FullName "Saved\Crashes" } |
-            Where-Object { Test-Path $_ }
+            Where-Object { Test-Path $_ -ErrorAction SilentlyContinue }
         foreach ($d in $ueDirs) { $dirs.Add($d) }
     }
 
@@ -62,7 +62,7 @@ function Get-DcDumpDirectories {
     if (Test-Path $tempDir) {
         $unityDirs = Get-ChildItem $tempDir -Directory -ErrorAction SilentlyContinue |
             ForEach-Object { Join-Path $_.FullName "Crashes" } |
-            Where-Object { Test-Path $_ }
+            Where-Object { Test-Path $_ -ErrorAction SilentlyContinue }
         foreach ($d in $unityDirs) { $dirs.Add($d) }
     }
 
@@ -79,7 +79,7 @@ function Get-DcDumpDirectories {
         (Join-Path $env:USERPROFILE "Documents\Battlefield 2042\CrashDumps")
     )
     foreach ($kd in $knownGameDirs) {
-        if (Test-Path $kd) { $dirs.Add($kd) }
+        if (Test-Path $kd -ErrorAction SilentlyContinue) { $dirs.Add($kd) }
     }
 
     return $dirs | Select-Object -Unique
