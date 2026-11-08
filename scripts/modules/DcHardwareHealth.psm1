@@ -58,31 +58,99 @@ function Get-DcRebarStatus {
     }
 
     try {
-        $memAddrs = @(Get-CimInstance Win32_DeviceMemoryAddress -ErrorAction SilentlyContinue)
-        $pnpRes = @(Get-CimInstance Win32_PnPAllocatedResource -ErrorAction SilentlyContinue)
-        $gpus = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue)
+        if (-not ('DcNativeRegResourceReader' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class DcNativeRegResourceReader {
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    private static extern int RegOpenKeyEx(IntPtr hKey, string subKey, int options, int sam, out IntPtr phkResult);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    private static extern int RegQueryValueEx(IntPtr hKey, string lpValueName, IntPtr lpReserved, out int lpType, byte[] lpData, ref int lpcbData);
+    [DllImport("advapi32.dll")]
+    private static extern int RegCloseKey(IntPtr hKey);
 
+    public static byte[] ReadResourceMap(string subKey, string valName) {
+        IntPtr hk;
+        if (RegOpenKeyEx((IntPtr)unchecked((int)0x80000002), subKey, 0, 0x20019, out hk) != 0) return null;
+        try {
+            int type = 0, size = 0;
+            RegQueryValueEx(hk, valName, IntPtr.Zero, out type, null, ref size);
+            if (size <= 0) return null;
+            byte[] buf = new byte[size];
+            if (RegQueryValueEx(hk, valName, IntPtr.Zero, out type, buf, ref size) != 0) return null;
+            return buf;
+        } finally {
+            RegCloseKey(hk);
+        }
+    }
+}
+'@ -ErrorAction SilentlyContinue
+        }
+
+        $gpus = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue)
         $maxBarBytes = [int64]0
+
+        # 1. Primary: Inspect kernel PnP CM_RESOURCE_LIST (includes 64-bit CmResourceTypeMemoryLarge BARs >= 4 GB)
         foreach ($gpu in $gpus) {
             $gpuId = $gpu.PNPDeviceID
-            if (-not $gpuId) { continue }
+            if (-not $gpuId -or $gpuId -notmatch '^PCI\\') { continue }
+            try {
+                $pdoProp = Get-PnpDeviceProperty -InstanceId $gpuId -KeyName 'DEVPKEY_Device_PDOName' -ErrorAction SilentlyContinue
+                if ($pdoProp -and $pdoProp.Data) {
+                    $rawBytes = [DcNativeRegResourceReader]::ReadResourceMap("HARDWARE\RESOURCEMAP\PnP Manager\PnpManager", "$($pdoProp.Data).Translated")
+                    if ($rawBytes -and $rawBytes.Length -ge 40) {
+                        $descCount = [BitConverter]::ToInt32($rawBytes, 16)
+                        $offset = 20
+                        for ($i = 0; $i -lt $descCount; $i++) {
+                            if (($offset + 20) -gt $rawBytes.Length) { break }
+                            $resType = $rawBytes[$offset]
+                            $resFlags = [BitConverter]::ToUInt16($rawBytes, $offset + 2)
+                            $rawLen = [int64][BitConverter]::ToUInt32($rawBytes, $offset + 12)
+                            $barBytes = [int64]0
+                            if ($resType -eq 3) {
+                                # CmResourceTypeMemory (32-bit length)
+                                $barBytes = $rawLen
+                            } elseif ($resType -eq 7) {
+                                # CmResourceTypeMemoryLarge (40/48/64-bit shifted length)
+                                if ($resFlags -band 0x0200) { $barBytes = ($rawLen -shl 8) }
+                                elseif ($resFlags -band 0x0400) { $barBytes = ($rawLen -shl 16) }
+                                elseif ($resFlags -band 0x0800) { $barBytes = ($rawLen -shl 32) }
+                            }
+                            if ($barBytes -gt $maxBarBytes) {
+                                $maxBarBytes = $barBytes
+                            }
+                            $offset += 20
+                        }
+                    }
+                }
+            } catch {}
+        }
 
-            $matchedRes = $pnpRes | Where-Object { $_.Dependent.DeviceID -eq $gpuId }
-            foreach ($res in $matchedRes) {
-                $addr = $memAddrs | Where-Object { $_.__RELPATH -eq $res.Antecedent.__RELPATH } | Select-Object -First 1
-                if ($addr -and $addr.StartingAddress -and $addr.EndingAddress) {
-                    $start = [Convert]::ToInt64($addr.StartingAddress, 10)
-                    $end = [Convert]::ToInt64($addr.EndingAddress, 10)
-                    $size = $end - $start + 1
-                    if ($size -gt $maxBarBytes) {
-                        $maxBarBytes = $size
+        # 2. Fallback: WMI Win32_PnPAllocatedResource -> Win32_DeviceMemoryAddress joined by StartingAddress
+        if ($maxBarBytes -eq 0) {
+            $memAddrs = @(Get-CimInstance Win32_DeviceMemoryAddress -ErrorAction SilentlyContinue)
+            $pnpRes = @(Get-CimInstance Win32_PnPAllocatedResource -ErrorAction SilentlyContinue)
+            foreach ($gpu in $gpus) {
+                $gpuId = $gpu.PNPDeviceID
+                if (-not $gpuId) { continue }
+                $matchedRes = $pnpRes | Where-Object { $_.Dependent.DeviceID -eq $gpuId -and $null -ne $_.Antecedent.StartingAddress }
+                foreach ($res in $matchedRes) {
+                    $addr = $memAddrs | Where-Object { $_.StartingAddress -eq $res.Antecedent.StartingAddress } | Select-Object -First 1
+                    if ($addr -and $null -ne $addr.StartingAddress -and $null -ne $addr.EndingAddress) {
+                        $start = [Convert]::ToInt64($addr.StartingAddress, 10)
+                        $end = [Convert]::ToInt64($addr.EndingAddress, 10)
+                        $size = $end - $start + 1
+                        if ($size -gt $maxBarBytes) {
+                            $maxBarBytes = $size
+                        }
                     }
                 }
             }
         }
 
         $maxBarMb = [math]::Round($maxBarBytes / 1MB)
-        if ($maxBarBytes -ge 536870912) { # >= 512 MB indicates 64-bit BAR is expanded (> standard 256MB)
+        if ($maxBarBytes -ge 536870912) { # >= 512 MB indicates 64-bit Resizable BAR is expanded (> standard 256MB)
             $rebarStatus.IsEnabled = $true
             $rebarStatus.IsSupported = $true
             $rebarStatus.BarSizeMb = $maxBarMb
@@ -310,18 +378,107 @@ function Get-DcNetworkHealth {
         $vlanVal = if ($vlan) { $vlan.DisplayValue } else { "N/A" }
 
         $isIntel25G = ($a.InterfaceDescription -match '(?i)I225|I226|Intel.*Ethernet')
+        $isRealtek25G = ($a.InterfaceDescription -match '(?i)Realtek.*2\.5G|RTL8125')
+
+        $idleRestriction = $null
+        $idleTimeoutMs = $null
+        $enableD3ColdInS0 = $null
+        $ltrEnabled = $null
+        $pmArpOffload = $null
+        $pmNsOffload = $null
+        $ulpMode = $null
+        $reduceSpeedOnPowerDown = $null
+        $modernStandbyWoL = $null
+        $eeeVal = $null
+        $flowControlVal = $null
+        $rawSpeedDuplex = $null
+        $driverClassKeyPath = $null
+
+        try {
+            $netClassBase = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}"
+            if (Test-Path $netClassBase) {
+                $classSubKeys = Get-ChildItem -Path $netClassBase -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^\d{4}$' }
+                foreach ($csk in $classSubKeys) {
+                    $props = Get-ItemProperty -Path $csk.PSPath -ErrorAction SilentlyContinue
+                    if ($props -and (($a.InterfaceGuid -and $props.NetCfgInstanceId -eq $a.InterfaceGuid) -or ($props.DriverDesc -eq $a.InterfaceDescription))) {
+                        $driverClassKeyPath = $csk.PSPath
+                        $idleRestriction = $props.'*IdleRestriction'
+                        $idleTimeoutMs = $props.IdleTimeoutMs
+                        $enableD3ColdInS0 = $props.EnableD3ColdInS0
+                        $ltrEnabled = $props.LatencyToleranceReporting
+                        $pmArpOffload = $props.'*PMARPOffload'
+                        $pmNsOffload = $props.'*PMNSOffload'
+                        $ulpMode = $props.ULPMode
+                        $reduceSpeedOnPowerDown = $props.ReduceSpeedOnPowerDown
+                        $modernStandbyWoL = $props.'*ModernStandbyWoLMagicPacket'
+                        $eeeVal = $props.'*EEE'
+                        $flowControlVal = $props.'*FlowControl'
+                        $rawSpeedDuplex = $props.'*SpeedDuplex'
+                        break
+                    }
+                }
+            }
+        } catch {}
+
+        $hasPowerSavingRisk = $false
+        if ($isIntel25G -or $isRealtek25G) {
+            $idleTimeoutActive = ($null -ne $idleTimeoutMs -and "$idleTimeoutMs" -ne "0")
+            $d3ColdActive = ($null -eq $enableD3ColdInS0 -or "$enableD3ColdInS0" -ne "0")
+            if ($idleRestriction -eq "0" -or $idleTimeoutActive -or ($isIntel25G -and $d3ColdActive) -or $ulpMode -eq "1" -or $reduceSpeedOnPowerDown -eq "1" -or $eeeVal -eq "1" -or $pmArpOffload -eq "1" -or $pmNsOffload -eq "1") {
+                $hasPowerSavingRisk = $true
+            }
+        }
+        $hasForced25GSpeed = $false
+        if ($isIntel25G -or $isRealtek25G) {
+            if ($rawSpeedDuplex -eq "2500" -or $sdVal -match '(?i)2\.5\s*Gbps') {
+                $hasForced25GSpeed = $true
+            }
+        }
+
+        $pwrParts = [System.Collections.Generic.List[string]]::new()
+        if ($null -ne $idleTimeoutMs) {
+            $pwrParts.Add("IdleTimeoutMs=$idleTimeoutMs" + $(if ("$idleTimeoutMs" -ne "0") { " (WDF S0-Idle Active)" } else { " (S0-Idle Disabled)" }))
+        }
+        if ($null -ne $enableD3ColdInS0) { $pwrParts.Add("EnableD3ColdInS0=$enableD3ColdInS0") }
+        if ($null -ne $ltrEnabled) { $pwrParts.Add("LTR=$ltrEnabled") }
+        if ($null -ne $idleRestriction) {
+            $pwrParts.Add("IdleRestriction=$idleRestriction")
+        }
+        if ($null -ne $pmArpOffload) { $pwrParts.Add("PMARPOffload=$pmArpOffload") }
+        if ($null -ne $pmNsOffload) { $pwrParts.Add("PMNSOffload=$pmNsOffload") }
+        if ($null -ne $ulpMode) { $pwrParts.Add("ULPMode=$ulpMode") }
+        if ($null -ne $reduceSpeedOnPowerDown) { $pwrParts.Add("ReduceSpeedOnPowerDown=$reduceSpeedOnPowerDown") }
+        if ($null -ne $eeeVal) { $pwrParts.Add("EEE=$eeeVal") }
+        if ($null -ne $flowControlVal) { $pwrParts.Add("FlowControl=$flowControlVal") }
+        $powerSavingSummary = if ($pwrParts.Count -gt 0) { $pwrParts -join ", " } else { "Default" }
 
         $results.Add([PSCustomObject]@{
-            Name                 = $a.Name
-            InterfaceDescription = $a.InterfaceDescription
-            Status               = $a.Status
-            LinkSpeed            = $a.LinkSpeed
-            SpeedDuplex          = $sdVal
-            PriorityVLAN         = $vlanVal
-            IsIntel25G           = $isIntel25G
-            UdpPortRange         = $udpRangeStr
-            TcpPortRange         = $tcpRangeStr
-            IsUdpConstrained     = $isUdpConstrained
+            Name                        = $a.Name
+            InterfaceDescription        = $a.InterfaceDescription
+            Status                      = $a.Status
+            LinkSpeed                   = $a.LinkSpeed
+            SpeedDuplex                 = $sdVal
+            RawSpeedDuplex              = $rawSpeedDuplex
+            PriorityVLAN                = $vlanVal
+            IsIntel25G                  = $isIntel25G
+            DriverClassKeyPath          = $driverClassKeyPath
+            IdleRestriction             = $idleRestriction
+            IdleTimeoutMs               = $idleTimeoutMs
+            EnableD3ColdInS0            = $enableD3ColdInS0
+            LatencyToleranceReporting   = $ltrEnabled
+            PMARPOffload                = $pmArpOffload
+            PMNSOffload                 = $pmNsOffload
+            ULPMode                     = $ulpMode
+            ReduceSpeedOnPowerDown      = $reduceSpeedOnPowerDown
+            ModernStandbyWoLMagicPacket = $modernStandbyWoL
+            EEE                         = $eeeVal
+            FlowControl                 = $flowControlVal
+            HasPowerSavingRisk          = $hasPowerSavingRisk
+            HasForced25GSpeed           = $hasForced25GSpeed
+            PowerSavingSummary          = $powerSavingSummary
+            UdpPortRange                = $udpRangeStr
+            TcpPortRange                = $tcpRangeStr
+            IsUdpConstrained            = $isUdpConstrained
         })
     }
 

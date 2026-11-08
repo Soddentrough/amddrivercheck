@@ -884,3 +884,287 @@ Describe "DcRemediation - Non-Admin WhatIf Dry-Run Support" {
         ($res.RecommendedActions | ForEach-Object { $_.Id }) -join "," | Should -Be "CleanShaderCache,RepairNetwork,ExpandUdpPorts"
     }
 }
+
+Describe "Gaming NIC Silent DMA Hang, Steam Session Correlation & PCIe ASPM GUID Fixes" {
+    It "Queries valid Windows SUB_PCIEXPRESS Subgroup GUID (501a4d13-42af-4429-9fd1-a8218c268e20) in Get-DcPciePowerManagementStatus" {
+        $pcie = Get-DcPciePowerManagementStatus
+        $pcie | Should -Not -BeNullOrEmpty
+        $pcie.ACSettingIndex | Should -Not -BeNullOrEmpty
+        $pcie.SchemeGuid | Should -Not -BeNullOrEmpty
+    }
+
+    It "Extracts Steam gameplay sessions from streaming_log.txt and correlates mid-game NCSI 4042 Silent DMA Hangs" {
+        $tempSteam = Join-Path $PSScriptRoot ("steam_test_" + [guid]::NewGuid().ToString("N"))
+        $logsDir = Join-Path $tempSteam "logs"
+        New-Item -Path $logsDir -ItemType Directory -Force | Out-Null
+        $streamingLog = Join-Path $logsDir "streaming_log.txt"
+
+        try {
+            $now = Get-Date
+            $gameStart = $now.AddMinutes(-45)
+            $ncsiDropTime = $now.AddMinutes(-30) # 15 minutes into game
+            $gameEnd = $now.AddMinutes(-10)
+
+            $startStr = $gameStart.ToString("yyyy-MM-dd HH:mm:ss", [System.Globalization.CultureInfo]::InvariantCulture)
+            $endStr = $gameEnd.ToString("yyyy-MM-dd HH:mm:ss", [System.Globalization.CultureInfo]::InvariantCulture)
+
+            $logLines = @(
+                "[$startStr][100.123] Game Recording - would start recording game 990080, but recording for this game is disabled",
+                "[$startStr][100.456] Adding process 12345 for gameID 990080",
+                "[$endStr][2200.789] Game Recording - game stopped [gameid=990080]",
+                "[$endStr][2200.900] Removing process 12345 for gameID 990080"
+            )
+            Set-Content -Path $streamingLog -Value $logLines -Encoding UTF8
+
+            $sessions = @(Get-DcSteamGameSessions -Cutoff $now.AddHours(-2) -EndTime $now -SteamPath $tempSteam)
+            $sessions.Count | Should -Be 1
+            $sessions[0].AppId | Should -Be "990080"
+            $sessions[0].IsActive | Should -Be $false
+            $sessions[0].DurationMinutes | Should -BeGreaterThan 30
+
+            $telemObj = [PSCustomObject]@{
+                CutoffTime          = $now.AddHours(-2)
+                EndTime             = $now
+                KernelBugChecks     = @()
+                AbruptReboots       = @()
+                UnexpectedShutdowns = @()
+                WheaErrors          = @()
+                PcieWheaErrors      = @()
+                TdrEvents           = @()
+                StorageErrors       = @()
+                MemoryExhaustion    = @()
+                SleepTransitions    = @()
+                PnpDriverFailures   = @()
+                AppCrashes          = @()
+                AppHangs            = @()
+                PciDeviceResets     = @()
+                WlanFailovers       = @()
+                PciePowerManagement = [PSCustomObject]@{ IsEnabled = $true; ACSettingName = "Moderate power savings"; SchemeName = "Balanced" }
+                FastStartup         = [PSCustomObject]@{ FastStartupEnabled = $false }
+                NetworkDrops        = @(
+                    [PSCustomObject]@{
+                        TimeCreated     = $ncsiDropTime
+                        Id              = 4042
+                        Provider        = "NCSI"
+                        InterfaceName   = "Ethernet (Intel(R) Ethernet Controller (3) I225-V)"
+                        Reason          = "SuspectArpProbeFailed"
+                        IsSilentDmaHang = $true
+                        Message         = "Network Internet capability dropped to None (Reason: SuspectArpProbeFailed - Silent TX/RX DMA Hang without physical link disconnect)"
+                    }
+                )
+                UdpPortExhaustions  = @(
+                    [PSCustomObject]@{
+                        TimeCreated = $ncsiDropTime.AddMinutes(2)
+                        Id          = 4266
+                        Provider    = "Tcpip"
+                        Message     = "Ephemeral port exhaustion"
+                    }
+                )
+                TopUdpConsumers     = @(
+                    [PSCustomObject]@{
+                        ProcessName   = "qbittorrent.exe"
+                        PID           = 9999
+                        EndpointCount = 42
+                    }
+                )
+                StuckServices       = @(
+                    [PSCustomObject]@{
+                        Name        = "BcastDVRUserService_72e2c"
+                        DisplayName = "GameDVR and Broadcast User Service"
+                        State       = "Stop Pending"
+                        ProcessId   = 8888
+                        Message     = "Service 'BcastDVRUserService_72e2c' is stuck in 'Stop Pending' (PID: 8888)."
+                    }
+                )
+            }
+
+            $netHealthMock = @(
+                [PSCustomObject]@{
+                    Name               = "Ethernet"
+                    HasPowerSavingRisk = $true
+                    HasForced25GSpeed  = $true
+                    PowerSavingSummary = "IdleRestriction=0 (5s Idle Power-Down Active), ULPMode=1"
+                    SpeedDuplex        = "2.5 Gbps Full Duplex"
+                    IsUdpConstrained   = $true
+                    UdpPortRange       = "49152-65535 (16384 ports)"
+                    TcpPortRange       = "1024-65535 (64511 ports)"
+                }
+            )
+
+            $res = Resolve-DcDiagnosticFindings -ParsedDumps @() -Telemetry $telemObj -NetworkHealth $netHealthMock -SteamGameSessions $sessions
+            $res.PrimaryFinding.Id | Should -Be "GAMING_NIC_SILENT_DMA_HANG"
+            $res.PrimaryFinding.Description | Should -Match "990080"
+            $res.PrimaryFinding.Description | Should -Match "IdleRestriction=0"
+
+            $udpFinding = $res.Findings | Where-Object { $_.Id -eq "UDP_PORT_EXHAUSTION" } | Select-Object -First 1
+            $udpFinding | Should -Not -BeNullOrEmpty
+            $udpFinding.Description | Should -Match "qbittorrent\.exe"
+
+            $stuckFinding = $res.Findings | Where-Object { $_.Id -eq "STUCK_BACKGROUND_SERVICE" } | Select-Object -First 1
+            $stuckFinding | Should -Not -BeNullOrEmpty
+            $stuckFinding.Title | Should -Match "BcastDVRUserService"
+        } finally {
+            if (Test-Path $tempSteam) { Remove-Item $tempSteam -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+    }
+}
+
+Describe "Desktop & Compute TDR Coalescing, WerKernel Exact Timestamps & Display Hotplug Correlation" {
+    It "Coalesces companion 0x141 + 0xA1000001 + 0xA2000002 LiveKernelEvents, upgrades to WerKernel Event 1002 second-level timestamps, and correlates Display Hotplug Event 1010 and PowerShell 400 GPU workloads" {
+        $now = Get-Date
+        $cutoff = $now.AddHours(-24)
+        $endTime = $now
+        $exactTdrTime = [datetime]::new($now.Year, $now.Month, $now.Day, $now.Hour, $now.Minute, 0).AddHours(-2).AddSeconds(50)
+        $minTag = $exactTdrTime.ToString("yyyyMMdd-HHmm")
+
+        $global:dcTestExactTdrTime = $exactTdrTime
+        $global:dcTestMinTag = $minTag
+
+        $global:dcMsgA2 = @"
+Fault bucket , type 0
+Event Name: LiveKernelEvent
+Problem signature:
+P1: a2000002
+P2: 11
+
+Attached files:
+\\?\C:\ProgramData\Microsoft\Windows\WER\Temp\WER.a2.dmp
+\\?\C:\Windows\LiveKernelReports\AMD_REPORT_UM-$minTag.dmp
+"@
+        $global:dcMsgA1 = @"
+Fault bucket , type 0
+Event Name: LiveKernelEvent
+Problem signature:
+P1: a1000001
+P2: 1
+
+Attached files:
+\\?\C:\Windows\LiveKernelReports\AMD_WATCHDOG-$minTag.dmp
+"@
+        $global:dcMsg141 = @"
+Fault bucket , type 0
+Event Name: LiveKernelEvent
+Problem signature:
+P1: 141
+P2: ffffe00a80045050
+P3: fffff8056d65d650
+
+Attached files:
+\\?\C:\Windows\LiveKernelReports\WATCHDOG\WATCHDOG-$minTag.dmp
+"@
+        $global:dcMsgRadar = @"
+Fault bucket , type 0
+Event Name: RADAR_PRE_LEAK_64
+Problem signature:
+P1: gpubench.exe
+P2: 0.0.0.0
+"@
+
+        Mock -ModuleName DcSystemTelemetry Get-CimInstance { return @() }
+        Mock -ModuleName DcSystemTelemetry Get-WinEvent {
+            $fh = if ($FilterHashtable -is [array]) { $FilterHashtable[0] } else { $FilterHashtable }
+            if ($fh -and $fh['LogName'] -eq 'Microsoft-Windows-WerKernel/Operational') {
+                return @(
+                    [PSCustomObject]@{
+                        Id           = 1002
+                        ProviderName = 'Microsoft-Windows-WerKernel'
+                        TimeCreated  = $global:dcTestExactTdrTime
+                        Message      = "Live dump file C:\WINDOWS\LiveKernelReports\WATCHDOG\WATCHDOG-$($global:dcTestMinTag).dmp created."
+                    }
+                )
+            }
+            if ($fh -and $fh['ProviderName'] -eq 'Windows Error Reporting' -and ($fh['Id'] -contains 1001)) {
+                return @(
+                    [PSCustomObject]@{
+                        Id           = 1001
+                        ProviderName = 'Windows Error Reporting'
+                        TimeCreated  = $global:dcTestExactTdrTime.AddMinutes(5)
+                        Message      = $global:dcMsgA2
+                    },
+                    [PSCustomObject]@{
+                        Id           = 1001
+                        ProviderName = 'Windows Error Reporting'
+                        TimeCreated  = $global:dcTestExactTdrTime.AddMinutes(5)
+                        Message      = $global:dcMsgA1
+                    },
+                    [PSCustomObject]@{
+                        Id           = 1001
+                        ProviderName = 'Windows Error Reporting'
+                        TimeCreated  = $global:dcTestExactTdrTime.AddMinutes(5)
+                        Message      = $global:dcMsg141
+                    },
+                    [PSCustomObject]@{
+                        Id           = 1001
+                        ProviderName = 'Windows Error Reporting'
+                        TimeCreated  = $global:dcTestExactTdrTime.AddSeconds(-20)
+                        Message      = $global:dcMsgRadar
+                    }
+                )
+            }
+            if ($fh -and $fh['LogName'] -eq 'Microsoft-Windows-Kernel-PnP/Device Management') {
+                return @(
+                    [PSCustomObject]@{
+                        Id           = 1010
+                        ProviderName = 'Microsoft-Windows-Kernel-PnP'
+                        TimeCreated  = $global:dcTestExactTdrTime.AddSeconds(1)
+                        Message      = "Device instance ID: DISPLAY\GSM5CE8\5&2ef38343&4&UID268"
+                    }
+                )
+            }
+            if ($fh -and $fh['LogName'] -eq 'Windows PowerShell') {
+                return @(
+                    [PSCustomObject]@{
+                        Id           = 400
+                        ProviderName = 'PowerShell'
+                        TimeCreated  = $global:dcTestExactTdrTime.AddSeconds(-35)
+                        Message      = "Engine state is changed from None to Available.`r`nDetails:`r`n`tHostApplication=powershell.exe -Command .\build\gpubench.exe -b RayScheduling --dump-isa"
+                    }
+                )
+            }
+            return @()
+        }
+
+        $telem = Get-DcSystemTelemetry -Cutoff $cutoff -EndTime $endTime
+        $telem.TdrEvents.Count | Should -Be 1
+        $telem.TdrEvents[0].Code | Should -Be "141"
+        $telem.TdrEvents[0].TimeCreated | Should -Be $exactTdrTime
+        ($telem.TdrEvents[0].CompanionCodes -join ",") | Should -Match "0xA2000002"
+        ($telem.TdrEvents[0].CompanionCodes -join ",") | Should -Match "0xA1000001"
+        $telem.TdrEvents[0].Message | Should -Match "Companion dumps:"
+
+        $telem.DisplayHotplugEvents.Count | Should -Be 1
+        $telem.DisplayHotplugEvents[0].DeviceInstanceId | Should -Match "DISPLAY\\GSM5CE8"
+        $telem.DisplayHotplugEvents[0].IsDisplayMonitor | Should -Be $true
+
+        $telem.TdrWorkloads.Count | Should -Be 1
+        $telem.TdrWorkloads[0].ProcessName | Should -Be "gpubench.exe"
+        $telem.TdrWorkloads[0].CommandLine | Should -Match "RayScheduling"
+
+        # Verify Resolve-DcDiagnosticFindings surfaces the compute workload, display hotplug, default 2s TdrDelay, and RepairGpuSleep action
+        $telem.GraphicsDriverSettings = [PSCustomObject]@{
+            TdrDelay        = $null
+            TdrLevel        = $null
+            TdrDdiDelay     = $null
+            HwSchMode       = 2
+            HAGSStatus      = "Enabled (Hardware-Accelerated GPU Scheduling)"
+            IsUlpsEnabled   = $true
+            OverlayTestMode = $null
+            IsMpoDisabled   = $false
+        }
+        $telem.PciePowerManagement = [PSCustomObject]@{ IsEnabled = $false; ACSettingName = "Off"; SchemeName = "Balanced" }
+        $telem.FastStartup = [PSCustomObject]@{ FastStartupEnabled = $false }
+
+        $res = Resolve-DcDiagnosticFindings -ParsedDumps @() -Telemetry $telem -ScanMode "LatestIncident" -MaxLookbackDays 30
+        $res.PrimaryFinding.Id | Should -Be "GPU_TDR_TIMEOUT"
+        $res.PrimaryFinding.Description | Should -Match "gpubench\.exe"
+        $res.PrimaryFinding.Description | Should -Match "DISPLAY\\GSM5CE8"
+        $res.PrimaryFinding.Description | Should -Match "2-second default"
+        ($res.PrimaryFinding.Actions | ForEach-Object { $_.Id }) -join "," | Should -Be "RepairGpuSleep,CleanShaderCache"
+    }
+
+    It "Detects 64-bit Resizable BAR (CmResourceTypeMemoryLarge) aperture in Get-DcRebarStatus instead of returning 1 MB from broken __RELPATH join" {
+        $rebar = Get-DcRebarStatus
+        $rebar | Should -Not -BeNullOrEmpty
+        $rebar.BarSizeMb | Should -BeGreaterOrEqual 256
+    }
+}

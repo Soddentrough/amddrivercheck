@@ -29,6 +29,16 @@ Write-Host ""
 
 $cutoff = (Get-Date).AddHours(-$Hours)
 $steamLogs = Get-DcSteamLogs -Cutoff $cutoff
+$steamSessions = Get-DcSteamGameSessions -Cutoff $cutoff
+
+if ($steamSessions.Count -gt 0) {
+    Write-Host "Recent Steam Gameplay Sessions (Past $Hours hours):" -ForegroundColor Cyan
+    foreach ($ss in ($steamSessions | Select-Object -First 8)) {
+        $endStr = if ($ss.IsActive) { "ACTIVE" } else { $ss.EndTime.ToString('yyyy-MM-dd HH:mm:ss') }
+        Write-Host "  * AppID $($ss.AppId): $($ss.StartTime.ToString('yyyy-MM-dd HH:mm:ss')) -> $endStr ($($ss.DurationMinutes) mins)" -ForegroundColor White
+    }
+    Write-Host ""
+}
 
 if ($steamLogs.Count -gt 0) {
     foreach ($sl in $steamLogs) {

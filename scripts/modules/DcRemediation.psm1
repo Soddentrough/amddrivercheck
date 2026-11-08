@@ -463,6 +463,86 @@ function Repair-DcEthernetSettings {
             Write-Host " [NOTICE: $($_.Exception.Message)]" -ForegroundColor Yellow
         }
 
+        # Apply NetAdapterCx / NDIS Idle Power-Down & IEEE 802.3bz Stability Fixes in Driver Class Key
+        try {
+            $netClassBase = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}"
+            if (Test-Path $netClassBase) {
+                $classSubKeys = Get-ChildItem -Path $netClassBase -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^\d{4}$' }
+                foreach ($csk in $classSubKeys) {
+                    $props = Get-ItemProperty -Path $csk.PSPath -ErrorAction SilentlyContinue
+                    if ($props -and (($adapter.InterfaceGuid -and $props.NetCfgInstanceId -eq $adapter.InterfaceGuid) -or ($props.DriverDesc -eq $adapter.InterfaceDescription))) {
+                        $regModified = $false
+                        Write-Host "Disabling NetAdapterCx WDF S0-Idle, D3Cold, LTR & Firmware Offload states in driver registry ($($csk.PSChildName))..." -ForegroundColor White
+                        if ($null -ne $props.IdleTimeoutMs -or $props.PSObject.Properties.Name -contains 'IdleTimeoutMs') {
+                            Set-ItemProperty -Path $csk.PSPath -Name "IdleTimeoutMs" -Value "0" -ErrorAction SilentlyContinue
+                            Write-Host "  [OK] IdleTimeoutMs = 0 (WDF S0-Idle power-down disabled in e2fn.sys)" -ForegroundColor Green
+                            $regModified = $true
+                        }
+                        Set-ItemProperty -Path $csk.PSPath -Name "EnableD3ColdInS0" -Value "0" -ErrorAction SilentlyContinue
+                        Write-Host "  [OK] EnableD3ColdInS0 = 0 (D3cold in S0 disabled)" -ForegroundColor Green
+                        $regModified = $true
+
+                        Set-ItemProperty -Path $csk.PSPath -Name "LatencyToleranceReporting" -Value "0" -ErrorAction SilentlyContinue
+                        Write-Host "  [OK] LatencyToleranceReporting = 0 (Dynamic PCIe LTR 5s timer disabled)" -ForegroundColor Green
+                        $regModified = $true
+
+                        if ($null -ne $props.'*PMARPOffload') {
+                            Set-ItemProperty -Path $csk.PSPath -Name "*PMARPOffload" -Value "0" -ErrorAction SilentlyContinue
+                            Write-Host "  [OK] *PMARPOffload = 0 (Firmware ARP Offload disabled)" -ForegroundColor Green
+                            $regModified = $true
+                        }
+                        if ($null -ne $props.'*PMNSOffload') {
+                            Set-ItemProperty -Path $csk.PSPath -Name "*PMNSOffload" -Value "0" -ErrorAction SilentlyContinue
+                            Write-Host "  [OK] *PMNSOffload = 0 (Firmware NS Offload disabled)" -ForegroundColor Green
+                            $regModified = $true
+                        }
+                        if ($null -ne $props.'*IdleRestriction') {
+                            Set-ItemProperty -Path $csk.PSPath -Name "*IdleRestriction" -Value "1" -ErrorAction SilentlyContinue
+                            Write-Host "  [OK] *IdleRestriction = 1" -ForegroundColor Green
+                            $regModified = $true
+                        }
+                        if ($null -ne $props.ULPMode) {
+                            Set-ItemProperty -Path $csk.PSPath -Name "ULPMode" -Value "0" -ErrorAction SilentlyContinue
+                            Write-Host "  [OK] ULPMode = 0 (Ultra Low Power disabled)" -ForegroundColor Green
+                            $regModified = $true
+                        }
+                        if ($null -ne $props.ReduceSpeedOnPowerDown) {
+                            Set-ItemProperty -Path $csk.PSPath -Name "ReduceSpeedOnPowerDown" -Value "0" -ErrorAction SilentlyContinue
+                            Write-Host "  [OK] ReduceSpeedOnPowerDown = 0" -ForegroundColor Green
+                            $regModified = $true
+                        }
+                        if ($null -ne $props.'*ModernStandbyWoLMagicPacket') {
+                            Set-ItemProperty -Path $csk.PSPath -Name "*ModernStandbyWoLMagicPacket" -Value "0" -ErrorAction SilentlyContinue
+                            Write-Host "  [OK] *ModernStandbyWoLMagicPacket = 0" -ForegroundColor Green
+                            $regModified = $true
+                        }
+                        Set-ItemProperty -Path $csk.PSPath -Name "*EEE" -Value "0" -ErrorAction SilentlyContinue
+                        Write-Host "  [OK] *EEE = 0 (Energy Efficient Ethernet disabled)" -ForegroundColor Green
+                        $regModified = $true
+                        if ($Speed -eq "Current" -and $props.'*SpeedDuplex' -eq "2500") {
+                            Set-ItemProperty -Path $csk.PSPath -Name "*SpeedDuplex" -Value "0" -ErrorAction SilentlyContinue
+                            Write-Host "  [OK] *SpeedDuplex = 0 (Restored IEEE 802.3bz Auto Negotiation from forced 2.5G)" -ForegroundColor Green
+                            $regModified = $true
+                        }
+                        $fcEnumPath = Join-Path $csk.PSPath "Ndi\params\*FlowControl\Enum"
+                        if ((Test-Path $fcEnumPath) -and $null -ne (Get-ItemProperty -Path $fcEnumPath -Name "4" -ErrorAction SilentlyContinue).'4') {
+                            Set-ItemProperty -Path $csk.PSPath -Name "*FlowControl" -Value "4" -ErrorAction SilentlyContinue
+                            Write-Host "  [OK] *FlowControl = 4 (Auto Negotiation)" -ForegroundColor Green
+                            $regModified = $true
+                        }
+                        if ($regModified) {
+                            Write-Host "Restarting adapter '$($adapter.Name)' to apply NetAdapterCx power settings..." -NoNewline -ForegroundColor White
+                            Restart-NetAdapter -Name $adapter.Name -ErrorAction SilentlyContinue
+                            Write-Host " [ OK ]" -ForegroundColor Green
+                        }
+                        break
+                    }
+                }
+            }
+        } catch {
+            Write-Host " [NOTICE: $($_.Exception.Message)]" -ForegroundColor Yellow
+        }
+
         Write-Host "[SUCCESS] Network adapter configuration applied." -ForegroundColor Green
         return $true
     }
@@ -583,16 +663,23 @@ function Repair-DcPciePowerSettings {
 
     if ($PSCmdlet.ShouldProcess("Active Power Scheme (SCHEME_CURRENT)", "Disable PCIe Link State Power Management (ASPM)")) {
         try {
-            $subGroup = "501a4d13-42af-4429-9e56-9d9c20330821"
+            $subGroup = "501a4d13-42af-4429-9fd1-a8218c268e20"
             $setting = "ee12f906-d277-404b-b6da-e5fa1a576df5"
 
             & powercfg /setacvalueindex SCHEME_CURRENT $subGroup $setting 0
+            $acExit = $LASTEXITCODE
             & powercfg /setdcvalueindex SCHEME_CURRENT $subGroup $setting 0
+            $dcExit = $LASTEXITCODE
             & powercfg /setactive SCHEME_CURRENT
 
+            if ($acExit -ne 0 -or $dcExit -ne 0) {
+                Write-Host "  [FAILED] powercfg returned non-zero exit code (AC=$acExit, DC=$dcExit)." -ForegroundColor Red
+                return $false
+            }
+
             Write-Host "  [OK] Link State Power Management set to OFF for AC and DC." -ForegroundColor Green
-            Write-Host "[SUCCESS] PCIe bus power transitions disabled. GPU will maintain active link clock." -ForegroundColor Green
-            Write-Host "This resolves random driver timeouts (TDR 4101), sleep-wake crashes, and PCIe WHEA errors." -ForegroundColor DarkGray
+            Write-Host "[SUCCESS] PCIe bus power transitions disabled. GPU and chipset PCIe endpoints will maintain active link clock." -ForegroundColor Green
+            Write-Host "This resolves random driver timeouts (TDR 4101), sleep-wake crashes, PCIe WHEA errors, and 2.5GbE NIC DMA hangs." -ForegroundColor DarkGray
             return $true
         } catch {
             Write-Host "  [FAILED] Could not update power settings: $($_.Exception.Message)" -ForegroundColor Red

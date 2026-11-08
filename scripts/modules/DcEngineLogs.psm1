@@ -98,6 +98,82 @@ function Get-DcSteamLogs {
     return $results
 }
 
+function Get-DcSteamGameSessions {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [datetime]$Cutoff = (Get-Date).AddDays(-14),
+
+        [Parameter(Mandatory = $false)]
+        [datetime]$EndTime = (Get-Date),
+
+        [Parameter(Mandatory = $false)]
+        [string]$SteamPath
+    )
+
+    $resolvedSteamPath = if ($SteamPath) { $SteamPath } else { Get-DcSteamPath }
+    if (-not $resolvedSteamPath) { return @() }
+
+    $sessions = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $streamingLog = Join-Path $resolvedSteamPath "logs\streaming_log.txt"
+
+    if (Test-Path $streamingLog) {
+        $lines = Get-Content -Path $streamingLog -Tail 2500 -ErrorAction SilentlyContinue
+        if ($lines) {
+            $openSessions = @{}
+            foreach ($line in $lines) {
+                if ($line -match '^\[(?<ts>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\].*?(?:Game Recording - would start recording game|Game Recording - game started \[gameid=|Adding process \d+ for gameID)\s*(?<appid>\d+)') {
+                    $appId = $Matches['appid']
+                    if ($appId -eq '1') { continue }
+                    $ts = [datetime]::MinValue
+                    if ([datetime]::TryParseExact($Matches['ts'], 'yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$ts)) {
+                        if (-not $openSessions.ContainsKey($appId)) {
+                            $openSessions[$appId] = $ts
+                        }
+                    }
+                } elseif ($line -match '^\[(?<ts>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\].*?Game Recording - game stopped \[gameid=(?<appid>\d+)\]') {
+                    $appId = $Matches['appid']
+                    if ($appId -eq '1') { continue }
+                    $ts = [datetime]::MinValue
+                    if ([datetime]::TryParseExact($Matches['ts'], 'yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$ts)) {
+                        if ($openSessions.ContainsKey($appId)) {
+                            $startTs = $openSessions[$appId]
+                            $openSessions.Remove($appId)
+                            if ($ts -ge $Cutoff -and $startTs -le $EndTime -and $ts -ge $startTs) {
+                                $sessions.Add([PSCustomObject]@{
+                                    AppId           = $appId
+                                    StartTime       = $startTs
+                                    EndTime         = $ts
+                                    IsActive        = $false
+                                    DurationMinutes = [math]::Round(($ts - $startTs).TotalMinutes, 1)
+                                    SourceLog       = "streaming_log.txt"
+                                })
+                            }
+                        }
+                    }
+                }
+            }
+
+            foreach ($activeAppId in @($openSessions.Keys)) {
+                $startTs = $openSessions[$activeAppId]
+                $nowTs = if ($EndTime -lt (Get-Date)) { $EndTime } else { Get-Date }
+                if ($nowTs -ge $Cutoff -and $startTs -le $EndTime -and $nowTs -ge $startTs) {
+                    $sessions.Add([PSCustomObject]@{
+                        AppId           = $activeAppId
+                        StartTime       = $startTs
+                        EndTime         = $nowTs
+                        IsActive        = $true
+                        DurationMinutes = [math]::Round(($nowTs - $startTs).TotalMinutes, 1)
+                        SourceLog       = "streaming_log.txt"
+                    })
+                }
+            }
+        }
+    }
+
+    return @($sessions | Sort-Object StartTime -Descending)
+}
+
 function Get-DcEngineLogs {
     [CmdletBinding()]
     param(
@@ -284,4 +360,4 @@ function Get-DcEngineLogs {
     return $results
 }
 
-Export-ModuleMember -Function Get-DcSteamPath, Get-DcSteamLogs, Get-DcEngineLogs, Protect-DcLogText
+Export-ModuleMember -Function Get-DcSteamPath, Get-DcSteamLogs, Get-DcSteamGameSessions, Get-DcEngineLogs, Protect-DcLogText

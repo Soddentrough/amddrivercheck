@@ -518,6 +518,7 @@ if (-not $Quiet) {
 
 $engineLogs = Get-DcEngineLogs -Cutoff $cutoff -EndTime $endTime
 $steamLogs = Get-DcSteamLogs -Cutoff $cutoff -EndTime $endTime
+$steamGameSessions = Get-DcSteamGameSessions -Cutoff $cutoff -EndTime $endTime
 
 if ($engineLogs.Count -gt 0 -or $steamLogs.Count -gt 0) {
     if (-not $Quiet) {
@@ -575,6 +576,16 @@ if (-not $Quiet) {
     if ($telemetry.TdrEvents.Count -gt 0) {
         foreach ($tdr in $telemetry.TdrEvents) {
             Write-Host "  [!] GPU Driver TDR Reset [$($tdr.TimeCreated)]: $($tdr.Message)" -ForegroundColor Red
+        }
+    }
+    if ($telemetry.PSObject.Properties['TdrWorkloads'] -and $telemetry.TdrWorkloads.Count -gt 0) {
+        foreach ($tw in ($telemetry.TdrWorkloads | Select-Object -First 3)) {
+            Write-Host "  [!] Pre-TDR GPU Workload [$($tw.TimeCreated)]: $($tw.Message)" -ForegroundColor Yellow
+        }
+    }
+    if ($telemetry.PSObject.Properties['DisplayHotplugEvents'] -and $telemetry.DisplayHotplugEvents.Count -gt 0) {
+        foreach ($dhp in ($telemetry.DisplayHotplugEvents | Select-Object -First 3)) {
+            Write-Host "  [!] Display Hotplug / Link Loss [$($dhp.TimeCreated)]: $($dhp.Message)" -ForegroundColor Yellow
         }
     }
     if ($telemetry.KernelBugChecks.Count -gt 0) {
@@ -734,6 +745,15 @@ if (-not $Quiet) {
         Write-Host "  Adapter: $($net.Name) ($($net.InterfaceDescription))" -ForegroundColor White
         $portStr = if ($net.UdpPortRange) { " | UDP Ports: $($net.UdpPortRange)" } else { "" }
         Write-Host "    +- Status: $($net.Status) | Speed/Duplex: $($net.SpeedDuplex) | VLAN: $($net.PriorityVLAN)$portStr" -ForegroundColor DarkGray
+        if ($net.PowerSavingSummary -and $net.PowerSavingSummary -ne "Default") {
+            Write-Host "    +- Power States: $($net.PowerSavingSummary)" -ForegroundColor $(if ($net.HasPowerSavingRisk) { [ConsoleColor]::Yellow } else { [ConsoleColor]::DarkGray })
+        }
+        if ($net.HasPowerSavingRisk) {
+            Write-Host "    [!] CAUTION: NetAdapterCx 5s idle power-down / ULP / EEE is active on $($net.Name). Run '.\Analyze-LatestCrash.ps1 -RepairNetwork' as Admin." -ForegroundColor Yellow
+        }
+        if ($net.HasForced25GSpeed) {
+            Write-Host "    [!] CAUTION: Speed & Duplex is forced to 2.5 Gbps (*SpeedDuplex=2500); IEEE 802.3bz requires Auto Negotiation." -ForegroundColor Yellow
+        }
         if ($net.IsUdpConstrained) {
             Write-Host "    [!] CAUTION: UDP dynamic port space is constrained ($($net.UdpPortRange) vs TCP $($net.TcpPortRange))." -ForegroundColor Yellow
             Write-Host "        Bursty matchmaking and server queries can exhaust UDP ports, causing socket drops." -ForegroundColor DarkYellow
@@ -758,7 +778,8 @@ $findingResult = Resolve-DcDiagnosticFindings `
     -ZombieProcesses $zombieProcesses `
     -ScanMode $scanMode `
     -MaxLookbackDays $MaxLookbackDays `
-    -IncidentAnchor $incidentAnchor
+    -IncidentAnchor $incidentAnchor `
+    -SteamGameSessions $steamGameSessions
 
 $rootCauseTitle = $findingResult.RootCauseTitle
 $rootCauseDesc = $findingResult.RootCauseDescription

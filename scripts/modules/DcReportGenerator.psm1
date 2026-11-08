@@ -101,7 +101,8 @@ function Export-DcHtmlReport {
             $gfx = $telem.GraphicsDriverSettings
             $tdrInfo = if ($gfx.TdrDelay) { "TdrDelay: $($gfx.TdrDelay)s" } else { "TdrDelay: Default (2s)" }
             $hagsInfo = "HAGS: $($gfx.HAGSStatus)"
-            $telemRows.Add("<div class='alert-card' style='background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.3);'><strong>&#x1F3AE; Graphics Driver Subsystem:</strong> $hagsInfo | $tdrInfo</div>")
+            $mpoInfo = if ($gfx.PSObject.Properties['IsMpoDisabled'] -and $gfx.IsMpoDisabled) { "DWM MPO: Disabled (OverlayTestMode=5)" } else { "DWM MPO: Active (Default)" }
+            $telemRows.Add("<div class='alert-card' style='background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.3);'><strong>&#x1F3AE; Graphics Driver Subsystem:</strong> $hagsInfo | $tdrInfo | $mpoInfo</div>")
         }
         foreach ($pcie in $telem.PcieWheaErrors) {
             $hasTelemIssue = $true
@@ -118,6 +119,16 @@ function Export-DcHtmlReport {
         foreach ($tdr in $telem.TdrEvents) {
             $hasTelemIssue = $true
             $telemRows.Add("<div class='alert-card alert-critical'><strong>&#x1F5A5; GPU Display Driver TDR Reset [$($tdr.TimeCreated)]:</strong> $($tdr.Message)</div>")
+        }
+        if ($telem.PSObject.Properties['TdrWorkloads'] -and $telem.TdrWorkloads -and $telem.TdrWorkloads.Count -gt 0) {
+            foreach ($tw in ($telem.TdrWorkloads | Select-Object -First 3)) {
+                $telemRows.Add("<div class='alert-card alert-warning'><strong>&#x2699; Pre-TDR GPU Compute / Benchmark Workload [$($tw.TimeCreated)]:</strong> $($tw.Message)</div>")
+            }
+        }
+        if ($telem.PSObject.Properties['DisplayHotplugEvents'] -and $telem.DisplayHotplugEvents -and $telem.DisplayHotplugEvents.Count -gt 0) {
+            foreach ($dhp in ($telem.DisplayHotplugEvents | Select-Object -First 3)) {
+                $telemRows.Add("<div class='alert-card alert-warning'><strong>&#x1F5A5; Display Hotplug / Surprise-Removal (Event 1010) [$($dhp.TimeCreated)]:</strong> $($dhp.Message)</div>")
+            }
         }
         foreach ($bsod in $telem.KernelBugChecks) {
             $hasTelemIssue = $true

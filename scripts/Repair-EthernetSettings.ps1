@@ -4,11 +4,12 @@
 .DESCRIPTION
     Applies recommended stability fixes to Ethernet adapters (Intel I225/I226 and Realtek)
     and expands Windows UDP ephemeral dynamic port ranges:
-      1. Locks Speed & Duplex to user-specified rate (2.5 Gbps, 1.0 Gbps Full Duplex, or Auto) to prevent PHY retraining drops.
-      2. Disables Packet Priority & VLAN tagging to minimize jitter.
-      3. Expands Windows UDP ephemeral dynamic port space (start 1024, count 64511) to eliminate socket exhaustion (Event 4266).
+      1. Disables NetAdapterCx 5-second idle power-down (*IdleRestriction=1), ULPMode, ReduceSpeedOnPowerDown, ModernStandbyWoL, and EEE.
+      2. Restores IEEE 802.3bz Auto-Negotiation (*SpeedDuplex=0) if forced to 2.5 Gbps, or sets user-specified rate, and sets Flow Control to Auto.
+      3. Disables Packet Priority & VLAN tagging to minimize jitter.
+      4. Expands Windows UDP ephemeral dynamic port space (start 1024, count 64511) to eliminate socket exhaustion (Event 4266).
 .PARAMETER Speed
-    Target speed: "Current" (default - preserves existing rate), "2.5G", "1.0G", or "Auto".
+    Target speed: "Current" (default - preserves existing rate or restores Auto from forced 2.5G), "Auto", "1.0G", or "2.5G".
 .PARAMETER ExpandUdpPorts
     Expand Windows dynamic UDP ephemeral port range to match TCP (1024-65535, 64,511 ports), preventing Event 4266 port exhaustion under heavy Steam/game matchmaking socket traffic.
 #>

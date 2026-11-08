@@ -28,22 +28,27 @@ Write-Host "  NETWORK ADAPTER HEALTH & LINK STABILITY AUDIT" -ForegroundColor Ma
 Write-Host "========================================================================" -ForegroundColor Magenta
 Write-Host ""
 
-$adapters = Get-NetAdapter -ErrorAction SilentlyContinue
+$netHealth = Get-DcNetworkHealth
 
 Write-Host "Active Network Adapters:" -ForegroundColor Cyan
-foreach ($a in $adapters) {
-    $speedDuplex = Get-NetAdapterAdvancedProperty -Name $a.Name -DisplayName "Speed & Duplex" -ErrorAction SilentlyContinue
-    $sdVal = if ($speedDuplex) { $speedDuplex.DisplayValue } else { "N/A" }
-
-    $vlan = Get-NetAdapterAdvancedProperty -Name $a.Name -DisplayName "Packet Priority & VLAN" -ErrorAction SilentlyContinue
-    $vlanVal = if ($vlan) { $vlan.DisplayValue } else { "N/A" }
-
+foreach ($a in $netHealth) {
     $color = if ($a.Status -eq "Up") { [ConsoleColor]::Green } else { [ConsoleColor]::DarkGray }
     Write-Host "  * $($a.Name) - $($a.InterfaceDescription)" -ForegroundColor White
     Write-Host "    +- Status:        $($a.Status)" -ForegroundColor $color
     Write-Host "    +- Link Speed:    $($a.LinkSpeed)" -ForegroundColor DarkGray
-    Write-Host "    +- Speed/Duplex:  $sdVal" -ForegroundColor DarkGray
-    Write-Host "    +- Priority/VLAN: $vlanVal" -ForegroundColor DarkGray
+    Write-Host "    +- Speed/Duplex:  $($a.SpeedDuplex)" -ForegroundColor DarkGray
+    Write-Host "    +- Priority/VLAN: $($a.PriorityVLAN)" -ForegroundColor DarkGray
+    Write-Host "    +- Power States:  $($a.PowerSavingSummary)" -ForegroundColor $(if ($a.HasPowerSavingRisk) { [ConsoleColor]::Yellow } else { [ConsoleColor]::DarkGray })
+    if ($a.HasPowerSavingRisk) {
+        Write-Host "    [!] WARNING: NetAdapterCx Idle Power-Down / ULP / EEE is active on this 2.5GbE controller." -ForegroundColor Yellow
+        Write-Host "        Under chipset PCIe load during 3D gaming, 5s idle power transitions can freeze TX/RX DMA rings." -ForegroundColor DarkYellow
+        Write-Host "        Remediation: run '.\scripts\Repair-EthernetSettings.ps1' as Administrator." -ForegroundColor Cyan
+    }
+    if ($a.HasForced25GSpeed) {
+        Write-Host "    [!] WARNING: Speed & Duplex is forced to 2.5 Gbps (*SpeedDuplex=2500) instead of Auto Negotiation." -ForegroundColor Yellow
+        Write-Host "        IEEE 802.3bz (2.5GBASE-T) requires Auto-Negotiation for PHY master/slave clock training." -ForegroundColor DarkYellow
+        Write-Host "        Remediation: run '.\scripts\Repair-EthernetSettings.ps1 -Speed Auto' as Administrator." -ForegroundColor Cyan
+    }
 }
 
 Write-Host "`nWindows Dynamic (Ephemeral) Port Allocation:" -ForegroundColor Cyan
