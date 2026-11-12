@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Automated Game & System Crash Diagnostic Suite (Unified Engine)
 .DESCRIPTION
@@ -449,6 +449,21 @@ if (-not $Quiet) {
 $dumpFiles = Get-DcCrashDumps -Cutoff $cutoff -EndTime $endTime
 $parsedDumps = [System.Collections.Generic.List[PSCustomObject]]::new()
 
+# Report evidence sources that exist but cannot be read, instead of silently skipping them.
+$unreadableSources = [System.Collections.Generic.List[string]]::new()
+foreach ($probe in @((Join-Path $env:SystemRoot "Minidump"), (Join-Path $env:SystemRoot "LiveKernelReports"))) {
+    if (Test-Path -LiteralPath $probe -ErrorAction SilentlyContinue) {
+        try {
+            [void](Get-ChildItem -LiteralPath $probe -Force -ErrorAction Stop | Select-Object -First 1)
+        } catch {
+            $unreadableSources.Add("$probe - Windows crash dump location found (requires Administrator privileges). Install WinDbg from the Microsoft Store ('winget install Microsoft.WinDbg') and re-run DriverCheck from an Administrator PowerShell to analyze these dumps.")
+        }
+    }
+}
+if (-not $Quiet) {
+    foreach ($u in $unreadableSources) { Write-Host "  [i] $u" -ForegroundColor Cyan }
+}
+
 if ($dumpFiles.Count -gt 0) {
     foreach ($df in $dumpFiles) {
         $dumpObj = Read-DcMinidump -Path $df.FullName
@@ -462,6 +477,15 @@ if ($dumpFiles.Count -gt 0) {
                 if ($dumpObj.ExceptionCode) {
                     Write-Host "  +- Exception:        $($dumpObj.ExceptionCode) ($($dumpObj.ExceptionMeaning))" -ForegroundColor Red
                     Write-Host "  +- Faulting Module:  $($dumpObj.FaultingIP)" -ForegroundColor White
+                }
+                if ($dumpObj.ApiContext) {
+                    Write-Host "  +- API Context:      $($dumpObj.ApiContext)" -ForegroundColor Magenta
+                }
+                if ($dumpObj.CallStack -and $dumpObj.CallStack.Count -gt 0) {
+                    Write-Host "  +- Call Stack ($($dumpObj.CallStack.Count) frames):" -ForegroundColor DarkGray
+                    foreach ($fr in ($dumpObj.CallStack | Select-Object -First 4)) {
+                        Write-Host "       * $fr" -ForegroundColor Gray
+                    }
                 }
                 if ($dumpObj.GpuDriverVersion) {
                     Write-Host "  +- Dump GPU Driver:  v$($dumpObj.GpuDriverVersion)" -ForegroundColor Cyan
@@ -555,17 +579,15 @@ if (-not $Quiet) {
 $telemetry = Get-DcSystemTelemetry -Cutoff $cutoff -EndTime $endTime
 if (-not $Quiet) {
     if ($telemetry.FastStartup.FastStartupEnabled) {
-        Write-Host "  [!] Power Configuration: Windows Fast Startup is ENABLED (HiberbootEnabled = 1)" -ForegroundColor Yellow
-        Write-Host "      Notice: Fast Startup persists kernel power states and can cause 0x9F power loop crashes." -ForegroundColor DarkYellow
+        Write-Host "  [i] Config: Windows Fast Startup is enabled (HiberbootEnabled = 1)" -ForegroundColor Gray
     } else {
-        Write-Host "  [ OK ] Power Configuration: Fast Startup is Disabled (Clean Cold Boot Enabled)." -ForegroundColor Green
+        Write-Host "  [i] Config: Windows Fast Startup is disabled" -ForegroundColor Gray
     }
 
     if ($telemetry.PciePowerManagement.IsEnabled) {
-        Write-Host "  [!] PCIe Power Configuration: Link State Power Management is ENABLED ($($telemetry.PciePowerManagement.ACSettingName))" -ForegroundColor Yellow
-        Write-Host "      Notice: Low-power L0s/L1 bus states trigger TDR timeouts (4101) on PCIe 4.0/5.0 GPUs." -ForegroundColor DarkYellow
+        Write-Host "  [i] Config: PCIe Link State Power Management is enabled ($($telemetry.PciePowerManagement.ACSettingName))" -ForegroundColor Gray
     } else {
-        Write-Host "  [ OK ] PCIe Power Configuration: Link State Power Management is Disabled (High-Speed Link Maintained)." -ForegroundColor Green
+        Write-Host "  [i] Config: PCIe Link State Power Management is disabled" -ForegroundColor Gray
     }
 
     if ($telemetry.WheaErrors.Count -gt 0) {
@@ -575,7 +597,7 @@ if (-not $Quiet) {
     }
     if ($telemetry.TdrEvents.Count -gt 0) {
         foreach ($tdr in $telemetry.TdrEvents) {
-            Write-Host "  [!] GPU Driver TDR Reset [$($tdr.TimeCreated)]: $($tdr.Message)" -ForegroundColor Red
+            Write-Host "  [!] GPU watchdog event [$($tdr.TimeCreated)]: $($tdr.Message)" -ForegroundColor Red
         }
     }
     if ($telemetry.PSObject.Properties['TdrWorkloads'] -and $telemetry.TdrWorkloads.Count -gt 0) {
@@ -638,7 +660,7 @@ if (-not $Quiet) {
     }
 
     if ($telemetry.WheaErrors.Count -eq 0 -and $telemetry.TdrEvents.Count -eq 0 -and $telemetry.KernelBugChecks.Count -eq 0 -and $telemetry.AbruptReboots.Count -eq 0 -and $telemetry.NetworkDrops.Count -eq 0 -and $telemetry.PciDeviceResets.Count -eq 0 -and $telemetry.UdpPortExhaustions.Count -eq 0 -and $telemetry.CpuThrottlingEvents.Count -eq 0) {
-        Write-Host "  [ OK ] No GPU driver TDR resets, Kernel BugChecks, network drops, or hardware errors in event telemetry." -ForegroundColor Green
+        Write-Host "  [i] No GPU timeout events, bugchecks, network drops, or hardware error reports were found in the event logs that were read." -ForegroundColor Gray
     }
     Write-Host ""
 }
@@ -669,21 +691,21 @@ if (-not $Quiet) {
     Write-Host "  BIOS        : $($mbHealth.BiosVersion) | Released: $($mbHealth.BiosReleaseDate)$biosAgeStr" -ForegroundColor $(if ($mbHealth.IsBiosOutdated) { [ConsoleColor]::Yellow } else { [ConsoleColor]::White })
     Write-Host "  Chipset     : $($mbHealth.Summary)" -ForegroundColor $(if ($mbHealth.IsHealthy) { [ConsoleColor]::Green } else { [ConsoleColor]::Yellow })
     if ($mbHealth.MissingControllers.Count -gt 0) {
-        Write-Host "  [!] Missing Chipset Controllers: $($mbHealth.MissingControllers -join ', ')" -ForegroundColor Red
+        Write-Host "  [i] Devices without a loaded driver: $($mbHealth.MissingControllers -join ', ')" -ForegroundColor Red
     }
 
     # System Memory (RAM)
     $memColor = if ($memHealth.IsRunningBaseJedec) { [ConsoleColor]::Yellow } else { [ConsoleColor]::White }
     Write-Host "  RAM         : $($memHealth.Summary)" -ForegroundColor $memColor
     if ($memHealth.IsRunningBaseJedec) {
-        Write-Host "  [!] Notice: RAM appears to be running at base JEDEC speed ($($memHealth.ConfiguredClockSpeed) MT/s) while rated for $($memHealth.MaxSpeed) MT/s. Consider enabling XMP/EXPO in BIOS." -ForegroundColor DarkYellow
+        Write-Host "  [i] RAM configured speed is $($memHealth.ConfiguredClockSpeed) MT/s; module rated speed is $($memHealth.MaxSpeed) MT/s." -ForegroundColor Gray
     }
 
     # Storage Free Space
     $lowDisks = @($storageHealth | Where-Object { $_.IsLowSpace })
     if ($lowDisks.Count -gt 0) {
         foreach ($ld in $lowDisks) {
-            Write-Host "  [!] Low Storage Warning: Drive $($ld.DeviceID) ($($ld.VolumeName)) has only $($ld.FreeGb) GB free ($($ld.PercentFree)%). Low free space can cause shader compiler timeouts and pagefile exhaustion." -ForegroundColor Red
+            Write-Host "  [i] Low free space: Drive $($ld.DeviceID) ($($ld.VolumeName)) has $($ld.FreeGb) GB free ($($ld.PercentFree)%)." -ForegroundColor Red
         }
     }
 
@@ -713,12 +735,12 @@ if (-not $Quiet) {
 
     if ($gpuHealth.HasGhostDrivers) {
         foreach ($gd in $gpuHealth.GhostGpuDrivers) {
-            Write-Host "  [!] Conflicting Driver Warning: $gd" -ForegroundColor Red
+            Write-Host "  [i] Additional GPU driver entries present: $gd" -ForegroundColor Gray
         }
     }
 
     if ($gpuHealth.DualGpuConflict) {
-        Write-Host "  [!] WARNING: $($gpuHealth.DualGpuDetails)" -ForegroundColor Red
+        Write-Host "  [i] $($gpuHealth.DualGpuDetails)" -ForegroundColor Gray
     } elseif ($gpuHealth.HybridMultiGpu) {
         Write-Host "  [i] Multi-GPU Setup: $($gpuHealth.HybridMultiGpuDetails)" -ForegroundColor Cyan
     }
@@ -728,17 +750,17 @@ if (-not $Quiet) {
         Write-Host "  Display: $($d.Name) ($($d.Connection))" -ForegroundColor $dispColor
         Write-Host "    +- Active Mode:    $($d.ActiveResolution) @ $($d.ActiveRefreshRate) Hz" -ForegroundColor DarkGray
         if ($d.HasTimingRisk) {
-            Write-Host "    [!] HAZARD: High-Risk EDID Timings / DP 1.2a Scaler Saturation Detected!" -ForegroundColor Red
+            Write-Host "    [i] EDID timing heuristic matched (pixel clock / blanking thresholds); this is a heuristic, not an observed fault." -ForegroundColor Gray
         }
     }
 
     if ($kernelDriverHealth.RogueDriversDetected) {
-        Write-Host "  [!] Rogue Kernel I/O Driver Warning: Detected legacy port access driver(s) active on boot:" -ForegroundColor Red
+        Write-Host "  [i] Legacy port-I/O kernel driver(s) present and set to start on boot:" -ForegroundColor Gray
         foreach ($kd in ($kernelDriverHealth.Drivers | Where-Object { $_.IsActive -and -not $_.IsDisabled })) {
             Write-Host "      * $($kd.FileName) (Service: $($kd.ServiceName), Start: $($kd.StartType)) - $($kd.Software)" -ForegroundColor Red
         }
     } else {
-        Write-Host "  [ OK ] Kernel Driver Security: No problematic legacy I/O drivers (inpoutx64/WinRing0/ENE) detected." -ForegroundColor Green
+        Write-Host "  [i] No legacy port-I/O kernel drivers (inpoutx64/WinRing0/ENE) found." -ForegroundColor Gray
     }
 
     foreach ($net in $netHealth) {
@@ -749,15 +771,13 @@ if (-not $Quiet) {
             Write-Host "    +- Power States: $($net.PowerSavingSummary)" -ForegroundColor $(if ($net.HasPowerSavingRisk) { [ConsoleColor]::Yellow } else { [ConsoleColor]::DarkGray })
         }
         if ($net.HasPowerSavingRisk) {
-            Write-Host "    [!] CAUTION: NetAdapterCx 5s idle power-down / ULP / EEE is active on $($net.Name). Run '.\Analyze-LatestCrash.ps1 -RepairNetwork' as Admin." -ForegroundColor Yellow
+            Write-Host "    [i] Config: adapter idle power-down / ULP / EEE settings are active on $($net.Name)." -ForegroundColor Gray
         }
         if ($net.HasForced25GSpeed) {
-            Write-Host "    [!] CAUTION: Speed & Duplex is forced to 2.5 Gbps (*SpeedDuplex=2500); IEEE 802.3bz requires Auto Negotiation." -ForegroundColor Yellow
+            Write-Host "    [i] Config: Speed & Duplex is forced to 2.5 Gbps (*SpeedDuplex=2500)." -ForegroundColor Gray
         }
         if ($net.IsUdpConstrained) {
-            Write-Host "    [!] CAUTION: UDP dynamic port space is constrained ($($net.UdpPortRange) vs TCP $($net.TcpPortRange))." -ForegroundColor Yellow
-            Write-Host "        Bursty matchmaking and server queries can exhaust UDP ports, causing socket drops." -ForegroundColor DarkYellow
-            Write-Host "        Remediation: run '.\Analyze-LatestCrash.ps1 -ExpandUdpPorts' as Administrator." -ForegroundColor DarkYellow
+            Write-Host "    [i] Config: UDP dynamic port range is $($net.UdpPortRange); TCP range is $($net.TcpPortRange)." -ForegroundColor Gray
         }
     }
     Write-Host ""
@@ -779,7 +799,10 @@ $findingResult = Resolve-DcDiagnosticFindings `
     -ScanMode $scanMode `
     -MaxLookbackDays $MaxLookbackDays `
     -IncidentAnchor $incidentAnchor `
-    -SteamGameSessions $steamGameSessions
+    -SteamGameSessions $steamGameSessions `
+    -UnreadableSources @($unreadableSources) `
+    -EngineLogs @($engineLogs) `
+    -SteamLogs @($steamLogs)
 
 $rootCauseTitle = $findingResult.RootCauseTitle
 $rootCauseDesc = $findingResult.RootCauseDescription
@@ -787,125 +810,61 @@ $rootCauseGuidance = $findingResult.RootCauseGuidance
 $rootCauseSeverity = $findingResult.RootCauseSeverity
 $allFindings = @($findingResult.Findings)
 $secondaryFindings = @($findingResult.SecondaryFindings)
+$leads = if ($findingResult.PSObject.Properties['Leads'] -and $findingResult.Leads) { @($findingResult.Leads) } else { @() }
 
-# -------------------------------------------------------------------------
-# HISTORICAL RESOLVED TIMEOUT & SYSTEM CHANGE CORRELATION
-# -------------------------------------------------------------------------
+# The historical "what changed to resolve it" correlation was removed: it inferred causes
+# from coincident timestamps. Nothing here is inferred.
 $resolvedHistory = $null
-if ($InvestigateResolved -or $scanMode -eq "LatestIncidentClean") {
-    $histLookback = if ($InvestigateResolved) { $MaxLookbackDays } else { [math]::Max($MaxLookbackDays, 180) }
-    $activeGpuDrvVer = $null
-    if ($gpuHealth -and $gpuHealth.Gpus -and $gpuHealth.Gpus.Count -gt 0) {
-        $primaryGpu = $gpuHealth.Gpus | Where-Object { -not $_.IsGeneric } | Select-Object -First 1
-        if ($primaryGpu) { $activeGpuDrvVer = $primaryGpu.DriverVersion }
-    }
-    $resolvedHistory = Find-DcResolvedIncidentHistory -LookbackDays $histLookback -CurrentGpuDriverVersion $activeGpuDrvVer
-
-    if ($resolvedHistory -and $resolvedHistory.HasResolvedEpisodes -and $resolvedHistory.PrimaryResolvedEpisode) {
-        $ep = $resolvedHistory.PrimaryResolvedEpisode
-        if ($InvestigateResolved -or $rootCauseSeverity -eq "Healthy") {
-            $rootCauseTitle = "HISTORICAL TIMEOUT EPISODE RESOLVED ($($ep.QuietDaysSinceEnd) DAYS CRASH-FREE)"
-            $drvDiffText = if ($ep.HistoricalDriverVersion -and $ep.CurrentDriverVersion -and ($ep.HistoricalDriverVersion -ne $ep.CurrentDriverVersion)) {
-                " Driver changed from v$($ep.HistoricalDriverVersion) during the crashes to v$($ep.CurrentDriverVersion) currently."
-            } elseif ($ep.CurrentDriverVersion) {
-                " Active GPU driver: v$($ep.CurrentDriverVersion)."
-            } else { "" }
-            $rootCauseDesc = "Detected a resolved historical episode of $($ep.IncidentCount) incident(s) between $($ep.StartTime.ToString('yyyy-MM-dd HH:mm')) and $($ep.EndTime.ToString('yyyy-MM-dd HH:mm')) (Historical Cause: $($ep.HistoricalRootCause)).$drvDiffText The system has been stable for $($ep.QuietDaysSinceEnd) days since the last timeout."
-            if ($ep.ResolutionFactors -and $ep.ResolutionFactors.Count -gt 0) {
-                $topFactorsText = @(
-                    $ep.ResolutionFactors | Select-Object -First 3 | ForEach-Object {
-                        "[$($_.Confidence)] $($_.Title) ($($_.DeltaFromLast)) - Source: $($_.Source)"
-                    }
-                ) -join "`n  * "
-                $rootCauseGuidance = "What Changed to Resolve It:`n  * $topFactorsText"
-            } else {
-                $rootCauseGuidance = "No explicit driver or registry change was recorded in the immediate post-incident window; resolution likely resulted from an application/game update or workload change after $($ep.EndTime.ToString('yyyy-MM-dd'))."
-            }
-            $rootCauseSeverity = "Healthy"
-        }
-    } elseif ($InvestigateResolved) {
-        $rootCauseTitle = "NO RESOLVED HISTORICAL TIMEOUT EPISODE IDENTIFIED"
-        $rootCauseDesc = $resolvedHistory.Summary
-        $rootCauseGuidance = "If historical logs were cleared by a clean Windows install or log rotation, inspect preserved minidumps or increase -MaxLookbackDays."
-    }
-
-    if (-not $Quiet -and ($InvestigateResolved -or ($resolvedHistory -and $resolvedHistory.HasResolvedEpisodes))) {
-        Write-Host "========================================================================" -ForegroundColor Magenta
-        Write-Host "  HISTORICAL TIMEOUT & RESOLUTION CORRELATION (PAST $histLookback DAYS)" -ForegroundColor Magenta
-        Write-Host "========================================================================" -ForegroundColor Magenta
-        Write-Host ""
-        if ($resolvedHistory -and $resolvedHistory.HasResolvedEpisodes -and $resolvedHistory.PrimaryResolvedEpisode) {
-            $ep = $resolvedHistory.PrimaryResolvedEpisode
-            Write-Host "  Episode Window      : $($ep.StartTime.ToString('yyyy-MM-dd HH:mm')) .. $($ep.EndTime.ToString('yyyy-MM-dd HH:mm')) ($($ep.IncidentCount) incident(s))" -ForegroundColor Yellow
-            Write-Host "  Crash-Free Duration : $($ep.QuietDaysSinceEnd) days since last incident" -ForegroundColor Green
-            Write-Host "  Historical Cause    : $($ep.HistoricalRootCause)" -ForegroundColor White
-            $histDrvStr = if ($ep.HistoricalDriverVersion) { "v$($ep.HistoricalDriverVersion)" } else { "Unrecorded" }
-            $currDrvStr = if ($ep.CurrentDriverVersion) { "v$($ep.CurrentDriverVersion)" } else { "Unknown" }
-            Write-Host "  Driver Version Diff : $histDrvStr (at crash) -> $currDrvStr (current)" -ForegroundColor Cyan
-            Write-Host ""
-            Write-Host "  Ranked 'What Changed to Resolve It' Findings:" -ForegroundColor Cyan
-            if ($ep.ResolutionFactors -and $ep.ResolutionFactors.Count -gt 0) {
-                foreach ($rf in ($ep.ResolutionFactors | Select-Object -First 6)) {
-                    $confColor = switch ($rf.Confidence) {
-                        "High"       { [ConsoleColor]::Green }
-                        "Medium"     { [ConsoleColor]::Yellow }
-                        default      { [ConsoleColor]::Gray }
-                    }
-                    $tsStr = if ($rf.Timestamp) { $rf.Timestamp.ToString('yyyy-MM-dd HH:mm') } else { "Active State" }
-                    Write-Host "    * [$($rf.Confidence)] [$tsStr | $($rf.DeltaFromLast)] $($rf.Title)" -ForegroundColor $confColor
-                    Write-Host "      Source: $($rf.Source) | $($rf.Details)" -ForegroundColor DarkGray
-                }
-            } else {
-                Write-Host "    * No timestamped driver or registry changes found in primary inflection window." -ForegroundColor DarkGray
-            }
-        } else {
-            Write-Host "  [i] $($resolvedHistory.Summary)" -ForegroundColor DarkGray
-        }
-        Write-Host ""
-    }
+if ($InvestigateResolved) {
+    Write-Host "  [i] -InvestigateResolved no longer produces cause/resolution attributions (they were inferred, not observed)." -ForegroundColor Yellow
 }
 
 if (-not $Quiet) {
     Write-Host "========================================================================" -ForegroundColor Cyan
-    Write-Host "  CRASH CHECK SUMMARY & HOW TO FIX IT" -ForegroundColor Cyan
+    Write-Host "  EVENT SUMMARY" -ForegroundColor Cyan
     Write-Host "========================================================================" -ForegroundColor Cyan
     Write-Host ""
-    $color = if ($rootCauseSeverity -eq "Critical") { [ConsoleColor]::Red } elseif ($rootCauseSeverity -eq "Warning") { [ConsoleColor]::Yellow } else { [ConsoleColor]::Green }
-    Write-Host "  Main Issue: $rootCauseTitle" -ForegroundColor $color
+    $color = if ($rootCauseSeverity -eq "Critical") { [ConsoleColor]::Red } elseif ($rootCauseSeverity -eq "Warning") { [ConsoleColor]::Yellow } else { [ConsoleColor]::Gray }
+    Write-Host "  $rootCauseTitle" -ForegroundColor $color
     Write-Host "  $rootCauseDesc" -ForegroundColor White
-    Write-Host ""
-    Write-Host "  How to Fix:" -ForegroundColor Green
-    $primaryStepsToPrint = if ($findingResult.PrimaryFinding -and $findingResult.PrimaryFinding.PSObject.Properties['Steps'] -and $findingResult.PrimaryFinding.Steps.Count -gt 0 -and ($rootCauseGuidance -eq $findingResult.RootCauseGuidance)) {
-        @($findingResult.PrimaryFinding.Steps)
-    } else {
-        @($rootCauseGuidance -split '(?:\r?\n\s*(?:\*|\d+\.)\s*)|(?:\s+\*\s+)|(?:^\s*(?:\*|\d+\.)\s*)' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    }
-    $stepNum = 1
-    foreach ($st in $primaryStepsToPrint) {
-        Write-Host "    $stepNum. $($st.Trim())" -ForegroundColor White
-        $stepNum++
-    }
     Write-Host ""
 
     if ($secondaryFindings.Count -gt 0) {
         Write-Host "  ----------------------------------------------------------------------" -ForegroundColor DarkGray
-        Write-Host "  Other Issues Found ($($secondaryFindings.Count)):" -ForegroundColor Yellow
+        Write-Host "  Other recorded events ($($secondaryFindings.Count)):" -ForegroundColor Yellow
         Write-Host ""
-        $secIdx = 2
+        $lastGroup = $null
         foreach ($sf in $secondaryFindings) {
-            $sfColor = if ($sf.Severity -eq "Critical") { [ConsoleColor]::Red } elseif ($sf.Severity -eq "Warning") { [ConsoleColor]::Yellow } else { [ConsoleColor]::Cyan }
-            Write-Host "  [$secIdx] [$($sf.Severity.ToUpper())] $($sf.Title)" -ForegroundColor $sfColor
+            $grp = if ($sf.Id -eq 'KERNEL_BUGCHECK') { 'SYSTEM CRASHES (BSOD / BugCheck)' }
+                   elseif ($sf.Id -eq 'CRASH_DUMP') { 'PROCESS CRASH DUMPS' }
+                   elseif ($sf.Id -eq 'GPU_TIMEOUT_EVENT') { 'GPU DRIVER TIMEOUTS (TDR)' }
+                   elseif ($sf.Id -in @('KERNEL_POWER_41', 'EVENTLOG_6008')) { 'SYSTEM RESTARTS (Unclean Shutdown)' }
+                   elseif ($sf.Kind -eq 'Evidence') { 'CRASH DUMP LOCATIONS REQUIRING ELEVATION' }
+                   else { 'OTHER EVENTS' }
+            if ($grp -ne $lastGroup) {
+                Write-Host "  == $grp ==" -ForegroundColor Cyan
+                Write-Host ""
+                $lastGroup = $grp
+            }
+            $ts = if ($sf.Timestamp -is [datetime]) { $sf.Timestamp.ToString('yyyy-MM-dd HH:mm:ss') } elseif ($sf.Kind -eq 'Evidence') { 'info' } else { 'unknown time' }
+            $tsColor = if ($sf.Kind -eq 'Evidence') { [ConsoleColor]::Cyan } else { [ConsoleColor]::Yellow }
+            Write-Host "  * [$ts] $($sf.Title)" -ForegroundColor $tsColor
             Write-Host "      $($sf.Description)" -ForegroundColor Gray
-            $sfStepsToPrint = if ($sf.PSObject.Properties['Steps'] -and $sf.Steps.Count -gt 0) {
-                @($sf.Steps)
-            } else {
-                @($sf.Guidance -split '(?:\r?\n\s*(?:\*|\d+\.)\s*)|(?:\s+\*\s+)|(?:^\s*(?:\*|\d+\.)\s*)' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-            }
-            foreach ($sfs in $sfStepsToPrint) {
-                Write-Host "      -> $($sfs.Trim())" -ForegroundColor DarkCyan
-            }
+            Write-Host "      Source: $($sf.Source)" -ForegroundColor DarkGray
             Write-Host ""
-            $secIdx++
+        }
+    }
+
+    if ($leads.Count -gt 0) {
+        Write-Host "  ----------------------------------------------------------------------" -ForegroundColor DarkGray
+        Write-Host "  NEXT INVESTIGATION STEPS:" -ForegroundColor Green
+        Write-Host ""
+        $li = 1
+        foreach ($ld in $leads) {
+            Write-Host "  $li. $($ld.Lead)" -ForegroundColor White
+            Write-Host "     Based on: $($ld.BasedOn)" -ForegroundColor DarkGray
+            Write-Host ""
+            $li++
         }
     }
 
@@ -930,6 +889,8 @@ $reportObject = [PSCustomObject]@{
     RootCauseSeverity    = $rootCauseSeverity
     Findings             = $allFindings
     SecondaryFindings    = $secondaryFindings
+    Leads                = $leads
+    PrimaryFinding       = $findingResult.PrimaryFinding
     ResolvedHistory      = $resolvedHistory
     Dumps                = @($parsedDumps)
     ZombieProcesses      = @($zombieProcesses)
@@ -996,129 +957,7 @@ if ($ExportZip) {
     }
 }
 
-$recommendedActions = if ($findingResult.PSObject.Properties['RecommendedActions'] -and $findingResult.RecommendedActions) {
-    @($findingResult.RecommendedActions)
-} else {
-    @()
-}
-
-if (-not $Quiet -and -not $NoInteractive -and $recommendedActions.Count -gt 0) {
-    Write-Host ""
-    Write-Host "========================================================================" -ForegroundColor Green
-    Write-Host "  RECOMMENDED FIXES (SELECT TO APPLY NOW)" -ForegroundColor Green
-    Write-Host "========================================================================" -ForegroundColor Green
-    Write-Host ""
-    $isAdminNow = Test-DcIsAdmin
-    for ($i = 0; $i -lt $recommendedActions.Count; $i++) {
-        $act = $recommendedActions[$i]
-        $num = $i + 1
-        $adminTag = if ($act.RequiresAdmin -and -not $isAdminNow) { " [Requires Admin - UAC Prompt]" } elseif ($act.RequiresAdmin) { " [Admin]" } else { "" }
-        Write-Host "  [$num] $($act.Label)$adminTag" -ForegroundColor Yellow
-        Write-Host "      $($act.Description)" -ForegroundColor Gray
-    }
-    if ($recommendedActions.Count -gt 1) {
-        Write-Host "  [A] Apply All Recommended Fixes (1-$($recommendedActions.Count))" -ForegroundColor Cyan
-    }
-    Write-Host "  [Q] Skip / Exit without applying changes" -ForegroundColor DarkGray
-    Write-Host ""
-
-    $promptLabel = if ($recommendedActions.Count -gt 1) {
-        "Select fix(es) to run now (e.g. 1, 1,2, A=All, or Enter/Q to skip)"
-    } else {
-        "Run recommended fix [1] now? (1/Y=Run, Enter/Q=Skip)"
-    }
-
-    $choice = $null
-    try {
-        if ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
-            $choice = Read-Host "  $promptLabel"
-        }
-    } catch {
-        $choice = $null
-    }
-
-    if (-not [string]::IsNullOrWhiteSpace($choice)) {
-        $trimmedChoice = $choice.Trim()
-        $selectedActions = [System.Collections.Generic.List[object]]::new()
-
-        if ($trimmedChoice -match '^(?i)(a|all)$') {
-            foreach ($act in $recommendedActions) { $selectedActions.Add($act) }
-        } elseif ($trimmedChoice -match '^(?i)(y|yes)$' -and $recommendedActions.Count -eq 1) {
-            $selectedActions.Add($recommendedActions[0])
-        } elseif ($trimmedChoice -notmatch '^(?i)(q|quit|n|no|skip|exit)$') {
-            $tokens = $trimmedChoice -split '[,\s]+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-            foreach ($tok in $tokens) {
-                $idxNum = 0
-                if ([int]::TryParse($tok, [ref]$idxNum)) {
-                    if ($idxNum -ge 1 -and $idxNum -le $recommendedActions.Count) {
-                        $candidate = $recommendedActions[$idxNum - 1]
-                        if (-not ($selectedActions | Where-Object { $_.Id -eq $candidate.Id })) {
-                            $selectedActions.Add($candidate)
-                        }
-                    }
-                }
-            }
-        }
-
-        if ($selectedActions.Count -gt 0) {
-            Write-Host ""
-            $elevatedSwitches = [System.Collections.Generic.List[string]]::new()
-            foreach ($act in $selectedActions) {
-                if ($act.RequiresAdmin -and -not (Test-DcIsAdmin)) {
-                    switch ($act.Id) {
-                        "RepairNetwork"       { if (-not $elevatedSwitches.Contains("-RepairNetwork")) { $elevatedSwitches.Add("-RepairNetwork") } }
-                        "ExpandUdpPorts"      { if (-not $elevatedSwitches.Contains("-ExpandUdpPorts")) { $elevatedSwitches.Add("-ExpandUdpPorts") } }
-                        "RepairGpuSleep"      { if (-not $elevatedSwitches.Contains("-RepairGpuSleep")) { $elevatedSwitches.Add("-RepairGpuSleep") } }
-                        "FixDrivers"          { if (-not $elevatedSwitches.Contains("-FixDrivers")) { $elevatedSwitches.Add("-FixDrivers") } }
-                        "DisableRogueDrivers" { if (-not $elevatedSwitches.Contains("-DisableRogueDrivers")) { $elevatedSwitches.Add("-DisableRogueDrivers") } }
-                    }
-                    continue
-                }
-
-                Write-Host "  [RUNNING] $($act.Label)..." -ForegroundColor Cyan
-                switch ($act.Id) {
-                    "CleanShaderCache" {
-                        Clear-DcShaderCache -Target $ShaderTarget
-                    }
-                    "CleanConfigCrimsonDesert" {
-                        Clear-DcGameConfig -Game "CrimsonDesert" -Backup
-                    }
-                    "CleanSteamCache" {
-                        Clear-DcSteamCache
-                    }
-                    "KillHungSteam" {
-                        Stop-DcZombieProcesses
-                    }
-                    "DisablePciePowerSavings" {
-                        & (Join-Path $PSScriptRoot "scripts\Repair-PciePowerSettings.ps1")
-                    }
-                    "RepairNetwork" {
-                        Repair-DcEthernetSettings -Speed $Speed
-                    }
-                    "ExpandUdpPorts" {
-                        Repair-DcUdpPortRange
-                    }
-                    "RepairGpuSleep" {
-                        & (Join-Path $PSScriptRoot "scripts\Repair-GpuSleepSettings.ps1") -DisableUlps:$DisableUlps
-                    }
-                    "FixDrivers" {
-                        Repair-DcAmdDriverAlignment -BlockWindowsUpdateDrivers
-                    }
-                    "DisableRogueDrivers" {
-                        & (Join-Path $PSScriptRoot "scripts\Disable-RogueKernelDrivers.ps1")
-                    }
-                }
-            }
-
-            if ($elevatedSwitches.Count -gt 0) {
-                Write-Host "  [ADMIN ELEVATION] Launching elevated session for: $($elevatedSwitches -join ' ')..." -ForegroundColor Yellow
-                [void](Request-DcAdminElevation -ScriptPath $PSCommandPath -Arguments @($elevatedSwitches) -Wait)
-            }
-            Write-Host ""
-            Write-Host "  [COMPLETE] Selected remediation actions finished." -ForegroundColor Green
-        }
-    }
-}
+# Interactive "recommended fixes" menu removed: this tool reports observations only.
 
 if ($Quiet -or $PassThru) {
     return $reportObject

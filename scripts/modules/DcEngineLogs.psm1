@@ -174,6 +174,30 @@ function Get-DcSteamGameSessions {
     return @($sessions | Sort-Object StartTime -Descending)
 }
 
+function Get-DcShaderAndBreadcrumbs {
+    param([string[]]$Lines)
+
+    $shader = $null
+    $breadcrumbs = $null
+
+    foreach ($l in $Lines) {
+        if (-not $shader -and $l -match '(?i)(?:Compiling\s+shader|Shader\s+compilation\s+failed|Shader|Material|Pipeline|Dispatch)[\s:]+([^\r\n]{3,120}\.(?:usf|hlsl|spv|cso|glsl)|[a-zA-Z0-9_\-\.\/\\]+)') {
+            $matched = $Matches[1].Trim()
+            if ($matched -and $matched -notmatch '(?i)^(error|failed|true|false|warning|none|null|the|this|an|a)$') {
+                $shader = $matched
+            }
+        }
+        if (-not $breadcrumbs -and $l -match '(?i)(?:Breadcrumb[s]?|Last\s+Breadcrumb|GPU\s+Marker)[\s:]+([^\r\n]{3,120})') {
+            $breadcrumbs = $Matches[1].Trim()
+        }
+    }
+
+    return [PSCustomObject]@{
+        ShaderInfo  = $shader
+        Breadcrumbs = $breadcrumbs
+    }
+}
+
 function Get-DcEngineLogs {
     [CmdletBinding()]
     param(
@@ -186,7 +210,7 @@ function Get-DcEngineLogs {
 
     $results = [System.Collections.Generic.List[PSCustomObject]]::new()
 
-    # 1. Unreal Engine Saved Logs (%LOCALAPPDATA%\*\Saved\Logs\*.log)
+    # 1. Unreal Engine Saved Logs & CrashContext (%LOCALAPPDATA%\*\Saved\Logs\*.log and %LOCALAPPDATA%\*\Saved\Crashes\*)
     if (Test-Path $env:LOCALAPPDATA) {
         $ueLogDirs = Get-ChildItem "$env:LOCALAPPDATA" -Directory -ErrorAction SilentlyContinue |
             ForEach-Object { Join-Path $_.FullName "Saved\Logs" } |
@@ -201,14 +225,59 @@ function Get-DcEngineLogs {
                     $_ -match '(?i)Fatal error|CrashReportClient|Assertion failed|GPU Crash dump Triggered|DXGI_ERROR|D3D12.*Hung|DeviceRemovedReason|Out of memory'
                 } | ForEach-Object { Protect-DcLogText $_ }
                 if ($critLines) {
+                    $sb = Get-DcShaderAndBreadcrumbs -Lines $lines
                     $results.Add([PSCustomObject]@{
-                        Engine      = "Unreal Engine"
-                        LogName     = $log.Name
-                        FullName    = (Protect-DcLogText $log.FullName)
-                        Timestamp   = $log.LastWriteTime
-                        ErrorLines  = @($critLines)
+                        Engine         = "Unreal Engine"
+                        LogName        = $log.Name
+                        FullName       = (Protect-DcLogText $log.FullName)
+                        Timestamp      = $log.LastWriteTime
+                        ErrorLines     = @($critLines)
+                        GameName       = $null
+                        ExecutableName = $null
+                        CommandLine    = $null
+                        ShaderInfo     = $sb.ShaderInfo
+                        Breadcrumbs    = $sb.Breadcrumbs
                     })
                 }
+            }
+        }
+
+        # Unreal Saved Crashes (CrashContext.runtime-xml)
+        $ueCrashDirs = Get-ChildItem "$env:LOCALAPPDATA" -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Join-Path $_.FullName "Saved\Crashes" } |
+            Where-Object { Test-Path $_ }
+
+        foreach ($cdir in $ueCrashDirs) {
+            $xmlFiles = Get-ChildItem -Path $cdir -Filter "CrashContext.runtime-xml" -Recurse -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.LastWriteTime -ge $Cutoff -and $_.LastWriteTime -le $EndTime }
+            foreach ($xf in $xmlFiles) {
+                try {
+                    $rawText = [System.IO.File]::ReadAllText($xf.FullName)
+                    $gameName = if ($rawText -match '<GameName>(.*?)</GameName>') { $Matches[1].Trim() } else { $null }
+                    $exeName = if ($rawText -match '<ExecutableName>(.*?)</ExecutableName>') { $Matches[1].Trim() } else { $null }
+                    $errMsg = if ($rawText -match '<ErrorMessage>(.*?)</ErrorMessage>') { $Matches[1].Trim() } else { $null }
+                    $cmdLine = if ($rawText -match '<CommandLine>(.*?)</CommandLine>') { $Matches[1].Trim() } else { $null }
+                    $rhiName = if ($rawText -match '<RHI\.RHIName>(.*?)</RHI\.RHIName>') { $Matches[1].Trim() } else { $null }
+
+                    $errLines = [System.Collections.Generic.List[string]]::new()
+                    if ($errMsg) { $errLines.Add((Protect-DcLogText $errMsg)) }
+                    if ($rhiName) { $errLines.Add("RHI Subsystem: $rhiName") }
+
+                    $sb = Get-DcShaderAndBreadcrumbs -Lines ($rawText -split '\r?\n')
+
+                    $results.Add([PSCustomObject]@{
+                        Engine         = "Unreal Engine (CrashContext)"
+                        LogName        = $xf.Name
+                        FullName       = (Protect-DcLogText $xf.FullName)
+                        Timestamp      = $xf.LastWriteTime
+                        ErrorLines     = @($errLines)
+                        GameName       = $gameName
+                        ExecutableName = $exeName
+                        CommandLine    = (Protect-DcLogText $cmdLine)
+                        ShaderInfo     = $sb.ShaderInfo
+                        Breadcrumbs    = $sb.Breadcrumbs
+                    })
+                } catch {}
             }
         }
     }
@@ -360,4 +429,6 @@ function Get-DcEngineLogs {
     return $results
 }
 
-Export-ModuleMember -Function Get-DcSteamPath, Get-DcSteamLogs, Get-DcSteamGameSessions, Get-DcEngineLogs, Protect-DcLogText
+Set-Alias -Name Extract-DcShaderAndBreadcrumbs -Value Get-DcShaderAndBreadcrumbs
+
+Export-ModuleMember -Function Get-DcSteamPath, Get-DcSteamLogs, Get-DcSteamGameSessions, Get-DcEngineLogs, Protect-DcLogText, Get-DcShaderAndBreadcrumbs -Alias Extract-DcShaderAndBreadcrumbs

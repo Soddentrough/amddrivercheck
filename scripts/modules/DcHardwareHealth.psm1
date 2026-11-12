@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     DriverCheck - Hardware Health & GPU Driver Alignment Module
 .DESCRIPTION
@@ -245,7 +245,7 @@ function Get-DcGpuDriverHealth {
             $versions = @($amdGpus.DriverVersion | Select-Object -Unique)
             if ($versions.Count -gt 1) {
                 $dualGpuConflict = $true
-                $dualGpuDetails = "Dual AMD GPU driver version mismatch: Discrete GPU and Integrated GPU are running different driver versions ($($versions -join ' vs ')). This causes shared service (atieclxx.exe) crashes and 0x9F sleep hangs."
+                $dualGpuDetails = "Discrete GPU and integrated GPU report different driver versions ($($versions -join ' vs '))."
             }
         }
     }
@@ -671,7 +671,7 @@ function Get-DcDisplayDiagnostics {
             $results.HighRiskTimingsDetected = $true
             $timingStr = if ($riskTiming) { "$($riskTiming.HActive)x$($riskTiming.VActive) @ $($riskTiming.RefreshRate)Hz (Pixel Clock: $($riskTiming.PixelClockMHz) MHz, V-Total: $($riskTiming.VTotal) lines)" } else { "Active Refresh: $($currentRefresh)Hz" }
             $results.RiskSummary = "Display '$dispName' ($connType) is running a high-refresh factory overclock ($timingStr). On DisplayPort 1.2a without DSC, bloated factory blanking operates budget monitor scalers at their electrical and thermal limits, causing periodic phase desync, Hot-Plug Detect (HPD) link drops, and 2-3s blackouts without triggering GPU driver TDRs."
-            $results.Guidance = "1. Lower refresh rate to native 144 Hz in Windows Display Settings.`n2. Use AMD Software (Custom Resolutions) or Custom Resolution Utility (CRU) to enforce VESA CVT-RB (Reduced Blanking) timing (target V-Total ~1463 lines, Pixel Clock ~573 MHz).`n3. In CRU, delete the 165Hz extension profile to permanently prevent Windows or graphics drivers from reverting."
+            $results.Guidance = $null
         }
     }
 
@@ -696,7 +696,7 @@ function Get-DcProblematicKernelDrivers {
             FileName    = "inpoutx64.sys"
             Vendor      = "Highresolution Enterprises (InpOutx64)"
             Software    = "SignalRGB / OpenRGB / Legacy RGB Tools"
-            RiskReason  = "Direct I/O port driver. Under anti-cheat (Easy Anti-Cheat, BattlEye) or Memory Integrity, throws INVALID_KERNEL_HANDLE (0x93), causes video freezes with audio continuing, and crashes games."
+            RiskReason  = "Legacy direct I/O port driver."
             FixCommand  = "sc config inpoutx64 start= disabled"
         },
         @{
@@ -785,8 +785,8 @@ function Get-DcProblematicKernelDrivers {
 
     if ($results.RogueDriversDetected) {
         $activeNames = ($results.Drivers | Where-Object { $_.IsActive -and -not $_.IsDisabled } | ForEach-Object { "$($_.FileName) ($($_.ServiceName))" }) -join ", "
-        $results.RiskSummary = "Detected rogue/problematic legacy kernel I/O driver(s) configured to load on boot: $activeNames. These legacy drivers (commonly left behind by RGB or hardware monitoring software) bypass Windows driver safety abstractions. Modern game anti-cheat engines (Easy Anti-Cheat, BattlEye, Vanguard) and Windows Memory Integrity frequently block their handles, causing INVALID_KERNEL_HANDLE (0x93) BSODs, game lockups where audio continues playing, or unexplained freezes."
-        $results.Guidance = "Disable the problematic driver service(s) by running '.\scripts\Disable-RogueKernelDrivers.ps1' or 'sc config <service> start= disabled' in an Administrator terminal. Modern RGB suites (like SignalRGB) continue to work normally without these legacy kernel drivers."
+        $results.RiskSummary = "Legacy kernel I/O driver(s) configured to load on boot: $activeNames."
+        $results.Guidance = $null
     }
 
     return $results

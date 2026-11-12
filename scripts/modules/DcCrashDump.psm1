@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     DriverCheck - Crash Dump & Minidump Inspector Module
 .DESCRIPTION
@@ -12,6 +12,11 @@ function Get-DcDumpDirectories {
     param()
 
     $dirs = [System.Collections.Generic.List[string]]::new()
+
+    # 0. Current working directory / workspace (for manually copied dumps)
+    if ($PWD -and (Test-Path -LiteralPath $PWD)) {
+        $dirs.Add((Get-Item -LiteralPath $PWD).FullName)
+    }
 
     # 1. Windows Kernel BSOD Minidumps & LiveKernelReports (Non-BSOD GPU TDR Watchdog Dumps)
     $winMinidump = Join-Path $env:SystemRoot "Minidump"
@@ -152,27 +157,176 @@ function Get-DcExceptionMeaning {
     param([string]$CodeHex)
 
     switch ($CodeHex.ToUpper()) {
-        "0xC0000005" { "STATUS_ACCESS_VIOLATION (Memory Access Violation / Null Pointer / Native Bug)" }
-        "0xC0000409" { "STATUS_STACK_BUFFER_OVERRUN (Fast Fail / Stack Guard Security Check)" }
-        "0x80000003" { "STATUS_BREAKPOINT (Hardcoded Assertion or Debug Breakpoint Hit)" }
-        "0xC000001D" { "STATUS_ILLEGAL_INSTRUCTION (Unsupported CPU Instruction / AVX/SSE Mismatch)" }
-        "0xC00000FD" { "STATUS_STACK_OVERFLOW (Infinite Recursion or Exhausted Call Stack)" }
-        "0x887A0006" { "DXGI_ERROR_DEVICE_HUNG (GPU TDR Timeout / Shader Hang)" }
-        "0x887A0005" { "DXGI_ERROR_DEVICE_REMOVED (GPU Hardware Reset / Driver Crash)" }
-        "0x887A0001" { "DXGI_ERROR_INVALID_CALL (Graphics API Misuse by Engine)" }
-        "0x887A002B" { "DXGI_ERROR_DRIVER_INTERNAL_ERROR (Display Driver Internal Bug)" }
-        "0xE06D7363" { "STATUS_CPP_EXCEPTION (Uncaught C++ Exception)" }
-        "0x00000093" { "INVALID_KERNEL_HANDLE (Driver Attempted to Use or Close an Invalid Kernel Handle)" }
-        "0x00000141" { "LiveKernelEvent 0x141 (VIDEO_ENGINE_TDR_TIMEOUT - GPU Engine Hung & Recovered)" }
-        "0x00000117" { "LiveKernelEvent 0x117 (VIDEO_TDR_TIMEOUT_DETECTED - Display Driver Failed to Respond)" }
-        "0x00000193" { "LiveKernelEvent 0x193 (VIDEO_DXGKRNL_LIVEDUMP - DirectX Graphics Kernel Deadlock / Watchdog)" }
-        "0xA1000001" { "LiveKernelEvent 0xA1000001 (AMD_WATCHDOG - AMD Driver Hardware Hang & Watchdog Reset)" }
-        "0x000001B8" { "LiveKernelEvent 0x1B8 (VIDEO_DXGKRNL_BLACK_SCREEN_LIVEDUMP - Black Screen Watchdog)" }
-        "0x000001A8" { "LiveKernelEvent 0x1A8 (VIDEO_DXGKRNL_SYSMM_FATAL_ERROR - Graphics Memory Manager Watchdog)" }
-        "0x00000000" { "STATUS_SUCCESS (External Watchdog Termination / Process Hang)" }
-        "ASSERTION"  { "Fatal Engine/Platform Assertion Hit" }
+        "0xC0000005" { "STATUS_ACCESS_VIOLATION" }
+        "0xC0000409" { "STATUS_STACK_BUFFER_OVERRUN (fast-fail)" }
+        "0x80000003" { "STATUS_BREAKPOINT" }
+        "0xC000001D" { "STATUS_ILLEGAL_INSTRUCTION" }
+        "0xC00000FD" { "STATUS_STACK_OVERFLOW" }
+        "0x887A0006" { "DXGI_ERROR_DEVICE_HUNG" }
+        "0x887A0005" { "DXGI_ERROR_DEVICE_REMOVED" }
+        "0x887A0001" { "DXGI_ERROR_INVALID_CALL" }
+        "0x887A002B" { "DXGI_ERROR_DRIVER_INTERNAL_ERROR" }
+        "0xE06D7363" { "C++ exception (0xE06D7363)" }
+        "0x00000093" { "INVALID_KERNEL_HANDLE" }
+        "0x00000141" { "LiveKernelEvent 0x141 (VIDEO_ENGINE_TDR_TIMEOUT)" }
+        "0x00000117" { "LiveKernelEvent 0x117 (VIDEO_TDR_TIMEOUT_DETECTED)" }
+        "0x00000193" { "LiveKernelEvent 0x193 (VIDEO_DXGKRNL_LIVEDUMP)" }
+        "0xA1000001" { "LiveKernelEvent 0xA1000001 (AMD_WATCHDOG)" }
+        "0x000001B8" { "LiveKernelEvent 0x1B8 (VIDEO_DXGKRNL_BLACK_SCREEN_LIVEDUMP)" }
+        "0x000001A8" { "LiveKernelEvent 0x1A8 (VIDEO_DXGKRNL_SYSMM_FATAL_ERROR)" }
+        "0x00000000" { "exit code 0 recorded by crash handler" }
+        "ASSERTION"  { "Assertion recorded" }
         "SENTRY_FATAL" { "Sentry Native Crashpad Fatal Crash Event" }
         default      { "Unhandled Exception" }
+    }
+}
+
+$script:CachedCdbPath = $null
+
+function Find-DcCdbPath {
+    if ($script:CachedCdbPath -and (Test-Path -LiteralPath $script:CachedCdbPath)) {
+        return $script:CachedCdbPath
+    }
+    try {
+        $appx = Get-AppxPackage -Name *WinDbg* -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($appx -and $appx.InstallLocation) {
+            $c = Join-Path $appx.InstallLocation "amd64\cdb.exe"
+            if (Test-Path -LiteralPath $c) {
+                $script:CachedCdbPath = $c
+                return $c
+            }
+        }
+    } catch {}
+
+    $staticCandidates = @(
+        "C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2611.4001.0_x64__8wekyb3d8bbwe\amd64\cdb.exe",
+        "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe",
+        "C:\Program Files\Debugging Tools for Windows (x64)\cdb.exe"
+    )
+    foreach ($cand in $staticCandidates) {
+        if (Test-Path -LiteralPath $cand) {
+            $script:CachedCdbPath = $cand
+            return $cand
+        }
+    }
+
+    try {
+        $cmd = Get-Command cdb.exe -ErrorAction SilentlyContinue
+        if ($cmd -and $cmd.Source -and (Test-Path -LiteralPath $cmd.Source)) {
+            $script:CachedCdbPath = $cmd.Source
+            return $cmd.Source
+        }
+    } catch {}
+
+    return $null
+}
+
+function Invoke-DcDumpStackTrace {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DumpPath,
+        [string]$CdbPath = $null,
+        [int]$TimeoutSeconds = 8
+    )
+
+    $resolvedCdb = if ($CdbPath) { $CdbPath } else { Find-DcCdbPath }
+    if (-not $resolvedCdb -or -not (Test-Path -LiteralPath $resolvedCdb)) {
+        return [PSCustomObject]@{
+            CallStack    = @()
+            ApiContext   = $null
+            CdbInspected = $false
+        }
+    }
+
+    $isKernel = ($DumpPath -match '(?i)SystemRoot|Windows\\(Minidump|LiveKernelReports)|MEMORY\.DMP|WATCHDOG|\d{6}-\d{5}-\d{2}\.dmp')
+
+    $symArg = ""
+    $localSym = Join-Path $PSScriptRoot "..\..\symcache"
+    if (Test-Path $localSym) {
+        $symArg = "-y `"cache*$localSym`""
+    }
+
+    $cdbArgs = if ($isKernel) {
+        if ($symArg) { "-z `"$DumpPath`" $symArg -c `".bugcheck; k 25; q`"" } else { "-z `"$DumpPath`" -c `".bugcheck; k 25; q`"" }
+    } else {
+        if ($symArg) { "-z `"$DumpPath`" $symArg -c `".ecxr; k 25; q`"" } else { "-z `"$DumpPath`" -c `".ecxr; k 25; q`"" }
+    }
+
+    $frames = [System.Collections.Generic.List[string]]::new()
+    $apiContext = $null
+    $kernelBugcheck = $null
+    $kernelBugcheckArgs = @()
+
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $resolvedCdb
+        $psi.Arguments = $cdbArgs
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        $out = $proc.StandardOutput.ReadToEnd()
+        $proc.WaitForExit($TimeoutSeconds * 1000)
+
+        $lines = $out -split '\r?\n'
+        $inStack = $false
+        foreach ($l in $lines) {
+            if ($l -match 'Bugcheck code\s+([0-9a-fA-F]+)') {
+                $kernelBugcheck = "0x$($Matches[1])"
+            }
+            if ($l -match 'Arguments\s+([0-9a-fA-F`\s]+)') {
+                $kernelBugcheckArgs = @($Matches[1].Trim() -split '\s+' | ForEach-Object { "0x$($_ -replace '`','')" })
+            }
+            if ($l -match '^\s*Child-SP|\s*RetAddr\s+:\s+Args|#\s+Child-SP') {
+                $inStack = $true
+                continue
+            }
+            if ($inStack) {
+                if ($l -match '^(?:[0-9a-fA-F]+\s+)?([0-9a-fA-F`]+)\s+([0-9a-fA-F`]+)\s+(.+)$') {
+                    $frame = $Matches[3].Trim()
+                    $frames.Add($frame)
+                } elseif ($l -match '^quit:' -or ($frames.Count -gt 0 -and $l -match '^\s*$')) {
+                    $inStack = $false
+                }
+            }
+        }
+    } catch {}
+
+    $allFramesText = $frames -join "`n"
+    if ($allFramesText -match '(?i)CreateComputePipelines') {
+        $apiContext = "Vulkan Compute Pipeline Creation / Shader Compilation (vkCreateComputePipelines)"
+    } elseif ($allFramesText -match '(?i)CreateGraphicsPipelines') {
+        $apiContext = "Vulkan Graphics Pipeline Creation / Shader Compilation (vkCreateGraphicsPipelines)"
+    } elseif ($allFramesText -match '(?i)CreateComputePipelineState') {
+        $apiContext = "Direct3D 12 Compute Pipeline Creation / Shader Compilation (CreateComputePipelineState)"
+    } elseif ($allFramesText -match '(?i)CreateGraphicsPipelineState') {
+        $apiContext = "Direct3D 12 Graphics Pipeline Creation / Shader Compilation (CreateGraphicsPipelineState)"
+    } elseif ($allFramesText -match '(?i)vkQueueSubmit') {
+        $apiContext = "Vulkan Queue Submission / GPU Work Execution (vkQueueSubmit)"
+    } elseif ($allFramesText -match '(?i)ExecuteCommandLists') {
+        $apiContext = "Direct3D 12 Command List Execution (ExecuteCommandLists)"
+    } elseif ($allFramesText -match '(?i)vkCmdDispatch|ID3D12GraphicsCommandList::Dispatch') {
+        $apiContext = "Compute Shader Dispatch Execution"
+    } elseif ($allFramesText -match '(?i)vkCmdDraw|DrawIndexedInstanced|DrawInstanced') {
+        $apiContext = "Geometry Draw Call Dispatch"
+    } elseif ($allFramesText -match '(?i)VidSchiResetEngine|VidSchiSendToExecutionQueue|KeBugCheckEx|watchdog!WdLogSingleEntry|dxgmms2') {
+        if ($allFramesText -match 'amdkmdag') {
+            $apiContext = "AMD Kernel Display Driver (amdkmdag.sys) GPU Scheduler Timeout / Reset"
+        } elseif ($allFramesText -match 'nvlddmkm') {
+            $apiContext = "NVIDIA Kernel Display Driver (nvlddmkm.sys) GPU Scheduler Timeout / Reset"
+        } else {
+            $apiContext = "DirectX Graphics Kernel Scheduler Watchdog Timeout (dxgkrnl / dxgmms2)"
+        }
+    }
+
+    return [PSCustomObject]@{
+        CallStack        = @($frames)
+        ApiContext       = $apiContext
+        BugcheckCode     = $kernelBugcheck
+        BugcheckArgs     = @($kernelBugcheckArgs)
+        CdbInspected     = ($frames.Count -gt 0 -or $null -ne $kernelBugcheck)
     }
 }
 
@@ -212,7 +366,10 @@ function Read-DcMinidump {
         MainExecutable        = $null
         MainExecutableVersion = $null
         Assertions            = @()
-        IsKernelDump          = ($fileInfo.DirectoryName -match '(?i)SystemRoot|Windows\\(Minidump|LiveKernelReports)' -or $fileInfo.Name -match '(?i)MEMORY\.DMP|WATCHDOG')
+        IsKernelDump          = ($fileInfo.DirectoryName -match '(?i)SystemRoot|Windows\\(Minidump|LiveKernelReports)' -or $fileInfo.Name -match '(?i)MEMORY\.DMP|WATCHDOG|^\d{6}-\d{5}-\d{2}\.dmp$')
+        CallStack             = @()
+        ApiContext            = $null
+        CdbInspected          = $false
     }
 
     if ($fileInfo.Name -match '__sentry-event') {
@@ -241,6 +398,30 @@ function Read-DcMinidump {
 
         $sig = $br.ReadUInt32() # 'MDMP' = 0x504D444D
         if ($sig -ne 0x504D444D) {
+            # Check for Windows Kernel Dump signature ('PAGE' = 0x45474150 / PAGEDU64) or generic kernel dump
+            if ($sig -eq 0x45474150 -or $fileInfo.Name -match '(?i)\.dmp$') {
+                $result.IsKernelDump = $true
+                $result.Architecture = "64-bit (x64)"
+                try {
+                    $stackInfo = Invoke-DcDumpStackTrace -DumpPath $Path
+                    if ($stackInfo -and $stackInfo.CdbInspected) {
+                        $result.CallStack = @($stackInfo.CallStack)
+                        $result.ApiContext = $stackInfo.ApiContext
+                        $result.CdbInspected = $true
+                        if ($stackInfo.BugcheckCode) {
+                            $result.ExceptionCode = $stackInfo.BugcheckCode
+                            $result.ExceptionMeaning = Get-DcBugCheckMeaning $stackInfo.BugcheckCode
+                            $result.BugcheckArgs = $stackInfo.BugcheckArgs
+                        }
+                        if ($stackInfo.CallStack.Count -gt 0) {
+                            $result.FaultingIP = $stackInfo.CallStack[0]
+                        }
+                        if ($result.ExceptionCode -in @('0x00000119', '0x00000116', '0x00000141', '0x00000117')) {
+                            $result.IsGraphicsCrash = $true
+                        }
+                    }
+                } catch {}
+            }
             return $result
         }
 
@@ -550,7 +731,30 @@ function Read-DcMinidump {
         })
     }
 
+    # 8. Automated Call Stack & API Stage Inspection via CDB (if available)
+    if ($fileInfo.Name -match '\.dmp$') {
+        try {
+            $stackInfo = Invoke-DcDumpStackTrace -DumpPath $Path
+            if ($stackInfo -and $stackInfo.CdbInspected) {
+                $result.CallStack = @($stackInfo.CallStack)
+                $result.ApiContext = $stackInfo.ApiContext
+                $result.CdbInspected = $true
+                if (-not $result.ExceptionCode -and $stackInfo.BugcheckCode) {
+                    $result.ExceptionCode = $stackInfo.BugcheckCode
+                    $result.ExceptionMeaning = Get-DcBugCheckMeaning $stackInfo.BugcheckCode
+                    $result.IsKernelDump = $true
+                    if (-not $result.FaultingIP -and $stackInfo.CallStack.Count -gt 0) {
+                        $result.FaultingIP = $stackInfo.CallStack[0]
+                    }
+                    if ($result.ExceptionCode -in @('0x00000119', '0x00000116', '0x00000141', '0x00000117')) {
+                        $result.IsGraphicsCrash = $true
+                    }
+                }
+            }
+        } catch {}
+    }
+
     return $result
 }
 
-Export-ModuleMember -Function Get-DcDumpDirectories, Get-DcCrashDumps, Get-DcLatestDumpFile, Read-DcMinidump, Get-DcExceptionMeaning
+Export-ModuleMember -Function Get-DcDumpDirectories, Get-DcCrashDumps, Get-DcLatestDumpFile, Read-DcMinidump, Get-DcExceptionMeaning, Find-DcCdbPath, Invoke-DcDumpStackTrace

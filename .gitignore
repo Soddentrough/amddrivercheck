@@ -9,6 +9,11 @@ DriverCheck_SupportBundle_*.zip
 # Build release output
 dist/
 
+# Crash dumps and debugger symbols
+*.dmp
+*.pdb
+symcache/
+
 # Temporary debug logs
 *.log
 

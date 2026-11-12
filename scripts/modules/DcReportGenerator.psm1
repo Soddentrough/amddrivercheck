@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     DriverCheck - HTML & Diagnostic Bundle Report Generator Module
 .DESCRIPTION
@@ -36,6 +36,12 @@ function Export-DcHtmlReport {
             }
 
             $drvBadgeHtml = if ($d.GpuDriverVersion) { "<div><strong>Loaded GPU Driver:</strong> <span class='badge-module'>v$($d.GpuDriverVersion)</span></div>" } else { "" }
+            $apiContextHtml = if ($d.ApiContext) { "<div><strong>Graphics API Stage:</strong> <span class='badge-module' style='background: rgba(192, 132, 252, 0.2); color: var(--magenta);'>$($d.ApiContext)</span></div>" } else { "" }
+            $stackHtml = ""
+            if ($d.CallStack -and $d.CallStack.Count -gt 0) {
+                $stackLines = ($d.CallStack | Select-Object -First 15 | ForEach-Object { [System.Net.WebUtility]::HtmlEncode($_) }) -join "<br>"
+                $stackHtml = "<details style='margin-top: 8px;'><summary style='cursor: pointer; color: var(--cyan); font-size: 0.85rem;'>Call Stack ($($d.CallStack.Count) frames)</summary><div class='code-block' style='font-size: 0.8rem; max-height: 200px; overflow-y: auto;'>$stackLines</div></details>"
+            }
 
             $card = "<div class='card-item'>" +
                 "<div class='card-header-row'>" +
@@ -45,8 +51,10 @@ function Export-DcHtmlReport {
                 "<div class='card-body-row'>" +
                     "<div><strong>Exception:</strong> $excBadge $($d.ExceptionMeaning)</div>" +
                     "<div><strong>Faulting Module:</strong> $modBadge</div>" +
+                    $apiContextHtml +
                     $drvBadgeHtml +
                     $assertHtml +
+                    $stackHtml +
                 "</div>" +
             "</div>"
             $dumpRows.Add($card)
@@ -91,11 +99,11 @@ function Export-DcHtmlReport {
     if ($telem) {
         if ($telem.FastStartup.FastStartupEnabled) {
             $hasTelemIssue = $true
-            $telemRows.Add("<div class='alert-card alert-warning'><strong>&#x26A1; Power Configuration:</strong> Windows Fast Startup is ENABLED. Fast Startup saves hybrid kernel session states across shutdowns, frequently causing 0x9F power transition crashes on dual-GPU or updated systems.</div>")
+            $telemRows.Add("<div class='alert-card alert-warning'><strong>&#x26A1; Power Configuration:</strong> Windows Fast Startup is enabled (configuration state only).</div>")
         }
         if ($telem.PciePowerManagement -and $telem.PciePowerManagement.IsEnabled) {
             $hasTelemIssue = $true
-            $telemRows.Add("<div class='alert-card alert-warning'><strong>&#x26A1; PCIe Power Configuration:</strong> PCI Express Link State Power Management is <strong>ENABLED ($($telem.PciePowerManagement.ACSettingName))</strong> in plan '$($telem.PciePowerManagement.SchemeName)'. Low-power L0s/L1 bus states during idle or video load cause driver timeouts (TDR 4101) and sleep-wake crashes on PCIe 4.0/5.0 GPUs. Recommendation: Set to <strong>Off</strong>.</div>")
+            $telemRows.Add("<div class='alert-card alert-warning'><strong>&#x26A1; PCIe Power Configuration:</strong> PCI Express Link State Power Management is <strong>ENABLED ($($telem.PciePowerManagement.ACSettingName))</strong> in plan '$($telem.PciePowerManagement.SchemeName)'.</div>")
         }
         if ($telem.GraphicsDriverSettings) {
             $gfx = $telem.GraphicsDriverSettings
@@ -190,14 +198,14 @@ function Export-DcHtmlReport {
     $mbRows = [System.Collections.Generic.List[string]]::new()
     if ($hw -and $hw.Motherboard) {
         $mb = $hw.Motherboard
-        $mbBadge = if ($mb.IsHealthy) { "<span class='badge-healthy'>HEALTHY</span>" } else { "<span class='badge-warning'>ACTION RECOMMENDED</span>" }
+        $mbBadge = if ($mb.IsHealthy) { "<span class='badge-healthy'>HEALTHY</span>" } else { "<span class='badge-warning'>ITEMS NOTED</span>" }
         $biosAgeNotice = if ($mb.BiosAgeYears) { " ($($mb.BiosAgeYears) yrs old)" } else { "" }
         $biosBadge = if ($mb.IsBiosOutdated) { "<span class='badge-warning'>AGING ($($mb.BiosAgeYears) YRS)</span>" } else { "<span class='badge-healthy'>OK</span>" }
 
         $missingHtml = ""
         if ($mb.MissingControllers.Count -gt 0) {
             $missingList = ($mb.MissingControllers | ForEach-Object { "<li>$_</li>" }) -join ""
-            $missingHtml = "<div class='alert-card alert-warning' style='margin-top: 8px;'><strong>&#x26A0; Missing Platform Controllers:</strong><ul style='margin-left: 20px; margin-top: 4px;'>$missingList</ul><span style='font-size: 0.85rem;'>Recommendation: Download and install the latest official chipset driver package from your motherboard support page or AMD.com / Intel.com.</span></div>"
+            $missingHtml = "<div class='alert-card alert-warning' style='margin-top: 8px;'><strong>&#x26A0; Missing Platform Controllers:</strong><ul style='margin-left: 20px; margin-top: 4px;'>$missingList</ul></div>"
         }
 
         $mbCard = "<div class='card-item'>" +
@@ -259,7 +267,7 @@ function Export-DcHtmlReport {
             $alertBox = ""
             if ($disp.HasTimingRisk) {
                 $reasons = if ($disp.RiskReasons) { $disp.RiskReasons -join ' | ' } else { "High pixel clock / bloated vertical blanking exceeds budget scaler thresholds." }
-                $alertBox = "<div class='alert-card alert-critical' style='margin-top: 8px;'><strong>&#x26A0; DisplayPort Scaler Saturation Hazard:</strong> $reasons<br><span style='font-size: 0.85rem;'>Recommendation: Lower refresh rate to 144Hz or configure CVT-RB in Custom Resolution Utility (CRU) to reduce pixel clock below 580 MHz.</span></div>"
+                $alertBox = "<div class='alert-card alert-critical' style='margin-top: 8px;'><strong>&#x26A0; EDID timing heuristic matched (not an observed fault):</strong> $reasons</div>"
             }
             $displayRows.Add("<div class='card-item'><div class='card-header-row'><span class='file-name'>&#x1F5A5; $($disp.Name)</span>$dispStatusBadge</div><div>Connection: <strong>$($disp.Connection)</strong> | Active Mode: <strong>$($disp.ActiveResolution) @ $($disp.ActiveRefreshRate) Hz</strong></div>$timingDetails$alertBox</div>")
         }
@@ -271,9 +279,9 @@ function Export-DcHtmlReport {
     $driverRows = [System.Collections.Generic.List[string]]::new()
     if ($hw -and $hw.KernelDrivers -and $hw.KernelDrivers.Count -gt 0) {
         foreach ($kd in $hw.KernelDrivers) {
-            $badge = if ($kd.IsDisabled) { "<span class='badge-healthy'>DISABLED</span>" } elseif ($kd.IsActive) { "<span class='badge-critical'>HAZARD (AUTO-START)</span>" } else { "<span class='badge-warning'>PRESENT</span>" }
+            $badge = if ($kd.IsDisabled) { "<span class='badge-healthy'>DISABLED</span>" } elseif ($kd.IsActive) { "<span class='badge-warning'>AUTO-START</span>" } else { "<span class='badge-warning'>PRESENT</span>" }
             $alert = if ($kd.IsActive -and -not $kd.IsDisabled) {
-                "<div class='alert-card alert-critical' style='margin-top: 8px;'><strong>&#x26A0; Conflict Hazard:</strong> $($kd.RiskReason)<br><span style='font-size: 0.85rem;'>Fix: Run <code>.\scripts\Disable-RogueKernelDrivers.ps1</code> or <code>$($kd.FixCommand)</code></span></div>"
+                "<div class='alert-card alert-critical' style='margin-top: 8px;'><strong>&#x26A0; Legacy driver present:</strong> $($kd.RiskReason)</div>"
             } else { "" }
             $driverRows.Add("<div class='card-item'><div class='card-header-row'><span class='file-name'>&#x26A0; $($kd.FileName) (Service: $($kd.ServiceName))</span>$badge</div><div>Software: <strong>$($kd.Software)</strong> | Vendor: $($kd.Vendor) | Start Type: <strong>$($kd.StartType)</strong></div>$alert</div>")
         }
@@ -288,7 +296,7 @@ function Export-DcHtmlReport {
             $statusBadge = if ($net.Status -eq "Up") { "<span class='badge-healthy'>UP</span>" } else { "<span class='badge-neutral'>$($net.Status)</span>" }
             $intelNotice = ""
             if ($net.IsIntel25G -and $net.PriorityVLAN -match 'Enabled') {
-                $intelNotice = "<div class='alert-card alert-warning' style='margin-top: 6px; font-size: 0.85rem;'><strong>&#x26A0; Intel 2.5G Stability Notice:</strong> Packet Priority & VLAN is enabled on $($net.Name). This is known to cause ARP probe timeouts and socket stalls. Run <code>Repair-EthernetSettings.ps1</code> to disable VLAN tagging.</div>"
+                $intelNotice = "<div class='alert-card alert-warning' style='margin-top: 6px; font-size: 0.85rem;'><strong>Config:</strong> Packet Priority &amp; VLAN is enabled on $($net.Name).</div>"
             }
             $udpNotice = ""
             if ($net.IsUdpConstrained) {
@@ -461,20 +469,21 @@ function Export-DcHtmlReport {
     if ($ReportData.PSObject.Properties['SecondaryFindings'] -and $ReportData.SecondaryFindings -and $ReportData.SecondaryFindings.Count -gt 0) {
         $secCards = [System.Collections.Generic.List[string]]::new()
         $secDiscordLines = [System.Collections.Generic.List[string]]::new()
-        $secCards.Add("<div style='margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border);'><strong style='color: var(--yellow); font-size: 1.0rem;'>Other Issues Found ($($ReportData.SecondaryFindings.Count)):</strong>")
+        $secCards.Add("<div style='margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border);'><strong style='color: var(--yellow); font-size: 1.0rem;'>Other recorded events ($($ReportData.SecondaryFindings.Count)):</strong>")
         $idx = 2
         foreach ($sf in $ReportData.SecondaryFindings) {
             $sfBadge = if ($sf.Severity -eq "Critical") { "<span class='badge-critical'>CRITICAL</span>" } elseif ($sf.Severity -eq "Warning") { "<span class='badge-warning'>WARNING</span>" } else { "<span class='badge-neutral'>$($sf.Severity)</span>" }
             $sfSteps = if ($sf.PSObject.Properties['Steps']) { $sf.Steps } else { $null }
             $sfActs  = if ($sf.PSObject.Properties['Actions']) { $sf.Actions } else { $null }
             $sfGuidanceFormatted = & $formatGuidanceHtml $sf.Guidance $sfSteps $sfActs
-            $secCards.Add("<div class='card-item' style='margin-top: 10px; background: rgba(15, 23, 42, 0.7);'><div class='card-header-row'><span class='file-name'>[$idx] $($sf.Title)</span>$sfBadge</div><div style='font-size: 0.92rem; margin-bottom: 8px;'>$($sf.Description)</div><div class='guidance-box' style='margin-top: 6px; padding: 10px 14px;'><strong>Recommended Fix:</strong>$sfGuidanceFormatted</div></div>")
-            $secDiscordLines.Add("  [$idx] [$($sf.Severity)] $($sf.Title) -> $($sf.Guidance)")
+            $evSecIdx = [array]::IndexOf(@($ReportData.Findings), $sf)
+            $secCards.Add("<div class='card-item' id='ev-$evSecIdx' style='margin-top: 10px; background: rgba(15, 23, 42, 0.7);'><div class='card-header-row'><span class='file-name'>[$idx] $($sf.Title)</span>$sfBadge</div><div style='font-size: 0.92rem; margin-bottom: 8px; white-space: pre-wrap;'>$($sf.Description)</div><div style='font-size:0.8rem;color:#94a3b8;'>Source: $($sf.Source)</div></div>")
+            $secDiscordLines.Add("  * $($sf.Title) :: $($sf.Description) (Source: $($sf.Source))")
             $idx++
         }
         $secCards.Add("</div>")
         $secondaryFindingsHtml = $secCards -join "`n"
-        $secondaryDiscordSection = "`n`n[Concurrent / Secondary Findings]`n" + ($secDiscordLines -join "`n")
+        $secondaryDiscordSection = "`n`n[Other Recorded Events]`n" + ($secDiscordLines -join "`n")
     }
 
     $discordText = "=== DriverCheck Diagnostic Summary ===`n" +
@@ -482,7 +491,7 @@ function Export-DcHtmlReport {
         "Severity:       $($ReportData.RootCauseSeverity)`n" +
         "Timestamp:      $((Get-Date).ToString('yyyy-MM-dd HH:mm'))`n" +
         "Scan Range:     $scanRangeDiscord`n`n" +
-        "[Summary]`n$($ReportData.RootCauseGuidance)" +
+        "[Summary]`n$($ReportData.RootCauseDescription)" +
         $secondaryDiscordSection +
         $resolvedDiscordSection + "`n`n" +
         "[Hardware & Platform]`n" +
@@ -562,6 +571,33 @@ function Export-DcHtmlReport {
     $parts.Add("        .spec-value { font-size: 0.92rem; font-weight: 600; color: #fff; margin-top: 3px; word-break: break-word; }")
     $parts.Add("        .filter-input { width: 100%; box-sizing: border-box; background: #050811; border: 1px solid var(--border); border-radius: 8px; color: #fff; padding: 12px 16px; margin: 16px 0; font-size: 0.95rem; outline: none; }")
     $parts.Add("        .filter-input:focus { border-color: var(--cyan); }")
+    $parts.Add('        .crash-summary, .timeline-wrap { margin-bottom: 24px; }')
+    $parts.Add('        .crash-summary h2, .timeline-wrap h2 { font-size: 1.15rem; color: var(--cyan); margin: 0 0 12px 0; }')
+    $parts.Add('        .sum-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }')
+    $parts.Add('        .sum-card { display: block; text-decoration: none; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-left: 5px solid var(--red); border-radius: 8px; padding: 14px 18px; transition: background .15s; }')
+    $parts.Add('        .sum-card:hover { background: var(--surface-hover); }')
+    $parts.Add('        .sum-card.sum-app { border-left-color: var(--yellow); }')
+    $parts.Add('        .sum-card.sum-drv { border-left-color: var(--cyan); }')
+    $parts.Add('        .sum-card.sum-zero { border-left-color: var(--border); }')
+    $parts.Add('        .sum-head { font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }')
+    $parts.Add('        .sum-count { font-size: 2.2rem; font-weight: 700; line-height: 1.2; margin: 2px 0 6px 0; color: #fff; }')
+    $parts.Add('        .sum-line { font-size: 0.85rem; color: var(--text-muted); margin-top: 2px; }')
+    $parts.Add('        .sum-note { font-size: 0.78rem; color: var(--text-muted); margin-top: 10px; }')
+    $parts.Add('        .tl-filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }')
+    $parts.Add('        .tl-chip { background: var(--surface); color: var(--text-muted); border: 1px solid var(--border); border-radius: 999px; padding: 4px 14px; font-size: 0.82rem; cursor: pointer; }')
+    $parts.Add('        .tl-chip.active, .tl-chip:hover { color: #fff; border-color: var(--cyan); }')
+    $parts.Add('        .tl { position: relative; margin-left: 6px; padding-left: 4px; border-left: 2px solid var(--border); }')
+    $parts.Add('        .tl-day { font-size: 0.78rem; font-weight: 700; color: var(--text-muted); margin: 14px 0 6px 14px; text-transform: uppercase; letter-spacing: 0.5px; }')
+    $parts.Add('        .tl-item { position: relative; display: flex; align-items: baseline; gap: 10px; text-decoration: none; color: var(--text); padding: 6px 10px 6px 18px; border-radius: 6px; font-size: 0.9rem; }')
+    $parts.Add('        .tl-item:hover { background: var(--surface-hover); }')
+    $parts.Add('        .tl-time { font-family: Consolas, monospace; font-size: 0.8rem; color: var(--text-muted); min-width: 62px; }')
+    $parts.Add('        .tl-dot { position: absolute; left: -9px; top: 12px; width: 12px; height: 12px; border-radius: 50%; background: var(--red); border: 2px solid var(--bg); }')
+    $parts.Add('        .tl-warn .tl-dot { background: var(--yellow); }')
+    $parts.Add('        .tl-tag { display: inline-block; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; padding: 1px 8px; border-radius: 999px; margin-right: 6px; background: var(--surface); border: 1px solid var(--border); color: var(--text-muted); }')
+    $parts.Add('        .tl-tag-sys { color: var(--red); border-color: rgba(248, 113, 113, 0.4); }')
+    $parts.Add('        .tl-tag-app { color: var(--yellow); border-color: rgba(250, 204, 21, 0.4); }')
+    $parts.Add('        .tl-tag-drv { color: var(--cyan); border-color: rgba(56, 189, 248, 0.4); }')
+    $parts.Add('        .card-item:target, .root-cause:target { outline: 2px solid var(--cyan); outline-offset: 3px; }')
     $parts.Add("    </style>")
     $parts.Add("</head>")
     $parts.Add("<body>")
@@ -586,6 +622,103 @@ function Export-DcHtmlReport {
     $parts.Add("            <span class='badge $statusClass'>$statusText</span>")
     $parts.Add("        </header>")
 
+    # ---------------- Crash summary (top) + clickable timeline ----------------
+    $enc = { param($t) [System.Net.WebUtility]::HtmlEncode([string]$t) }
+    $allEv = if ($ReportData.PSObject.Properties['Findings'] -and $ReportData.Findings) { @($ReportData.Findings) } else { @() }
+    $catOf = {
+        param($f)
+        if ($f.Id -in @('KERNEL_BUGCHECK', 'KERNEL_POWER_41', 'EVENTLOG_6008')) { return 'sys' }
+        if ($f.Id -eq 'CRASH_DUMP') { if ($f.Title -match 'kernel dump') { return 'sys' } else { return 'app' } }
+        if ($f.Id -eq 'GPU_TIMEOUT_EVENT') { return 'drv' }
+        return 'other'
+    }
+    $catLabel = @{ sys = 'System crash'; app = 'Application crash'; drv = 'Driver timeout'; other = 'Other event' }
+    $fmtT = { param($t) if ($t -is [datetime]) { $t.ToString('yyyy-MM-dd HH:mm') } else { 'n/a' } }
+    $latestOf = {
+        param($items)
+        $x = @($items | Where-Object { $_.Timestamp -is [datetime] } | Sort-Object Timestamp -Descending | Select-Object -First 1)
+        if ($x.Count -gt 0) { & $fmtT $x[0].Timestamp } else { 'n/a' }
+    }
+
+    $sysItems = @($allEv | Where-Object { (& $catOf $_) -eq 'sys' })
+    $bcItems  = @($sysItems | Where-Object { $_.Id -eq 'KERNEL_BUGCHECK' })
+    $rsItems  = @($sysItems | Where-Object { $_.Id -in @('KERNEL_POWER_41', 'EVENTLOG_6008') })
+    $bcCodes  = @($bcItems | ForEach-Object { if ($_.Title -match '(0x[0-9a-fA-F]+)') { $Matches[1] } } | Select-Object -Unique)
+    $drvItems = @($allEv | Where-Object { $_.Id -eq 'GPU_TIMEOUT_EVENT' })
+    $drvCodes = @($drvItems | ForEach-Object { if ($_.Title -match 'event (\S+)$') { $Matches[1] } } | Select-Object -Unique)
+    $appDumps = @($ReportData.Dumps | Where-Object { $_ -and $_.ExceptionCode -and -not $_.IsKernelDump })
+    $appProgs = @($appDumps | Group-Object { $_.FileName -replace '\.\d+\.dmp$', '' } | Sort-Object Count -Descending)
+    $gapItems = @($allEv | Where-Object { $_.Id -eq 'EVIDENCE_UNREADABLE' })
+    $appLatest = @($appDumps | Sort-Object Timestamp -Descending | Select-Object -First 1)
+
+    $mkCard = {
+        param([string]$Cls, [string]$Cat, [string]$Heading, [int]$Count, [string[]]$Lines)
+        $zero = if ($Count -eq 0) { ' sum-zero' } else { '' }
+        $body = ($Lines | Where-Object { $_ } | ForEach-Object { '<div class="sum-line">' + (& $enc $_) + '</div>' }) -join ''
+        '<a class="sum-card ' + $Cls + $zero + '" href="#timeline" data-cat="' + $Cat + '" onclick="filterTimeline(this.getAttribute(&quot;data-cat&quot;))"><div class="sum-head">' + (& $enc $Heading) + '</div><div class="sum-count">' + $Count + '</div>' + $body + '</a>'
+    }
+
+    $sysLines = @()
+    if ($bcItems.Count -gt 0) { $sysLines += "$($bcItems.Count) bugcheck (BSOD): $($bcCodes -join ', ')" }
+    if ($rsItems.Count -gt 0) { $sysLines += "$($rsItems.Count) unclean restart(s) with no bugcheck recorded" }
+    if ($sysItems.Count -gt 0) { $sysLines += "Most recent: $(& $latestOf $sysItems)" } else { $sysLines += 'None recorded in the sources read' }
+    if ($gapItems.Count -gt 0) { $sysLines += 'Kernel dump folder(s) not read - see Event Summary' }
+
+    $appLines = @()
+    if ($appDumps.Count -gt 0) {
+        $appLines += "$($appDumps.Count) crash dump file(s), $($appProgs.Count) distinct dump name(s) (by process or file name)"
+        $appLines += (($appProgs | Select-Object -First 4 | ForEach-Object { "$($_.Name) x$($_.Count)" }) -join ', ')
+        $appLines += "Most recent: $(& $fmtT $appLatest[0].Timestamp)"
+    } else { $appLines += 'None recorded in the sources read' }
+
+    $drvLines = @()
+    if ($drvItems.Count -gt 0) {
+        $drvLines += "$($drvItems.Count) driver timeout / reset event(s)"
+        if ($drvCodes.Count -gt 0) { $drvLines += "Event codes: $($drvCodes -join ', ')" }
+        $drvLines += "Most recent: $(& $latestOf $drvItems)"
+    } else { $drvLines += 'None recorded in the sources read' }
+
+    $parts.Add('        <section class="crash-summary" id="crash-summary">')
+    $parts.Add('            <h2>Crash summary</h2>')
+    $parts.Add('            <div class="sum-grid">')
+    $parts.Add('                ' + (& $mkCard 'sum-sys' 'sys' 'System crashes' ($bcItems.Count + $rsItems.Count) $sysLines))
+    $parts.Add('                ' + (& $mkCard 'sum-app' 'app' 'Application crashes' $appDumps.Count $appLines))
+    $parts.Add('                ' + (& $mkCard 'sum-drv' 'drv' 'Driver timeouts' $drvItems.Count $drvLines))
+    $parts.Add('            </div>')
+    $parts.Add('            <div class="sum-note">Recorded crash and timeout events from system event logs and dump files.</div>')
+    $parts.Add('        </section>')
+
+    # Timeline: critical + warning events with a timestamp, newest first, grouped by day.
+    $tlItems = @($allEv | Where-Object { $_.Timestamp -is [datetime] -and ($_.Kind -eq 'Crash' -or $_.Severity -in @('Critical', 'Warning')) } | Sort-Object Timestamp -Descending)
+    $parts.Add('        <section class="timeline-wrap" id="timeline">')
+    $parts.Add('            <h2>Timeline</h2>')
+    $parts.Add('            <div class="tl-filters">')
+    $parts.Add('                <button type="button" class="tl-chip active" data-cat="all" onclick="filterTimeline(this.getAttribute(&quot;data-cat&quot;))">All</button>')
+    $parts.Add('                <button type="button" class="tl-chip" data-cat="sys" onclick="filterTimeline(this.getAttribute(&quot;data-cat&quot;))">System crashes</button>')
+    $parts.Add('                <button type="button" class="tl-chip" data-cat="app" onclick="filterTimeline(this.getAttribute(&quot;data-cat&quot;))">Application crashes</button>')
+    $parts.Add('                <button type="button" class="tl-chip" data-cat="drv" onclick="filterTimeline(this.getAttribute(&quot;data-cat&quot;))">Driver timeouts</button>')
+    $parts.Add('                <button type="button" class="tl-chip" data-cat="other" onclick="filterTimeline(this.getAttribute(&quot;data-cat&quot;))">Other events</button>')
+    $parts.Add('            </div>')
+    if ($tlItems.Count -eq 0) {
+        $parts.Add('            <div class="empty-state">No timestamped crash or warning events were recorded in the sources that were read.</div>')
+    } else {
+        $parts.Add('            <div class="tl">')
+        $lastDay = $null
+        foreach ($f in $tlItems) {
+            $day = $f.Timestamp.ToString('yyyy-MM-dd (ddd)')
+            if ($day -ne $lastDay) {
+                $parts.Add('                <div class="tl-day" data-day="1">' + $day + '</div>')
+                $lastDay = $day
+            }
+            $cat = & $catOf $f
+            $sevCls = if ($f.Severity -eq 'Critical') { 'tl-crit' } else { 'tl-warn' }
+            $evi = [array]::IndexOf($allEv, $f)
+            $parts.Add('                <a class="tl-item ' + $sevCls + '" data-cat="' + $cat + '" href="#ev-' + $evi + '"><span class="tl-time">' + $f.Timestamp.ToString('HH:mm:ss') + '</span><span class="tl-dot"></span><span class="tl-body"><span class="tl-tag tl-tag-' + $cat + '">' + $catLabel[$cat] + '</span> ' + (& $enc $f.Title) + '</span></a>')
+        }
+        $parts.Add('            </div>')
+    }
+    $parts.Add('        </section>')
+
     $parts.Add("        <div class='spec-grid'>")
     $parts.Add("            <div class='spec-card'><div class='spec-label'>Processor</div><div class='spec-value'>$cpuVal</div></div>")
     $parts.Add("            <div class='spec-card'><div class='spec-label'>System Memory</div><div class='spec-value'>$ramVal</div></div>")
@@ -595,15 +728,20 @@ function Export-DcHtmlReport {
     $parts.Add("        </div>")
     $parts.Add("        <input type='text' class='filter-input' id='reportFilter' placeholder='Search report, events, drivers, exception codes, and error logs...' onkeyup='filterReport()'>")
     $parts.Add("        <section class='executive-card'>")
-    $parts.Add("            <h2>Crash Check Summary & How to Fix It</h2>")
-    $parts.Add("            <div class='root-cause'>Main Issue: $($ReportData.RootCauseTitle)</div>")
-    $parts.Add("            <p>$($ReportData.RootCauseDescription)</p>")
-    $parts.Add("            <div class='guidance-box'>")
-    $parts.Add("                <strong>How to Fix:</strong>")
-    $parts.Add("                $primaryGuidanceHtml")
-    $parts.Add("            </div>")
+    $parts.Add("            <h2>Event Summary</h2>")
+    $primIdx = if ($ReportData.PSObject.Properties['PrimaryFinding'] -and $ReportData.PrimaryFinding) { [array]::IndexOf($allEv, $ReportData.PrimaryFinding) } else { -1 }
+    $primIdAttr = if ($primIdx -ge 0) { " id='ev-$primIdx'" } else { '' }
+    $parts.Add("            <div class='root-cause'$primIdAttr>$($ReportData.RootCauseTitle)</div>")
+    $parts.Add("            <div style='font-size:0.95rem; line-height:1.55; white-space:pre-wrap; margin-bottom:12px;'>$($ReportData.RootCauseDescription)</div>")
     if ($secondaryFindingsHtml) {
         $parts.Add($secondaryFindingsHtml)
+    }
+    if ($ReportData.PSObject.Properties['Leads'] -and $ReportData.Leads -and @($ReportData.Leads).Count -gt 0) {
+        $parts.Add("            <div style='margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border);'><strong style='color: var(--green);'>Next Investigation Steps:</strong>")
+        foreach ($ld in @($ReportData.Leads)) {
+            $parts.Add("            <div class='card-item' style='margin-top: 10px;'><div>" + [System.Net.WebUtility]::HtmlEncode($ld.Lead) + "</div><div style='font-size:0.82rem;color:#94a3b8;margin-top:6px;'>Based on: " + [System.Net.WebUtility]::HtmlEncode($ld.BasedOn) + "</div></div>")
+        }
+        $parts.Add("            </div>")
     }
     $parts.Add("        </section>")
     if ($resolvedRows.Count -gt 0) {
@@ -670,6 +808,18 @@ function Export-DcHtmlReport {
     $parts.Add("            el.style.display = txt.indexOf(q) !== -1 ? '' : 'none';")
     $parts.Add("        });")
     $parts.Add("    }")
+    $parts.Add('    function filterTimeline(cat) {')
+    $parts.Add('        var chips = document.querySelectorAll(".tl-chip");')
+    $parts.Add('        chips.forEach(function(c) { c.classList.toggle("active", c.getAttribute("data-cat") === cat); });')
+    $parts.Add('        document.querySelectorAll(".tl-item").forEach(function(el) {')
+    $parts.Add('            el.style.display = (cat === "all" || el.getAttribute("data-cat") === cat) ? "" : "none";')
+    $parts.Add('        });')
+    $parts.Add('        document.querySelectorAll(".tl-day").forEach(function(d) {')
+    $parts.Add('            var n = d.nextElementSibling, any = false;')
+    $parts.Add('            while (n && !n.classList.contains("tl-day")) { if (n.style.display !== "none") { any = true; } n = n.nextElementSibling; }')
+    $parts.Add('            d.style.display = any ? "" : "none";')
+    $parts.Add('        });')
+    $parts.Add('    }')
     $parts.Add("    function copyCliFix(btn) {
         var cmd = btn.getAttribute('data-cmd') || '';
         if (navigator.clipboard && navigator.clipboard.writeText) {

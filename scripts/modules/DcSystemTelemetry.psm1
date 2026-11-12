@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     DriverCheck - System Telemetry & Event Log Correlator Module
 .DESCRIPTION
@@ -23,23 +23,92 @@ function Get-DcBugCheckMeaning {
     param([string]$CodeHex)
 
     switch -Regex ($CodeHex) {
-        '0x0*116' { "VIDEO_TDR_ERROR (Display Driver Timeout & Recovery Failure)" }
-        '0x0*119' { "VIDEO_SCHEDULER_INTERNAL_ERROR (DirectX Graphics Kernel Watchdog)" }
-        '0x0*193' { "VIDEO_DXGKRNL_LIVEDUMP (DirectX Graphics Kernel Deadlock / Watchdog Live Dump)" }
-        '0x0*141' { "VIDEO_ENGINE_TDR_TIMEOUT (GPU Engine Hung & Recovered)" }
-        '0x0*117' { "VIDEO_TDR_TIMEOUT_DETECTED (Display Driver Failed to Respond)" }
-        '0x0*9F'  { "DRIVER_POWER_STATE_FAILURE (Driver Failed Power IRP / Sleep-Wake Deadlock)" }
-        '0x0*3B'  { "SYSTEM_SERVICE_EXCEPTION (Kernel Mode Exception in Driver)" }
-        '0x0*50'  { "PAGE_FAULT_IN_NONPAGED_AREA (Invalid Memory Address Referenced by Kernel/Driver)" }
-        '0x0*7E'  { "SYSTEM_THREAD_EXCEPTION_NOT_HANDLED (Unhandled Exception in Kernel Driver)" }
-        '0x0*124' { "WHEA_UNCORRECTABLE_ERROR (Fatal CPU/PCIe/Memory Bus Hardware Error)" }
-        '0x0*D1'  { "DRIVER_IRQL_NOT_LESS_OR_EQUAL (Driver Accessing Paged Memory at High IRQL)" }
-        '0x0*133' { "DPC_WATCHDOG_VIOLATION (Driver Spent Excessive Time in ISR/DPC Routine)" }
-        '0x0*139' { "KERNEL_SECURITY_CHECK_FAILURE (Kernel Data Structure Corruption)" }
-        '0x0*1E'  { "KMODE_EXCEPTION_NOT_HANDLED (Kernel Mode Fault)" }
-        '0x0*A'   { "IRQL_NOT_LESS_OR_EQUAL (Kernel Routine Paged Memory Violation)" }
-        '0x0*93'  { "INVALID_KERNEL_HANDLE (Driver Passed or Closed an Invalid Kernel Handle)" }
+        '0x0*116' { "VIDEO_TDR_ERROR" }
+        '0x0*119' { "VIDEO_SCHEDULER_INTERNAL_ERROR" }
+        '0x0*193' { "VIDEO_DXGKRNL_LIVEDUMP" }
+        '0x0*141' { "VIDEO_ENGINE_TDR_TIMEOUT" }
+        '0x0*117' { "VIDEO_TDR_TIMEOUT_DETECTED" }
+        '0x0*9F'  { "DRIVER_POWER_STATE_FAILURE" }
+        '0x0*3B'  { "SYSTEM_SERVICE_EXCEPTION" }
+        '0x0*50'  { "PAGE_FAULT_IN_NONPAGED_AREA" }
+        '0x0*7E'  { "SYSTEM_THREAD_EXCEPTION_NOT_HANDLED" }
+        '0x0*124' { "WHEA_UNCORRECTABLE_ERROR" }
+        '0x0*D1'  { "DRIVER_IRQL_NOT_LESS_OR_EQUAL" }
+        '0x0*133' { "DPC_WATCHDOG_VIOLATION" }
+        '0x0*139' { "KERNEL_SECURITY_CHECK_FAILURE" }
+        '0x0*1E'  { "KMODE_EXCEPTION_NOT_HANDLED" }
+        '0x0*A'   { "IRQL_NOT_LESS_OR_EQUAL" }
+        '0x0*93'  { "INVALID_KERNEL_HANDLE" }
         default   { "Kernel BugCheck ($CodeHex)" }
+    }
+}
+
+function Get-DcBugCheckExplanation {
+    param(
+        [string]$CodeHex,
+        [string]$Param1 = $null
+    )
+
+    $cleanCode = if ($CodeHex) { $CodeHex.ToLower().Trim() } else { "" }
+    $p1Hex = if ($Param1) { $Param1.ToLower().Trim() } else { "" }
+
+    switch -Regex ($cleanCode) {
+        '0x0*119' {
+            if ($p1Hex -match '0x0*5\b') {
+                return "Subtype 0x5: The DirectX video scheduler detected that a GPU driver command submission timed out and could not be recovered by the driver scheduler."
+            } elseif ($p1Hex -match '0x0*1\b') {
+                return "Subtype 0x1: The driver failed to submit a command within the allotted time."
+            } elseif ($p1Hex -match '0x0*2\b') {
+                return "Subtype 0x2: The driver failed to preempt a GPU execution context."
+            } elseif ($p1Hex -match '0x0*3\b') {
+                return "Subtype 0x3: The driver was unable to schedule a DMA buffer."
+            } elseif ($p1Hex -match '0x0*400\b') {
+                return "Subtype 0x400: The video memory manager detected an invalid memory operation."
+            } else {
+                return "The DirectX graphics kernel subsystem (dxgkrnl.sys / dxgmms2.sys) detected an unrecoverable scheduler condition or GPU driver submission timeout."
+            }
+        }
+        '0x0*3b' {
+            if ($p1Hex -match '0x0*c0000005\b') {
+                return "An unhandled memory access violation (0xC0000005) occurred while executing kernel-mode system service code (a driver or kernel function attempted to read or write an invalid memory address)."
+            } else {
+                return "An unhandled exception occurred while executing a kernel system service routine."
+            }
+        }
+        '0x0*116' {
+            return "The display driver failed to respond to a GPU reset or watchdog timeout in a timely manner (VIDEO_TDR_ERROR)."
+        }
+        '0x0*141' {
+            return "A GPU engine hung and timed out, triggering a live kernel recovery (VIDEO_ENGINE_TDR_TIMEOUT)."
+        }
+        '0x0*117' {
+            return "A video timeout was detected on a display adapter (VIDEO_TDR_TIMEOUT_DETECTED)."
+        }
+        '0x0*9f' {
+            return "A driver failed to handle a power state transition IRP within the timeout period, often during sleep, wake, or device power down (DRIVER_POWER_STATE_FAILURE)."
+        }
+        '0x0*124' {
+            return "A fatal hardware error was detected by the Windows Hardware Error Architecture (CPU bus error, PCIe device fault, or memory error)."
+        }
+        '0x0*133' {
+            return "A single Deferred Procedure Call (DPC) ran past its timeout or the system spent too much time at DISPATCH_LEVEL IRQL, hanging the OS scheduler (DPC_WATCHDOG_VIOLATION)."
+        }
+        '0x0*139' {
+            return "A kernel component detected corruption of a critical data structure (buffer overflow or stack cookie failure) (KERNEL_SECURITY_CHECK_FAILURE)."
+        }
+        '0x0*50' {
+            return "Invalid system memory was referenced by a kernel driver in a non-paged area (PAGE_FAULT_IN_NONPAGED_AREA)."
+        }
+        '0x0*d1' {
+            return "A kernel driver accessed pageable memory at an elevated Interrupt Request Level (DRIVER_IRQL_NOT_LESS_OR_EQUAL)."
+        }
+        '0x0*7e' {
+            return "A system thread generated an exception that the error handler did not catch (SYSTEM_THREAD_EXCEPTION_NOT_HANDLED)."
+        }
+        default {
+            $m = Get-DcBugCheckMeaning $CodeHex
+            return "Windows kernel crash ($m)."
+        }
     }
 }
 
@@ -54,7 +123,7 @@ function Get-DcFastStartupStatus {
         FastStartupEnabled = $enabled
         HiberbootValue     = if ($powerReg) { $powerReg.HiberbootEnabled } else { $null }
         Description        = if ($enabled) {
-            "Fast Startup is ENABLED (HiberbootEnabled = 1). Hybrid kernel state is saved to disk across shutdowns; this commonly causes recurring 0x9F power state crashes with mismatched drivers."
+            "Fast Startup is enabled (HiberbootEnabled = 1)."
         } else {
             "Fast Startup is DISABLED (Clean cold boots enabled)."
         }
@@ -132,7 +201,7 @@ function Get-DcPciePowerManagementStatus {
         $result.IsEnabled = $true
         $result.IsHighRisk = $true
         $settingText = $result.ACSettingName
-        $result.RiskExplanation = "PCI Express Link State Power Management (ASPM) is set to '$settingText' in the active '$($result.SchemeName)' power plan. When enabled, Windows puts PCIe links (GPU root ports and chipset PCIe bridges) into low-power states (L0s/L1) during idle or bursty transitions. High-power GPUs suffer wake latency spikes causing TDR timeouts (Event 4101 / 0x141), and discrete 2.5GbE network controllers (Intel I225-V / I226-V) behind chipset PCIe switches frequently suffer silent TX/RX DMA ring hangs during 3D gaming."
+        $result.RiskExplanation = "PCI Express Link State Power Management (ASPM) is set to '$settingText' in the active '$($result.SchemeName)' power plan."
     }
 
     return $result
@@ -489,19 +558,33 @@ function Get-DcSystemTelemetry {
                 if ($xmlData['BugcheckCode']) {
                     try { $bugCode = [int64]$xmlData['BugcheckCode'] } catch {}
                 }
+                $pbTs = 0
+                if ($xmlData['PowerButtonTimestamp']) { try { $pbTs = [int64]$xmlData['PowerButtonTimestamp'] } catch {} }
+                $pbTime = $null
+                if ($pbTs -gt 0) { try { $pbTime = [datetime]::FromFileTime($pbTs) } catch {} }
+                $longPress = ($xmlData['LongPowerButtonPressDetected'] -eq 'true')
+                $sleepIn = ($xmlData['SleepInProgress'] -and $xmlData['SleepInProgress'] -ne '0' -and $xmlData['SleepInProgress'] -ne 'false')
+                $bcParams = @($xmlData['BugcheckParameter1'], $xmlData['BugcheckParameter2'], $xmlData['BugcheckParameter3'], $xmlData['BugcheckParameter4']) -join ', '
 
-                $msg = if ($bugCode -eq 0) {
-                    "Abrupt power loss or instant freeze (BugcheckCode: 0 - Power drop, PSU transient trip, or hard lock)."
+                $facts = [System.Collections.Generic.List[string]]::new()
+                if ($bugCode -ne 0) {
+                    $facts.Add(("Bugcheck stop code 0x{0:X} recorded before shutdown." -f $bugCode))
                 } else {
-                    ("System rebooted following BugCheck code 0x{0:X}." -f $bugCode)
+                    $facts.Add("System rebooted without a clean shutdown (BugcheckCode 0). No crash dump was written; this indicates an abrupt power loss, hard reset, or system freeze.")
                 }
+                if ($pbTime) { $facts.Add("Power button was pressed at $($pbTime.ToString('yyyy-MM-dd HH:mm:ss')).") }
+                if ($longPress) { $facts.Add("Long power-button press (hard reset) was detected.") }
+                if ($sleepIn) { $facts.Add("System was entering or resuming from sleep when power was interrupted.") }
 
                 $results.AbruptReboots.Add([PSCustomObject]@{
-                    TimeCreated  = $e.TimeCreated
-                    Id           = $e.Id
-                    Provider     = $e.ProviderName
-                    BugcheckCode = $bugCode
-                    Message      = $msg
+                    TimeCreated          = $e.TimeCreated
+                    Id                   = $e.Id
+                    Provider             = $e.ProviderName
+                    BugcheckCode         = $bugCode
+                    PowerButtonTimestamp = $pbTime
+                    LongPowerButtonPress = $longPress
+                    SleepInProgress      = [bool]$sleepIn
+                    Message              = ($facts -join ' ')
                 })
             }
 
@@ -706,18 +789,18 @@ function Get-DcSystemTelemetry {
 
                 if ($dumpTime -ge $Cutoff -and $dumpTime -le $EndTime) {
                     $meaning = switch ($p1) {
-                        '141'      { "LiveKernelEvent 0x141 (VIDEO_ENGINE_TDR_TIMEOUT - GPU Engine Hung & Recovered)" }
-                        '117'      { "LiveKernelEvent 0x117 (VIDEO_TDR_TIMEOUT_DETECTED - Display Driver Failed to Respond)" }
+                        '141'      { "LiveKernelEvent 0x141 (VIDEO_ENGINE_TIMEOUT_DETECTED)" }
+                        '117'      { "LiveKernelEvent 0x117 (VIDEO_TDR_TIMEOUT_DETECTED)" }
                         '193'      {
                             if ($we.Message -match 'P2:\s*(?:0x)?0*810\b') {
-                                "LiveKernelEvent 0x193 (VIDEO_DXGKRNL_LIVEDUMP - DirectX Graphics Kernel Deadlock / Watchdog [ProcessDeadlockThread (0x810)])"
+                                "LiveKernelEvent 0x193 (VIDEO_DXGKRNL_LIVEDUMP, parameter 2 = 0x810)"
                             } else {
-                                "LiveKernelEvent 0x193 (VIDEO_DXGKRNL_LIVEDUMP - DirectX Graphics Kernel Deadlock / Watchdog)"
+                                "LiveKernelEvent 0x193 (VIDEO_DXGKRNL_LIVEDUMP)"
                             }
                         }
-                        'a1000001' { "LiveKernelEvent 0xA1000001 (AMD_WATCHDOG - AMD Driver Hardware Hang & Watchdog Reset)" }
-                        'a2000002' { "LiveKernelEvent 0xA2000002 (AMD_REPORT_UM - AMD User-Mode Driver Recovery)" }
-                        default    { "LiveKernelEvent 0x$p1 (GPU Watchdog Live Dump)" }
+                        'a1000001' { "LiveKernelEvent 0xA1000001 (vendor-defined code)" }
+                        'a2000002' { "LiveKernelEvent 0xA2000002 (vendor-defined code)" }
+                        default    { "LiveKernelEvent 0x$p1" }
                     }
 
                     $companionMatch = $results.TdrEvents | Where-Object { [math]::Abs(($_.TimeCreated - $dumpTime).TotalSeconds) -le 60 } | Select-Object -First 1
@@ -753,7 +836,7 @@ function Get-DcSystemTelemetry {
                                 $companionMatch.CompanionCodes.Add($newTag)
                             }
                         }
-                        $compNote = if ($companionMatch.CompanionCodes.Count -gt 0) { " [Companion dumps: $($companionMatch.CompanionCodes -join ', ')]" } else { "" }
+                        $compNote = if ($companionMatch.CompanionCodes.Count -gt 0) { " [Additional live dumps within 60s: $($companionMatch.CompanionCodes -join ', ')]" } else { "" }
                         $companionMatch.Message = "$($companionMatch.Meaning)$compNote [Dump: $($companionMatch.DumpPath)]"
                     }
                 }
@@ -2591,940 +2674,481 @@ function Find-DcResolvedIncidentHistory {
 }
 
 function Resolve-DcDiagnosticFindings {
+    <#
+    .SYNOPSIS
+        Evidence-only event summarizer. Reports what was observed, when, and from which source.
+    .DESCRIPTION
+        Deliberately makes NO causal claims and gives NO remediation advice. Temporal proximity is
+        not causation, and a crash dump that names a module does not establish why that module failed.
+        Output is ordered by time (newest first), never by a hard-coded "probability" score.
+        Evidence the tool could not read is reported explicitly instead of being silently skipped.
+    #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $false)]
         [object[]]$ParsedDumps = @(),
-
-        [Parameter(Mandatory = $false)]
         [PSCustomObject]$Telemetry,
-
-        [Parameter(Mandatory = $false)]
         [PSCustomObject]$GpuHealth,
-
-        [Parameter(Mandatory = $false)]
         [object[]]$PnpIssues = @(),
-
-        [Parameter(Mandatory = $false)]
         [PSCustomObject]$MotherboardHealth,
-
-        [Parameter(Mandatory = $false)]
         [PSCustomObject]$DisplayHealth,
-
-        [Parameter(Mandatory = $false)]
         [PSCustomObject]$KernelDriverHealth,
-
-        [Parameter(Mandatory = $false)]
         [object[]]$NetworkHealth = @(),
-
-        [Parameter(Mandatory = $false)]
         [object[]]$ZombieProcesses = @(),
-
-        [Parameter(Mandatory = $false)]
         [string]$ScanMode = "LatestIncident",
-
-        [Parameter(Mandatory = $false)]
         [int]$MaxLookbackDays = 30,
-
-        [Parameter(Mandatory = $false)]
         [PSCustomObject]$IncidentAnchor,
-
-        [Parameter(Mandatory = $false)]
-        [object[]]$SteamGameSessions = @()
+        [object[]]$SteamGameSessions = @(),
+        [string[]]$UnreadableSources = @(),
+        [object[]]$EngineLogs = @(),
+        [object[]]$SteamLogs = @()
     )
 
-    $findings = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $tel = $Telemetry
+    $getEvents = {
+        param([string]$Name)
+        if ($tel -and $tel.PSObject.Properties[$Name] -and $tel.$Name) { return @($tel.$Name) }
+        return @()
+    }
+    $fmt = { param($t) if ($t -is [datetime]) { $t.ToString('yyyy-MM-dd HH:mm:ss') } else { 'unknown time' } }
+    $observations = [System.Collections.Generic.List[PSCustomObject]]::new()
 
-    $correlatedDrop = $null
-    $steamWatchdogCrash = $null
-    $userModeCrashes = @()
-    $kernelWatchdogDumps = @()
-
-    if ($ParsedDumps -and $ParsedDumps.Count -gt 0) {
-        $kernelWatchdogDumps = @($ParsedDumps | Where-Object {
-            $_.ExceptionCode -match '(?i)^0x(00000141|00000193|00000117|A1000001|000001B8|000001A8)$' -or
-            ($_.IsKernelDump -and $_.FullName -match '(?i)LiveKernelReports|WATCHDOG')
+    $addObs = {
+        param([string]$Id, [string]$Category, [string]$Kind, [string]$Title, [string]$Description,
+              [object]$Timestamp, [string]$Component, [string]$Source)
+        $observations.Add([PSCustomObject]@{
+            Id                = $Id
+            Category          = $Category
+            Kind              = $Kind          # Crash | Event | Evidence
+            Severity          = if ($Kind -eq 'Crash') { 'Critical' } elseif ($Kind -eq 'Evidence') { 'Info' } else { 'Warning' }
+            PriorityScore     = 0
+            Title             = $Title
+            Description       = $Description
+            Guidance          = ''
+            Steps             = @()
+            Actions           = @()
+            Timestamp         = $Timestamp
+            AffectedComponent = $Component
+            Source            = $Source
         })
-        $userModeCrashes = @($ParsedDumps | Where-Object {
-            $_.ExceptionCode -and ($kernelWatchdogDumps -notcontains $_)
-        })
+    }
 
-        $steamWatchdogCrash = $userModeCrashes | Where-Object {
-            ($_.Assertions -match '(?i)cross-thread pipe|pipes\.cpp|BMainLoop appears to have stalled') -or
-            ($_.ExceptionCode -eq "0x00000000" -and $_.FileName -match '(?i)crash_(steam|crimsondesert|stalker|gameoverlay)')
-        } | Select-Object -First 1
+    # ---- Kernel bugchecks (System log, Event 1001) ----
+    $matchedDumpFiles = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
-        if ($steamWatchdogCrash -and $Telemetry -and ($Telemetry.NetworkDrops.Count -gt 0 -or $Telemetry.WlanFailovers.Count -gt 0)) {
-            $crashTime = $steamWatchdogCrash.Timestamp
-            $matchedNet = $Telemetry.NetworkDrops | Where-Object {
-                [Math]::Abs(($_.TimeCreated - $crashTime).TotalMinutes) -le 10
-            } | Select-Object -First 1
+    foreach ($bc in (& $getEvents 'KernelBugChecks')) {
+        $dumpPathFromLog = if ($bc.Message -match 'A dump was saved in:\s*([^\r\n\.]+\.dmp)') { $Matches[1].Trim() } else { "" }
+        $reportId = if ($bc.Message -match 'Report Id:\s*([a-fA-F0-9\-]+)') { $Matches[1].Trim() } else { "" }
 
-            if (-not $matchedNet) {
-                $matchedNet = $Telemetry.WlanFailovers | Where-Object {
-                    [Math]::Abs(($_.TimeCreated - $crashTime).TotalMinutes) -le 10
-                } | Select-Object -First 1
-            }
-
-            if ($matchedNet) {
-                $correlatedDrop = $matchedNet
-            }
+        $p1 = ""
+        if ($bc.Message -match '\((0x[0-9a-fA-F]+)') {
+            $p1 = $Matches[1]
         }
-    }
 
-    $correlatedWatchdogNote = if ($kernelWatchdogDumps.Count -gt 0) {
-        $wdFirst = $kernelWatchdogDumps[0]
-        " Correlated with kernel GPU watchdog live dump $($wdFirst.FileName) ($($wdFirst.ExceptionCode) - $($wdFirst.ExceptionMeaning))."
-    } else { "" }
+        # Details: human explanation without raw hex strings
+        $explanation = Get-DcBugCheckExplanation -CodeHex $bc.Code -Param1 $p1
 
-    # -------------------------------------------------------------------------
-    # RULE GROUP 1: STEAM WATCHDOG & USER-MODE CRASH DUMPS
-    # -------------------------------------------------------------------------
-    if ($steamWatchdogCrash -and $correlatedDrop) {
-        $gameTarget = if ($steamWatchdogCrash.FaultingModule -and $steamWatchdogCrash.FaultingModule -ne "Unknown") { $steamWatchdogCrash.FaultingModule } else { "the active game" }
-        $dropIface = if ($correlatedDrop.InterfaceName) { $correlatedDrop.InterfaceName } else { "Ethernet" }
-        $dropTime = $correlatedDrop.TimeCreated.ToString('HH:mm:ss')
+        # Correlate with parsed dumps
+        $matchedDump = $null
+        $dumpFileName = if ($dumpPathFromLog) { Split-Path $dumpPathFromLog -Leaf } else { "" }
+        if ($dumpFileName) {
+            $matchedDump = @($ParsedDumps | Where-Object { $_ -and $_.FileName -ieq $dumpFileName }) | Select-Object -First 1
+        }
+        if (-not $matchedDump -and $bc.TimeCreated) {
+            $matchedDump = @($ParsedDumps | Where-Object { $_ -and $_.IsKernelDump -and [Math]::Abs(($_.Timestamp - $bc.TimeCreated).TotalSeconds) -le 120 }) | Select-Object -First 1
+        }
 
-        $findings.Add([PSCustomObject]@{
-            Id                = "STEAM_WATCHDOG_NETWORK_DROP"
-            Category          = "Network"
-            Severity          = "Critical"
-            PriorityScore     = 100
-            Title             = "STEAM WATCHDOG CRASH TRIGGERED BY NETWORK LINK DROP ($dropIface)"
-            Description       = "$gameTarget was terminated by Steam's internal watchdog assertion ('Assert( Stalled cross-thread pipe )') after Steam's engine loop stalled. Telemetry confirms this was triggered at $dropTime when $dropIface suffered an ARP probe failure (SuspectArpProbeFailed), causing Windows to initiate a Wi-Fi failover while game sockets were active."
-            Guidance          = "1. Terminate lingering zombie Steam processes using '.\Analyze-LatestCrash.ps1 -KillHungSteam'.`n  2. (Recommended) Optimize Intel I225-V stability by running '.\Analyze-LatestCrash.ps1 -RepairNetwork' as Administrator (disables Packet Priority & VLAN while preserving active negotiated link speed, eliminating known I225-V ARP drops).`n  3. Disconnect or turn off Wi-Fi when plugged into Ethernet to prevent Windows from flapping between wired and wireless connections during gameplay."
-            Timestamp         = $steamWatchdogCrash.Timestamp
-            AffectedComponent = $dropIface
-        })
-    } elseif ($steamWatchdogCrash) {
-        $gameTarget = if ($steamWatchdogCrash.FaultingModule -and $steamWatchdogCrash.FaultingModule -ne "Unknown") { $steamWatchdogCrash.FaultingModule } else { "the active game" }
-        $findings.Add([PSCustomObject]@{
-            Id                = "STEAM_WATCHDOG_PIPE_STALL"
-            Category          = "Application"
-            Severity          = "Critical"
-            PriorityScore     = 95
-            Title             = "STEAM CROSS-THREAD PIPE WATCHDOG TERMINATION (pipes.cpp:672)"
-            Description       = "$gameTarget was terminated by Steam's internal cross-thread IPC pipe watchdog ('Assert( Stalled cross-thread pipe )'). Steam's main event loop hung or deadlocked, causing Steam to forcefully terminate itself, GameOverlay, and the attached game process."
-            Guidance          = "1. Run '.\Analyze-LatestCrash.ps1 -KillHungSteam' to terminate lingering headless Steam processes.`n  2. Clear Steam browser cache with '.\Analyze-LatestCrash.ps1 -CleanSteamCache'.`n  3. If using an overlay or recording software, temporarily disable Steam Overlay in Steam Settings."
-            Timestamp         = $steamWatchdogCrash.Timestamp
-            AffectedComponent = $gameTarget
-        })
-    }
+        if ($matchedDump) {
+            [void]$matchedDumpFiles.Add($matchedDump.FileName)
+        }
 
-    if ($userModeCrashes.Count -gt 0 -and -not $steamWatchdogCrash) {
-        $firstCrash = $userModeCrashes | Select-Object -First 1
-        $isBackgroundShell = ($firstCrash.FileName -match '(?i)^(ApplicationFrameHost|SearchHost|SearchApp|Widgets|RuntimeBroker|ShellExperienceHost|StartMenuExperienceHost|LockApp)')
-        $baseDumpPriority = if ($isBackgroundShell) { 88 } else { 93 }
-
-        if ($firstCrash.IsShaderCompiler -or ($firstCrash.FaultingModule -match '(?i)amdxc|amdxx|nvwgf2|oo2core')) {
-            $findings.Add([PSCustomObject]@{
-                Id                = "SHADER_RUNTIME_CRASH"
-                Category          = "GPU"
-                Severity          = "Critical"
-                PriorityScore     = $baseDumpPriority
-                Title             = "SHADER COMPILATION / GRAPHICS RUNTIME CRASH ($($firstCrash.FaultingModule))"
-                Description       = "Exception $($firstCrash.ExceptionCode): $($firstCrash.ExceptionMeaning) in shader compiler / decompression DLL ($($firstCrash.FaultingModule) in $($firstCrash.FileName)).$correlatedWatchdogNote"
-                Guidance          = "Purge corrupt shader caches (including DX12 SM6 DxcCache) using '.\Analyze-LatestCrash.ps1 -CleanShaderCache'. Shader compilation places heavy AVX2/AVX-512 load across all CPU cores and RAM; if crashes persist, test CPU/RAM stability or disable aggressive PBO/Curve Optimizer undervolts."
-                Timestamp         = $firstCrash.Timestamp
-                AffectedComponent = $firstCrash.FaultingModule
-            })
-        } elseif ($firstCrash.ExceptionCode -match '0x887A0006|0x887A0005') {
-            $hybridHint = if ($GpuHealth -and $GpuHealth.HybridMultiGpu) { " On hybrid iGPU + dGPU systems, disable the unused CPU integrated GPU in BIOS or verify Windows Graphics Settings GPU preference / HAGS." } else { "" }
-            $findings.Add([PSCustomObject]@{
-                Id                = "GRAPHICS_DEVICE_REMOVED"
-                Category          = "GPU"
-                Severity          = "Critical"
-                PriorityScore     = $baseDumpPriority
-                Title             = "GRAPHICS DEVICE HUNG / REMOVED (0x887A0006 / 0x887A0005)"
-                Description       = "DirectX graphics device lost or timed out ($($firstCrash.ExceptionMeaning)) in $($firstCrash.FaultingModule) ($($firstCrash.FileName)).$correlatedWatchdogNote"
-                Guidance          = "1. Purge DirectX & AMD DxcCache/DxCache shader caches using '.\Analyze-LatestCrash.ps1 -CleanShaderCache'.`n  2. Disable PCIe Link State Power Management (ASPM) using '.\Analyze-LatestCrash.ps1 -DisablePciePowerSavings'.`n  3. Check GPU temperatures and power cables, lower in-game ray tracing / VRAM texture settings, or clean reinstall GPU drivers.$hybridHint"
-                Timestamp         = $firstCrash.Timestamp
-                AffectedComponent = $firstCrash.FaultingModule
-            })
-        } elseif ($firstCrash.IsRogueKernelDriver -or ($firstCrash.FaultingModule -match '(?i)inpoutx64|inpout32|winring0|ene\.sys|asromgdrv|gdrv') -or $firstCrash.ExceptionCode -eq '0x00000093') {
-            $findings.Add([PSCustomObject]@{
-                Id                = "ROGUE_KERNEL_DRIVER_CRASH"
-                Category          = "System"
-                Severity          = "Critical"
-                PriorityScore     = 97
-                Title             = "ROGUE KERNEL I/O DRIVER CRASH ($($firstCrash.FaultingModule) / INVALID_KERNEL_HANDLE 0x93)"
-                Description       = "Exception $($firstCrash.ExceptionCode): $($firstCrash.ExceptionMeaning) in legacy kernel driver '$($firstCrash.FaultingModule)' ($($firstCrash.FileName)). This legacy direct-hardware I/O port driver (commonly left behind by RGB or hardware monitoring utilities) bypasses modern Windows driver models. Under game anti-cheat engines (Easy Anti-Cheat, BattlEye, Vanguard) or Windows Memory Integrity, invalid handle usage causes game lockups (with audio continuing) or instant BSODs."
-                Guidance          = "Disable the problematic driver service by running '.\Analyze-LatestCrash.ps1 -DisableRogueDrivers' or 'sc config inpoutx64 start= disabled' in an Administrator terminal. Modern lighting software will continue to operate normally without this legacy kernel driver."
-                Timestamp         = $firstCrash.Timestamp
-                AffectedComponent = $firstCrash.FaultingModule
-            })
-        } elseif ($firstCrash.ExceptionCode -match '0xC0000005') {
-            $findings.Add([PSCustomObject]@{
-                Id                = "APP_ACCESS_VIOLATION"
-                Category          = "Application"
-                Severity          = "Critical"
-                PriorityScore     = $baseDumpPriority
-                Title             = "APPLICATION MEMORY ACCESS VIOLATION (0xC0000005)"
-                Description       = "Exception 0xC0000005: Native memory access violation in $($firstCrash.FaultingModule) ($($firstCrash.FileName)).$correlatedWatchdogNote"
-                Guidance          = "Memory access violation in $($firstCrash.FaultingModule). Verify game integrity via Steam/Launcher, purge shader caches ('.\Analyze-LatestCrash.ps1 -CleanShaderCache'), and update Visual C++ Redistributables. If overclocked, test with stock memory/XMP timings."
-                Timestamp         = $firstCrash.Timestamp
-                AffectedComponent = $firstCrash.FaultingModule
-            })
-        } elseif ($firstCrash.FaultingModule -match '(?i)CrimsonDesert' -or ($Telemetry -and $Telemetry.AppHangs -and ($Telemetry.AppHangs | Where-Object { $_.Application -match '(?i)CrimsonDesert' }))) {
-            $findings.Add([PSCustomObject]@{
-                Id                = "CRIMSON_DESERT_CRASH"
-                Category          = "Application"
-                Severity          = "Critical"
-                PriorityScore     = 93
-                Title             = "CRIMSON DESERT (BLACKSPACE ENGINE) GRAPHICS HANG & SHADER STALL"
-                Description       = "CrimsonDesert.exe stopped responding during scene/shader dispatch ($($firstCrash.ExceptionMeaning)). Mid-render TDRs leave uncommitted SQLite WAL journal files (.dxcache-wal, .dxcache-shm) in '%LOCALAPPDATA%\D3DSCache' and corrupted PSO cache blocks in '%LOCALAPPDATA%\AMD\DxCache', plus stale crash locks in Pearl Abyss DumpCache, causing subsequent game launches to fail or exit prematurely.$correlatedWatchdogNote"
-                Guidance          = "1. Flush corrupted DirectX & AMD shader caches using '.\Analyze-LatestCrash.ps1 -CleanShaderCache'.`n  2. Purge stale crash locks and DumpCache using '.\Analyze-LatestCrash.ps1 -CleanConfig -Game CrimsonDesert'.`n  3. Fully exit and restart Steam to clear stale GameOverlay/IPC pipes.`n  4. If experiencing Intel I225-V Ethernet disconnects, run '.\Analyze-LatestCrash.ps1 -RepairNetwork' as Admin."
-                Timestamp         = $firstCrash.Timestamp
-                AffectedComponent = "CrimsonDesert.exe"
-            })
+        # Dump location and local copy check
+        $dumpLocationText = ""
+        if ($matchedDump) {
+            if ($dumpPathFromLog -and $matchedDump.FullName -ne $dumpPathFromLog) {
+                $dumpLocationText = "$dumpPathFromLog (analyzed from workspace copy: $($matchedDump.FullName))"
+            } else {
+                $dumpLocationText = $matchedDump.FullName
+            }
+        } elseif ($dumpPathFromLog) {
+            $dumpLocationText = $dumpPathFromLog
         } else {
-            $findings.Add([PSCustomObject]@{
-                Id                = "UNHANDLED_APP_CRASH"
-                Category          = "Application"
-                Severity          = "Critical"
-                PriorityScore     = $baseDumpPriority
-                Title             = "UNHANDLED APPLICATION CRASH (Tier 1 Crash Dump)"
-                Description       = "Exception $($firstCrash.ExceptionCode): $($firstCrash.ExceptionMeaning) in $($firstCrash.FaultingModule) ($($firstCrash.FileName)).$correlatedWatchdogNote"
-                Guidance          = "Verify game integrity via Steam/Launcher and report the faulting module ($($firstCrash.FaultingModule)) to the game developer."
-                Timestamp         = $firstCrash.Timestamp
-                AffectedComponent = $firstCrash.FaultingModule
-            })
-        }
-    }
-
-    # -------------------------------------------------------------------------
-    # RULE GROUP 2: APPLICATION HANGS
-    # -------------------------------------------------------------------------
-    if ($Telemetry -and $Telemetry.AppHangs -and ($Telemetry.AppHangs | Where-Object { $_.Application -match '(?i)CrimsonDesert' })) {
-        $alreadyHasCd = @($findings | Where-Object { $_.Id -eq "CRIMSON_DESERT_CRASH" }).Count -gt 0
-        if (-not $alreadyHasCd) {
-            $firstHang = $Telemetry.AppHangs | Where-Object { $_.Application -match '(?i)CrimsonDesert' } | Select-Object -First 1
-            $findings.Add([PSCustomObject]@{
-                Id                = "CRIMSON_DESERT_APP_HANG"
-                Category          = "Application"
-                Severity          = "Critical"
-                PriorityScore     = 89
-                Title             = "CRIMSON DESERT (BLACKSPACE ENGINE) APPLICATION HANG (Event 1002)"
-                Description       = "CrimsonDesert.exe stopped interacting with Windows and was closed at $($firstHang.TimeCreated.ToString('HH:mm:ss')). Following a mid-render hang or TDR, corrupted DirectX 12/AMD shader cache files (.dxcache-wal, .dxcache-shm, .parc) and Pearl Abyss DumpCache locks prevent the game from loading."
-                Guidance          = "1. Flush corrupted DirectX & AMD shader caches using '.\Analyze-LatestCrash.ps1 -CleanShaderCache'.`n  2. Purge stale crash locks and DumpCache using '.\Analyze-LatestCrash.ps1 -CleanConfig -Game CrimsonDesert'.`n  3. Fully exit and restart Steam to refresh GameOverlay hooks.`n  4. If experiencing Intel I225-V Ethernet disconnects, run '.\Analyze-LatestCrash.ps1 -RepairNetwork' as Admin."
-                Timestamp         = $firstHang.TimeCreated
-                AffectedComponent = "CrimsonDesert.exe"
-            })
-        }
-    }
-
-    # -------------------------------------------------------------------------
-    # RULE GROUP 3: KERNEL BUGCHECKS, WHEA HARDWARE ERRORS & MEMORY EXHAUSTION
-    # -------------------------------------------------------------------------
-    if ($Telemetry -and $Telemetry.KernelBugChecks -and $Telemetry.KernelBugChecks.Count -gt 0) {
-        $firstBc = $Telemetry.KernelBugChecks[0]
-        $findings.Add([PSCustomObject]@{
-            Id                = "KERNEL_BUGCHECK_BSOD"
-            Category          = "System"
-            Severity          = "Critical"
-            PriorityScore     = 98
-            Title             = "KERNEL BUGCHECK BSOD ($($firstBc.Code))"
-            Description       = "$($firstBc.Meaning) - $($firstBc.Message)"
-            Guidance          = "A kernel driver caused a fatal system fault. Check Tier 4 hardware devices for missing or uninstalled drivers."
-            Timestamp         = $firstBc.TimeCreated
-            AffectedComponent = "Windows Kernel ($($firstBc.Code))"
-        })
-    }
-
-    if ($Telemetry -and $Telemetry.PcieWheaErrors -and $Telemetry.PcieWheaErrors.Count -gt 0) {
-        $firstPcie = $Telemetry.PcieWheaErrors[0]
-        $findings.Add([PSCustomObject]@{
-            Id                = "PCIE_WHEA_ERROR"
-            Category          = "Hardware"
-            Severity          = "Critical"
-            PriorityScore     = 96
-            Title             = "PCIe BUS / RISER CABLE INTEGRITY ERROR (WHEA Event 17)"
-            Description       = "Windows detected PCIe link communication errors ($($Telemetry.PcieWheaErrors.Count) incident(s)). This is frequently caused by PCIe 4.0/5.0 riser cables, loose GPU PCIe slot seating, or motherboard PCIe signal degradation.$correlatedWatchdogNote"
-            Guidance          = "Reseat your graphics card. If using a vertical GPU mount or PCIe riser cable, test with the GPU plugged directly into the motherboard PCIe slot, or configure PCIe link speed to Gen 3 / Gen 4 in BIOS. Also ensure PCIe Link State Power Management is Off ('.\Analyze-LatestCrash.ps1 -DisablePciePowerSavings')."
-            Timestamp         = $firstPcie.TimeCreated
-            AffectedComponent = "PCI Express Root Port"
-        })
-    }
-
-    $nonPcieWhea = if ($Telemetry -and $Telemetry.WheaErrors) { @($Telemetry.WheaErrors | Where-Object { -not $_.IsPcieError }) } else { @() }
-    if ($nonPcieWhea.Count -gt 0) {
-        $firstWhea = $nonPcieWhea[0]
-        $findings.Add([PSCustomObject]@{
-            Id                = "WHEA_HARDWARE_ERROR"
-            Category          = "Hardware"
-            Severity          = "Critical"
-            PriorityScore     = 95
-            Title             = "WHEA HARDWARE ARCHITECTURE ERROR (Event $($firstWhea.Id))"
-            Description       = "A fatal or corrected hardware exception was reported by the CPU/motherboard hardware subsystem ($($firstWhea.Message))."
-            Guidance          = "This indicates hardware or bus instability (CPU undervolt, unstable memory EXPO/XMP, or overheating). Disable CPU Curve Optimizer or RAM overclocks to restore baseline stability."
-            Timestamp         = $firstWhea.TimeCreated
-            AffectedComponent = "CPU / Memory / Bus"
-        })
-    }
-
-    if ($Telemetry -and $Telemetry.MemoryExhaustion -and $Telemetry.MemoryExhaustion.Count -gt 0) {
-        $firstMem = $Telemetry.MemoryExhaustion[0]
-        $findings.Add([PSCustomObject]@{
-            Id                = "VIRTUAL_MEMORY_EXHAUSTION"
-            Category          = "Memory"
-            Severity          = "Critical"
-            PriorityScore     = 92
-            Title             = "VIRTUAL MEMORY / COMMIT LIMIT EXHAUSTION (Event 2004)"
-            Description       = "Windows ran out of virtual memory / pagefile commit limit while games or shader compilation were active ($($Telemetry.MemoryExhaustion.Count) incident(s))."
-            Guidance          = "Ensure your Windows Paging File (Pagefile) is set to 'System managed size' on an SSD with at least 20 GB free space. Do not disable or severely restrict pagefile size."
-            Timestamp         = $firstMem.TimeCreated
-            AffectedComponent = "Virtual Memory / Pagefile"
-        })
-    }
-
-    # -------------------------------------------------------------------------
-    # RULE GROUP 4: GPU DISPLAY DRIVER TIMEOUTS & WATCHDOG LIVE DUMPS
-    # -------------------------------------------------------------------------
-    $tdrCount = if ($Telemetry -and $Telemetry.TdrEvents) { $Telemetry.TdrEvents.Count } else { 0 }
-    if ($tdrCount -gt 0 -or $kernelWatchdogDumps.Count -gt 0) {
-        $hasHighBoostGpu = if ($GpuHealth -and $GpuHealth.Gpus) { @($GpuHealth.Gpus | Where-Object { $_.IsHighBoostCard }).Count -gt 0 } else { $false }
-        $hasAmdFullInstall = if ($GpuHealth -and $GpuHealth.Gpus) { @($GpuHealth.Gpus | Where-Object { $_.AmdInstallType -like "*Full*" }).Count -gt 0 } else { $false }
-        $has0x193 = ($Telemetry -and $Telemetry.TdrEvents -and (@($Telemetry.TdrEvents | Where-Object { $_.Code -eq '193' }).Count -gt 0)) -or (@($kernelWatchdogDumps | Where-Object { $_.ExceptionCode -eq '0x00000193' }).Count -gt 0)
-        $tdrCountTotal = [math]::Max($tdrCount, $kernelWatchdogDumps.Count)
-        $dumpDetailSuffix = if ($kernelWatchdogDumps.Count -gt 0) {
-            $wd = $kernelWatchdogDumps[0]
-            " Kernel watchdog dump captured: $($wd.FileName) ($($wd.ExceptionCode) - $($wd.ExceptionMeaning) in $($wd.FaultingIP))."
-        } else { "" }
-
-        $latestTdrTime = if ($tdrCount -gt 0) { $Telemetry.TdrEvents[0].TimeCreated } elseif ($kernelWatchdogDumps.Count -gt 0) { $kernelWatchdogDumps[0].Timestamp } else { Get-Date }
-
-        $sleepTdr = $null
-        if ($Telemetry -and $Telemetry.SleepTransitions -and $Telemetry.SleepTransitions.Count -gt 0) {
-            foreach ($tdr in $Telemetry.TdrEvents) {
-                $matchingWake = @($Telemetry.SleepTransitions | Where-Object {
-                    $sec = ($tdr.TimeCreated - $_.WakeTime).TotalSeconds
-                    $sec -ge -10 -and $sec -le 180
-                })
-                if ($matchingWake.Count -gt 0) {
-                    $sleepTdr = [PSCustomObject]@{ Tdr = $tdr; Wake = $matchingWake[0] }
-                    break
-                }
-            }
-            if (-not $sleepTdr -and $kernelWatchdogDumps.Count -gt 0) {
-                foreach ($kdmp in $kernelWatchdogDumps) {
-                    $matchingWake = @($Telemetry.SleepTransitions | Where-Object {
-                        $sec = ($kdmp.Timestamp - $_.WakeTime).TotalSeconds
-                        $sec -ge -10 -and $sec -le 180
-                    })
-                    if ($matchingWake.Count -gt 0) {
-                        $sleepTdr = [PSCustomObject]@{
-                            Tdr  = [PSCustomObject]@{ TimeCreated = $kdmp.Timestamp; Meaning = $kdmp.ExceptionMeaning }
-                            Wake = $matchingWake[0]
-                        }
-                        break
-                    }
-                }
-            }
+            $dumpLocationText = "No dump file path recorded in event log"
         }
 
-        if ($sleepTdr) {
-            $diffSec = [math]::Round([math]::Abs(($sleepTdr.Tdr.TimeCreated - $sleepTdr.Wake.WakeTime).TotalSeconds))
-            $remedies = [System.Collections.Generic.List[string]]::new()
-            $remedies.Add("(Recommended - Zero Power Impact) Increase TdrDelay and TdrDdiDelay to 8-10 seconds in HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers. High-refresh 4K HDMI 2.1 link training and display handshakes on wake take several seconds, exceeding Windows' default 2-second watchdog threshold. Extending the timeout allows the link to finish initializing while fully preserving all sleep and power-saving states.")
-            $remedies.Add("Verify HDMI 2.1 cable integrity (Ultra High Speed 48 Gbps certified) and check TV standby / Quick Start+ settings to ensure display handshakes respond promptly.")
-            $remedies.Add("(Temporary Workaround / Last Resort Only) If timeouts persist after optimizing TdrDelay, test disabling Ultra-Low Power State (ULPS) via '.\scripts\Repair-GpuSleepSettings.ps1 -DisableUlps' to isolate deep-sleep wake latency. Re-enable after testing to maintain system power efficiency.")
-            $remedies.Add("Run '.\Analyze-LatestCrash.ps1 -RepairGpuSleep' or '.\scripts\Repair-GpuSleepSettings.ps1' as Administrator to apply the zero-power-impact TDR timeout fix.")
-
-            $findings.Add([PSCustomObject]@{
-                Id                = "GPU_TDR_WAKE_FROM_SLEEP"
-                Category          = "GPU"
-                Severity          = "Critical"
-                PriorityScore     = 94
-                Title             = "GPU DRIVER TIMEOUT ON WAKE FROM SLEEP (TDR 0x141 / AMD WATCHDOG)"
-                Description       = "The GPU display driver stopped responding and triggered a watchdog recovery ($($sleepTdr.Tdr.Meaning)) at $($sleepTdr.Tdr.TimeCreated.ToString('HH:mm:ss')), within ${diffSec}s of waking from sleep (Wake Source: $($sleepTdr.Wake.WakeSource)).$dumpDetailSuffix"
-                Guidance          = ($remedies -join "`n  * ")
-                Timestamp         = $sleepTdr.Tdr.TimeCreated
-                AffectedComponent = "GPU Display Driver (Sleep/Wake)"
-            })
-        } elseif ($Telemetry -and $Telemetry.PciePowerManagement -and $Telemetry.PciePowerManagement.IsEnabled) {
-            $codeLabel = if ($has0x193) { "TDR 0x141 / DXGKRNL 0x193" } else { "TDR / 0x141" }
-            $remedyList = [System.Collections.Generic.List[string]]::new()
-            $remedyList.Add("Disable PCIe Link State Power Management using '.\Analyze-LatestCrash.ps1 -DisablePciePowerSavings' or '.\scripts\Repair-PciePowerSettings.ps1'.")
-            $remedyList.Add("Purge DirectX & AMD DxcCache/DxCache shader caches using '.\Analyze-LatestCrash.ps1 -CleanShaderCache' (corrupt UE5 / D3D12 SM6 shaders frequently trigger mid-render TDRs and 0x193 deadlocks).")
-            $remedyList.Add("If using a PCIe Gen 5 GPU (e.g. RX 9070 XT / RTX 50-series) on a PCIe Gen 4/5 motherboard or riser cable, manually set PCIEX16 Link Speed to Gen 4 in BIOS to eliminate link retraining stalls.")
-            if ($hasHighBoostGpu) {
-                $remedyList.Add("Enthusiast High-Boost GPU Detected: Test applying a -100 MHz to -150 MHz Max Frequency offset in AMD Software Tuning to prevent transient voltage droop under bursty UE5 D3D12 loads.")
+        # Dump Diagnosis
+        $diagnosisText = ""
+        if ($matchedDump -and $matchedDump.CdbInspected) {
+            $diagParts = [System.Collections.Generic.List[string]]::new()
+            if ($matchedDump.FaultingIP) {
+                $diagParts.Add("Faulting instruction/module: $($matchedDump.FaultingIP)")
             }
-            if ($GpuHealth -and $GpuHealth.HybridMultiGpu) {
-                $remedyList.Add("Hybrid Multi-GPU Detected: Disable the unused CPU integrated GPU (iGPU) in Motherboard BIOS or test toggling Hardware-Accelerated GPU Scheduling (HAGS) in Windows Graphics Settings to prevent dxgkrnl cross-adapter synchronization deadlocks (0x193).")
+            if ($matchedDump.ApiContext) {
+                $diagParts.Add("Active stage: $($matchedDump.ApiContext)")
             }
-
-            $findings.Add([PSCustomObject]@{
-                Id                = "GPU_TDR_PCIE_ASPM"
-                Category          = "GPU"
-                Severity          = "Critical"
-                PriorityScore     = 94
-                Title             = "GPU DISPLAY DRIVER TIMEOUT ($codeLabel) - PCIE POWER SAVINGS ACTIVE"
-                Description       = "The GPU display driver stopped responding or hit a DirectX graphics kernel watchdog timeout ($tdrCountTotal incident(s)).$dumpDetailSuffix Windows PCIe Link State Power Management (ASPM) is currently ENABLED ('$($Telemetry.PciePowerManagement.ACSettingName)') in power plan '$($Telemetry.PciePowerManagement.SchemeName)'. When the PCIe link enters low-power L0s/L1 states during idle or bursty D3D12 load, resumption latency spikes cause the graphics watchdog to timeout."
-                Guidance          = ($remedyList -join "`n  * ")
-                Timestamp         = $latestTdrTime
-                AffectedComponent = "GPU Display Driver / PCIe ASPM"
-            })
+            if ($matchedDump.CallStack.Count -gt 0) {
+                $topFrames = ($matchedDump.CallStack | Select-Object -First 4) -join ' -> '
+                $diagParts.Add("Stack trace: $topFrames")
+            }
+            $diagnosisText = "Diagnosed via CDB: " + ($diagParts -join '; ') + "."
+        } elseif ($dumpPathFromLog -and (Test-Path $dumpPathFromLog -ErrorAction SilentlyContinue)) {
+            $diagnosisText = "Dump file exists at $dumpPathFromLog, but reading requires Administrator privileges. Install WinDbg from the Microsoft Store (search 'WinDbg' or run 'winget install Microsoft.WinDbg') and re-run DriverCheck from an Administrator PowerShell prompt to inspect the call stack."
+        } elseif ($dumpPathFromLog -and ($dumpPathFromLog -match '(?i)C:\\WINDOWS\\Minidump')) {
+            $diagnosisText = "Dump file located at $dumpPathFromLog. Diagnosis was not performed because accessing C:\WINDOWS\Minidump requires Administrator privileges. Install WinDbg from the Microsoft Store (search 'WinDbg' or run 'winget install Microsoft.WinDbg') and re-run DriverCheck from an Administrator PowerShell prompt to automatically unwind and diagnose this dump."
         } else {
-            $codeLabel = if ($has0x193) { "TDR 0x141 / DXGKRNL 0x193 WATCHDOG" } else { "TDR / 0x141" }
+            $diagnosisText = "Dump file was not found on disk or could not be accessed."
+        }
 
-            $hotplugTdr = $null
-            if ($Telemetry -and $Telemetry.PSObject.Properties['DisplayHotplugEvents'] -and $Telemetry.DisplayHotplugEvents -and $Telemetry.DisplayHotplugEvents.Count -gt 0 -and $Telemetry.TdrEvents) {
-                foreach ($tdr in $Telemetry.TdrEvents) {
-                    $matchingHp = @($Telemetry.DisplayHotplugEvents | Where-Object {
-                        $sec = ($_.TimeCreated - $tdr.TimeCreated).TotalSeconds
-                        $sec -ge -180 -and $sec -le 60
-                    })
-                    if ($matchingHp.Count -gt 0) {
-                        $hotplugTdr = [PSCustomObject]@{ Tdr = $tdr; Hotplug = $matchingHp[0] }
-                        break
-                    }
-                }
-            }
+        # Key Information from Logs
+        $keyInfoParts = [System.Collections.Generic.List[string]]::new()
+        $keyInfoParts.Add("Stop Code: $($bc.Code) ($($bc.Meaning))")
+        if ($reportId) { $keyInfoParts.Add("Report ID: $reportId") }
 
-            $tdrWorkloadNote = ""
-            if ($Telemetry -and $Telemetry.PSObject.Properties['TdrWorkloads'] -and $Telemetry.TdrWorkloads -and $Telemetry.TdrWorkloads.Count -gt 0) {
-                $wlSummaries = @($Telemetry.TdrWorkloads | Select-Object -First 2 | ForEach-Object {
-                    if ($_.CommandLine) { "'$($_.ProcessName)' ($($_.CommandLine)) near $($_.TdrTime.ToString('HH:mm:ss'))" }
-                    else { "'$($_.ProcessName)' near $($_.TdrTime.ToString('HH:mm:ss'))" }
-                })
-                $tdrWorkloadNote = " Active GPU compute/benchmark workload detected prior to timeout: $($wlSummaries -join '; ')."
+        # Correlate preceding events within 5 minutes
+        $preEvents = [System.Collections.Generic.List[string]]::new()
+        foreach ($nd in (& $getEvents 'NetworkDrops')) {
+            if ($nd.TimeCreated -and ($bc.TimeCreated - $nd.TimeCreated).TotalSeconds -ge 0 -and ($bc.TimeCreated - $nd.TimeCreated).TotalSeconds -le 300) {
+                $preEvents.Add("Network link drop at $($nd.TimeCreated.ToString('HH:mm:ss'))")
             }
+        }
+        foreach ($dh in (& $getEvents 'DisplayHotplugEvents')) {
+            if ($dh.TimeCreated -and ($bc.TimeCreated - $dh.TimeCreated).TotalSeconds -ge 0 -and ($bc.TimeCreated - $dh.TimeCreated).TotalSeconds -le 300) {
+                $preEvents.Add("Display disconnect at $($dh.TimeCreated.ToString('HH:mm:ss'))")
+            }
+        }
+        if ($preEvents.Count -gt 0) {
+            $keyInfoParts.Add("Preceding events: " + ($preEvents -join ', '))
+        }
+        $keyInfoText = $keyInfoParts -join ' | '
 
-            $hotplugNote = if ($hotplugTdr) {
-                " A display/audio endpoint surprise-removal (Kernel-PnP Event 1010: $($hotplugTdr.Hotplug.DeviceInstanceId) at $($hotplugTdr.Hotplug.TimeCreated.ToString('HH:mm:ss'))) coincided with the TDR at $($hotplugTdr.Tdr.TimeCreated.ToString('HH:mm:ss')), indicating DisplayPort/HDMI link loss or monitor HPD drop alongside driver recovery."
-            } else { "" }
+        $formattedDesc = "Timestamp:       $(& $fmt $bc.TimeCreated)`n" +
+            "Type of Issue:   Kernel Crash (BSOD) - $($bc.Meaning)`n" +
+            "Details:         $explanation`n" +
+            "Key Information: $keyInfoText`n" +
+            "Dump Location:   $dumpLocationText`n" +
+            "Dump Diagnosis:  $diagnosisText"
 
-            $gfxSettings = if ($Telemetry -and $Telemetry.PSObject.Properties['GraphicsDriverSettings']) { $Telemetry.GraphicsDriverSettings } else { $null }
-            $hasDefaultTdrDelay = ($null -ne $gfxSettings -and ($null -eq $gfxSettings.TdrDelay -or $gfxSettings.TdrDelay -le 2))
-            $isMpoActive = ($null -ne $gfxSettings -and (-not $gfxSettings.PSObject.Properties['IsMpoDisabled'] -or -not $gfxSettings.IsMpoDisabled))
-            $tdrDelayNote = if ($hasDefaultTdrDelay) {
-                $hagsLabel = if ($gfxSettings.HAGSStatus) { $gfxSettings.HAGSStatus } else { "Default" }
-                $mpoLabel = if ($isMpoActive) { "Active (Default)" } else { "Disabled (OverlayTestMode=5)" }
-                " Windows TdrDelay is currently at the strict 2-second default (HAGS: $hagsLabel; DWM MPO: $mpoLabel), which frequently preempts long-running GPU compute dispatches or desktop hardware-accelerated video/MPO plane transitions."
-            } else { "" }
+        & $addObs 'KERNEL_BUGCHECK' 'System' 'Crash' "Kernel bugcheck (BSOD) $($bc.Code) - $($bc.Meaning)" $formattedDesc $bc.TimeCreated "Windows kernel" 'System event log (BugCheck, Event 1001)'
+    }
 
-            $stuckDvr = if ($Telemetry -and $Telemetry.PSObject.Properties['StuckServices'] -and $Telemetry.StuckServices) {
-                $Telemetry.StuckServices | Where-Object { $_.Name -match '(?i)BcastDVRUserService' } | Select-Object -First 1
-            } else { $null }
-            $stuckDvrNote = if ($stuckDvr) {
-                " Background Game Bar capture service '$($stuckDvr.Name)' is also hung in '$($stuckDvr.State)' (PID: $($stuckDvr.ProcessId)), stalling D3D11/DXGI desktop capture hooks."
-            } else { "" }
+    # ---- Crash dump files: group identical (process, exception, module) ----
+    $dumps = @($ParsedDumps | Where-Object { $_ -and $_.ExceptionCode -and -not ($_.IsKernelDump -and $matchedDumpFiles.Contains($_.FileName)) })
+    foreach ($grp in ($dumps | Group-Object { "$($_.FileName -replace '\.\d+\.dmp$','')|$($_.ExceptionCode)|$($_.FaultingIP)" })) {
+        $items = @($grp.Group | Sort-Object Timestamp -Descending)
+        $d = $items[0]
+        $span = if ($items.Count -gt 1) { "$($items.Count) dumps, $(& $fmt $items[-1].Timestamp) to $(& $fmt $d.Timestamp)" } else { "1 dump" }
+        $where = if ($d.FaultingIP) { $d.FaultingIP } else { 'faulting module not resolved' }
+        $assert = if ($d.Assertions -and $d.Assertions.Count -gt 0) { " Strings found in dump: $(@($d.Assertions) -join '; ')." } else { '' }
+        $apiDesc = if ($d.ApiContext) { " Active stage: $($d.ApiContext)." } else { '' }
+        $stackDesc = if ($d.CallStack.Count -gt 0) { " Call stack: $(($d.CallStack | Select-Object -First 3) -join ' -> ')." } else { '' }
+        $kind = if ($d.IsKernelDump) { 'kernel dump' } else { 'process dump' }
 
-            $remedyList = [System.Collections.Generic.List[string]]::new()
-            if ($hasDefaultTdrDelay) {
-                $remedyList.Add("Increase GPU Watchdog Timeout (TdrDelay = 8s): Windows is using the strict 2-second default TDR threshold. Run '.\Analyze-LatestCrash.ps1 -RepairGpuSleep' as Administrator to extend TdrDelay and TdrDdiDelay to 8 seconds so heavy GPU compute shaders, ray-scheduling dispatches, and desktop video/MPO transitions do not trigger false-positive driver resets.")
-            }
-            if ($hotplugTdr) {
-                $remedyList.Add("Inspect DisplayPort/HDMI Link & Monitor Standby: Kernel-PnP Event 1010 recorded a display surprise-removal ($($hotplugTdr.Hotplug.DeviceInstanceId)) at the moment of the timeout. Check DisplayPort/HDMI cable seating and monitor sleep/input auto-switch settings.")
-            }
-            if ($isMpoActive) {
-                $remedyList.Add("Test Disabling DWM Multiplane Overlay (MPO) or Browser Overlay Flags: For desktop timeouts during Chrome/YouTube video playback or background GPU compute, test setting OverlayTestMode = 5 (DWORD) under HKLM:\SOFTWARE\Microsoft\Windows\Dwm to rule out DWM hardware overlay plane flip stalls.")
-            }
-            if ($stuckDvr) {
-                $remedyList.Add("Terminate Hung GameDVR Capture Service: Force-stop the hung '$($stuckDvr.Name)' process ('Stop-Process -Id $($stuckDvr.ProcessId) -Force' as Administrator) and disable background recording in Windows Settings -> Gaming -> Captures.")
-            }
-            $remedyList.Add("Clear Shader Caches: Clear your DirectX and AMD shader caches (corrupted shader files often cause mid-game GPU freezes and driver timeouts).")
-            $remedyList.Add("Reinstall GPU Driver: If clearing the shader cache does not help, do a clean GPU driver reinstall using AMD Cleanup Utility or DDU in Safe Mode.")
-            $remedyList.Add("Check PCIe Slot Speed in BIOS: If using a PCIe Gen 5 GPU (like RX 9070 XT or RTX 50-series) or a riser cable, set PCIEX16 Link Speed to Gen 4 in BIOS to prevent connection drops.")
-            if ($hasHighBoostGpu) {
-                $remedyList.Add("Lower GPU Max Boost Clock Slightly: Factory-overclocked cards can boost too high during heavy Unreal Engine 5 scenes. Try a -100 MHz Max Frequency offset in AMD Software Tuning.")
-            }
-            if ($GpuHealth -and $GpuHealth.HybridMultiGpu) {
-                $remedyList.Add("Disable Unused Integrated Graphics: Turn off the CPU's built-in graphics (iGPU) in BIOS if your monitor is plugged into your main graphics card.")
-            }
-            if ($hasAmdFullInstall) {
-                $remedyList.Add("Try a 'Driver Only' Install: If crashes continue, reinstall the AMD driver using the 'Driver Only' option to rule out background overlays.")
-            }
+        $desc = "Timestamp:       $(& $fmt $d.Timestamp)`n" +
+            "Type of Issue:   Crash Dump ($kind)`n" +
+            "Details:         Exception $($d.ExceptionCode) ($($d.ExceptionMeaning)) at $where. $span.$assert`n" +
+            "Dump Location:   $($d.FullName)`n" +
+            "Dump Diagnosis:  $($apiDesc.Trim()) $($stackDesc.Trim())"
 
-            $findings.Add([PSCustomObject]@{
-                Id                = "GPU_TDR_TIMEOUT"
-                Category          = "GPU"
-                Severity          = "Critical"
-                PriorityScore     = 94
-                Title             = "GPU DISPLAY DRIVER TIMEOUT ($codeLabel)"
-                Description       = "The GPU display driver stopped responding or experienced a DirectX graphics kernel watchdog timeout ($tdrCountTotal incident(s)).$dumpDetailSuffix$tdrWorkloadNote$hotplugNote$tdrDelayNote$stuckDvrNote"
-                Guidance          = ($remedyList -join "`n  * ")
-                Timestamp         = $latestTdrTime
-                AffectedComponent = "GPU Display Driver"
-            })
+        & $addObs 'CRASH_DUMP' 'Dump' 'Crash' "Crash dump ($kind): $($d.FileName)" $desc $d.Timestamp $d.FaultingIP "Dump file $($d.FullName)"
+    }
+
+    # ---- GPU timeout events (TDR) ----
+    foreach ($t in (& $getEvents 'TdrEvents')) {
+        $hasDump = $t.PSObject.Properties['DumpPath'] -and $t.DumpPath
+        
+        # Correlate nearby crash dumps (+/- 120s)
+        $nearDumps = @($dumps | Where-Object { [Math]::Abs(($_.Timestamp - $t.TimeCreated).TotalSeconds) -le 120 })
+        
+        # Correlate nearby engine logs (+/- 120s)
+        $nearEngine = @($EngineLogs | Where-Object { [Math]::Abs(($_.Timestamp - $t.TimeCreated).TotalSeconds) -le 120 })
+        
+        # Correlate active process/workload if found nearby (WER RADAR / PowerShell)
+        $nearWl = @()
+        if ($tel -and $tel.PSObject.Properties['TdrWorkloads'] -and $tel.TdrWorkloads) {
+            $nearWl = @($tel.TdrWorkloads | Where-Object { [Math]::Abs(($_.TdrTime - $t.TimeCreated).TotalSeconds) -le 120 -or [Math]::Abs(($_.TimeCreated - $t.TimeCreated).TotalSeconds) -le 120 })
+        }
+        
+        # Correlate active Steam game sessions
+        $nearSteam = @($SteamGameSessions | Where-Object { $_.StartTime -le $t.TimeCreated -and $_.EndTime -ge $t.TimeCreated })
+
+        # 1. Determine process context
+        $procDesc = ""
+        $associatedProc = $null
+        $associatedApiStage = $null
+        if ($nearDumps.Count -gt 0) {
+            $d = $nearDumps[0]
+            $procName = $d.FileName -replace '\.\d+\.dmp$',''
+            $associatedProc = $procName
+            $associatedApiStage = $d.ApiContext
+            $procDesc = "Process '$procName' crashed at $(& $fmt $d.Timestamp) ($($d.ExceptionCode): $($d.ExceptionMeaning)) inside $($d.FaultingIP)."
+            if ($d.ApiContext) {
+                $procDesc += " Thread was executing: $($d.ApiContext)."
+            }
+            if ($d.CallStack.Count -gt 0) {
+                $topFrames = ($d.CallStack | Select-Object -First 3) -join ' -> '
+                $procDesc += " Stack trace: $topFrames."
+            }
+        } elseif ($nearEngine.Count -gt 0) {
+            $el = $nearEngine[0]
+            $procName = if ($el.GameName) { $el.GameName } elseif ($el.ExecutableName) { $el.ExecutableName } else { $el.Engine }
+            $associatedProc = $procName
+            $cmd = if ($el.CommandLine) { " (command: '$($el.CommandLine)')" } else { "" }
+            $procDesc = "Application engine log '$($el.LogName)' active at $(& $fmt $el.Timestamp) for $procName$cmd."
+            if ($el.ErrorLines.Count -gt 0) {
+                $procDesc += " Engine error recorded: '$($el.ErrorLines[0])'."
+            }
+        } elseif ($nearWl.Count -gt 0) {
+            $w = $nearWl[0]
+            $associatedProc = $w.ProcessName
+            if ($w.CommandLine) { $procDesc = "Heavy GPU workload '$($w.ProcessName)' (command: `"$($w.CommandLine)`") active near timeout (identified via $($w.Source))." }
+            else { $procDesc = "Heavy GPU workload '$($w.ProcessName)' active near timeout (identified via $($w.Source))." }
+        } elseif ($nearSteam.Count -gt 0) {
+            $s = $nearSteam[0]
+            $associatedProc = "Steam AppID $($s.AppId)"
+            $procDesc = "Steam game session active at timeout: AppID $($s.AppId) (running since $($s.StartTime.ToString('HH:mm:ss')))."
+        } else {
+            $procDesc = "Not recorded in system logs. Checked Unreal Engine, Unity, idTech, Godot logs, Steam sessions, and WER process crash dumps within 2 minutes of timeout ($($t.TimeCreated.ToString('HH:mm:ss'))). No application crash dump or active game session was recorded."
+        }
+
+        # 2. Determine shader / pipeline info
+        $shaderNote = ""
+        if ($associatedApiStage) {
+            $shaderNote = "Active graphics pipeline stage: $associatedApiStage."
+        } elseif ($nearEngine.Count -gt 0 -and $nearEngine[0].ShaderInfo) {
+            $shaderNote = "Active shader from engine log: $($nearEngine[0].ShaderInfo)."
+            if ($nearEngine[0].Breadcrumbs) { $shaderNote += " Breadcrumbs: $($nearEngine[0].Breadcrumbs)." }
+        } else {
+            $shaderNote = "The Windows kernel watchdog triggers when a GPU command queue fails to complete within 2 seconds. The kernel event log captures that the timeout occurred, but does not identify the specific shader instruction or dispatch executing on the GPU execution units."
+        }
+
+        # 3. Dump status
+        $dumpDesc = if ($hasDump) {
+            $comp = if ($t.PSObject.Properties['CompanionCodes'] -and $t.CompanionCodes -and $t.CompanionCodes.Count -gt 0) { " Additional companion live dumps written within 60s: $($t.CompanionCodes -join ', ') (vendor-defined)." } else { '' }
+            "Live dump saved at: $($t.DumpPath). Live dumps capture driver hardware registers and command ringbuffers at the moment of timeout.$comp (Reading requires an Administrator shell)."
+        } else {
+            "No live dump file path recorded in this event."
+        }
+
+        # 4. Tailored Options
+        $optionsDesc = ""
+        if ($associatedApiStage -match 'Compute Pipeline|Graphics Pipeline|Shader Compilation') {
+            $modName = if ($nearDumps.Count -gt 0 -and $nearDumps[0].FaultingModule) { $nearDumps[0].FaultingModule } else { "the graphics driver" }
+            $optionsDesc = "(1) The fault occurred during pipeline compilation in $modName. If you are developing shaders, test compiling with standalone compilers (e.g. DXC or glslangValidator) or inspect SPIR-V/DXIL bytecode for unhandled intrinsics. (2) If developing on Vulkan/DirectX, enable API validation layers (VK_LAYER_KHRONOS_validation / D3D12 debug layer) to detect invalid descriptor sets or layout mismatches before dispatch. (3) If this is in a packaged game, verify game files in Steam/Epic or report the issue with the crash dump to the developer/driver vendor."
+        } elseif ($associatedProc) {
+            $optionsDesc = "(1) Check application/engine logs for '$associatedProc' around $(& $fmt $t.TimeCreated) for hung draw calls, device removed errors, or memory allocation warnings. (2) For Unreal games, launch with '-gpucrashdebugging' to enable GPU crash breadcrumbs that log the exact draw call before a hang. (3) To inspect the driver kernel submission queue, run DriverCheck from an Administrator PowerShell or open '$($t.DumpPath)' in WinDbg with '!analyze -v'."
+        } else {
+            $optionsDesc = "(1) To inspect the driver kernel submission ringbuffer and identify which hardware engine hung, run DriverCheck from an Administrator PowerShell or open '$($t.DumpPath)' in WinDbg (!analyze -v). (2) If running 3D games or GPU workloads, enable GPU crash breadcrumbs or API validation layers to isolate the dispatch exceeding the 2-second watchdog threshold."
+        }
+
+        $fullDesc = "Timestamp:       $(& $fmt $t.TimeCreated)`n" +
+            "Type of Issue:   GPU Driver Timeout / Engine Reset (LiveKernelEvent 0x$($t.Code.ToUpper()))`n" +
+            "Details:         $($t.Meaning)`n" +
+            "Process Context: $procDesc`n" +
+            "Shader / Stage:  $shaderNote`n" +
+            "Live Dump:       $dumpDesc`n" +
+            "Next Options:    $optionsDesc"
+
+        & $addObs 'GPU_TIMEOUT_EVENT' 'GPU' 'Event' "GPU driver timeout (LiveKernelEvent 0x$($t.Code.ToUpper()))" $fullDesc $t.TimeCreated 'Display driver' 'Windows Error Reporting (LiveKernelEvent)'
+    }
+
+    # ---- Unexpected restarts ----
+    # Event 41 with a non-zero BugcheckCode describes the same restart as the bugcheck (Event 1001): fold it in.
+    # Event 6008 adds nothing beyond a nearby Event 41: fold it in. Both still appear if nothing else covers them.
+    $bcEvents = @(& $getEvents 'KernelBugChecks')
+    $ev41 = @(& $getEvents 'AbruptReboots')
+    foreach ($e in $ev41) {
+        $covered = ($e.BugcheckCode -ne 0) -and (@($bcEvents | Where-Object { [Math]::Abs(($_.TimeCreated - $e.TimeCreated).TotalMinutes) -le 10 }).Count -gt 0)
+        if ($covered) { continue }
+        $title = if ($e.BugcheckCode -ne 0) { "Unexpected restart after a bugcheck (Kernel-Power Event 41)" } else { 'Unexpected restart (Kernel-Power Event 41)' }
+        & $addObs 'KERNEL_POWER_41' 'System' 'Crash' $title "$($e.Message)" $e.TimeCreated 'System' 'System event log (Kernel-Power 41)'
+    }
+    foreach ($e in (& $getEvents 'UnexpectedShutdowns')) {
+        $has41 = @($ev41 | Where-Object { [Math]::Abs(($_.TimeCreated - $e.TimeCreated).TotalMinutes) -le 10 }).Count -gt 0
+        if ($has41) { continue }
+        & $addObs 'EVENTLOG_6008' 'System' 'Crash' 'Unexpected shutdown (Event 6008)' 'The event log records that the previous shutdown was not clean. No other detail is recorded in this event.' $e.TimeCreated 'System' 'System event log (Event 6008)'
+    }
+
+    # ---- Hardware error reports ----
+    foreach ($e in (& $getEvents 'PcieWheaErrors')) {
+        & $addObs 'WHEA_PCIE' 'Hardware' 'Event' 'WHEA PCIe error report (Event 17)' "$($e.Message)" $e.TimeCreated 'PCI Express' 'WHEA-Logger'
+    }
+    foreach ($e in @((& $getEvents 'WheaErrors') | Where-Object { -not $_.IsPcieError })) {
+        & $addObs 'WHEA_OTHER' 'Hardware' 'Event' "WHEA hardware error report (Event $($e.Id))" "$($e.Message)" $e.TimeCreated 'Hardware' 'WHEA-Logger'
+    }
+
+    # ---- Other logged events (grouped: count + first/last) ----
+    $groupDefs = @(
+        @{ Name = 'MemoryExhaustion';   Id = 'COMMIT_EXHAUSTION'; Cat = 'Memory';  Title = 'Windows reported low virtual memory (Event 2004)'; Src = 'Resource-Exhaustion-Detector' },
+        @{ Name = 'AppHangs';           Id = 'APP_HANG';          Cat = 'Application'; Title = 'Application hang reports (Event 1002)'; Src = 'Application log' },
+        @{ Name = 'PciDeviceResets';    Id = 'PCI_RESET';         Cat = 'Hardware'; Title = 'PCI device reset events'; Src = 'Microsoft-Windows-PCI' },
+        @{ Name = 'NetworkDrops';       Id = 'NET_LINK_DROP';     Cat = 'Network';  Title = 'Network link-down events'; Src = 'System event log' },
+        @{ Name = 'UdpPortExhaustions'; Id = 'UDP_PORT_4266';     Cat = 'Network';  Title = 'Ephemeral port exhaustion events (Event 4266)'; Src = 'System event log' },
+        @{ Name = 'CpuThrottlingEvents';Id = 'CPU_THROTTLE';      Cat = 'Hardware'; Title = 'CPU throttling events'; Src = 'System event log' }
+    )
+    foreach ($gd in $groupDefs) {
+        $ev = @((& $getEvents $gd.Name) | Where-Object { $_.TimeCreated })
+        if ($ev.Count -eq 0) { continue }
+        $sorted = @($ev | Sort-Object TimeCreated -Descending)
+        $sample = if ($sorted[0].PSObject.Properties['Message'] -and $sorted[0].Message) { " Most recent: $($sorted[0].Message)" } elseif ($sorted[0].PSObject.Properties['Application']) { " Most recent: $($sorted[0].Application)" } else { '' }
+        & $addObs $gd.Id $gd.Cat 'Event' $gd.Title "$($ev.Count) event(s), $(& $fmt $sorted[-1].TimeCreated) to $(& $fmt $sorted[0].TimeCreated).$sample" $sorted[0].TimeCreated '' $gd.Src
+    }
+
+    foreach ($z in $ZombieProcesses) {
+        & $addObs 'STEAM_NOT_RESPONDING' 'Application' 'Event' "steam.exe (PID $($z.PID)) is currently not responding or has no window" "Observed live at scan time. Started $($z.StartTime)." (Get-Date) 'steam.exe' 'Live process inspection'
+    }
+
+    # ---- Evidence the tool could not read ----
+    foreach ($u in $UnreadableSources) {
+        $folder = ($u -split ' - ')[0]
+        $refs = @((& $getEvents 'KernelBugChecks') | ForEach-Object { if ($_.Message -match 'A dump was saved in:\s*(\S+\.dmp)') { $Matches[1] } } | Where-Object { $_ -and $_.StartsWith($folder, [StringComparison]::OrdinalIgnoreCase) } | Select-Object -Unique)
+        $refTxt = if ($refs.Count -gt 0) { " Dumps saved there according to event logs: $($refs -join ', ')." } else { '' }
+        $elevDesc = "Crash dump folder located at $folder.$refTxt Reading files in this folder requires an Administrator shell. You can install WinDbg from the Microsoft Store (search 'WinDbg' or run 'winget install Microsoft.WinDbg'), then re-run DriverCheck from an Administrator PowerShell prompt to automatically inspect and diagnose these dumps."
+        & $addObs 'EVIDENCE_UNREADABLE' 'Evidence' 'Evidence' "Crash dump location found: $folder (Administrator shell required)" $elevDesc $null '' 'DriverCheck access check'
+    }
+
+    # ---- Next Investigation Leads ----
+    $leads = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $addLead = {
+        param([string]$Lead, [string]$BasedOn, [string]$Strength)
+        $leads.Add([PSCustomObject]@{ Lead = $Lead; BasedOn = $BasedOn; Strength = $Strength })
+    }
+    $moduleOwner = {
+        param([string]$Module)
+        foreach ($dir in @((Join-Path $env:SystemRoot 'System32'), (Join-Path $env:SystemRoot 'System32\drivers'))) {
+            $f = Join-Path $dir $Module
+            if (Test-Path -LiteralPath $f -ErrorAction SilentlyContinue) {
+                $vi = (Get-Item -LiteralPath $f -ErrorAction SilentlyContinue).VersionInfo
+                if ($vi -and $vi.CompanyName) { return "$($vi.CompanyName), file version $($vi.FileVersion)" }
+            }
+        }
+        return $null
+    }
+
+    # (a) Modules named at the fault address in process dumps
+    $byModule = @{}
+    foreach ($d in $dumps) {
+        if (-not $d.FaultingIP) { continue }
+        $mod = ($d.FaultingIP -split '\+')[0]
+        if ($mod -match '^0x') { continue }
+        if (-not $byModule.ContainsKey($mod)) { $byModule[$mod] = [System.Collections.Generic.List[object]]::new() }
+        $byModule[$mod].Add($d)
+    }
+    foreach ($mod in $byModule.Keys) {
+        $ds = @($byModule[$mod])
+        $procs = @($ds | ForEach-Object { $_.FileName -replace '\.\d+\.dmp$', '' } | Select-Object -Unique)
+        $sameAddr = @($ds | Select-Object -ExpandProperty FaultingIP -Unique)
+        $owner = & $moduleOwner $mod
+        $ownerTxt = if ($owner) { " On this machine that file reports: $owner." } else { "" }
+        if ($procs.Count -ge 2 -and $sameAddr.Count -eq 1) {
+            & $addLead "The same instruction address ($($sameAddr[0])) appears in $($ds.Count) dumps from $($procs.Count) different programs ($($procs -join ', ')). That pattern points toward $mod itself.$ownerTxt Attach these dumps when reporting the issue to the vendor." "$($ds.Count) dumps naming $($sameAddr[0])" 'Direct'
+        } elseif ($ds.Count -ge 2 -and $sameAddr.Count -eq 1 -and $procs.Count -eq 1) {
+            & $addLead "$($procs[0]) crashed $($ds.Count) times at the identical address ($($sameAddr[0])). A repeatable crash at one address indicates a deterministic fault in that code path.$ownerTxt" "$($ds.Count) dumps with the same fault address" 'Direct'
+        } else {
+            & $addLead "$($procs -join ', ') faulted in $mod.$ownerTxt Review the call stack leading to $mod." "Fault address $($sameAddr -join ', ')" 'Direct'
+        }
+    }
+    foreach ($d in ($dumps | Where-Object { $_.FaultingIP -and ($_.FaultingIP -split '\+')[0] -match '^0x' } | Select-Object -First 2)) {
+        & $addLead "$($d.FileName): the fault address $($d.FaultingIP) was not resolved to a module. A debugger (WinDbg/cdb) with symbols can resolve it." "Dump $($d.FileName)" 'Incomplete'
+    }
+
+    # (b) Kernel bugchecks
+    foreach ($bc in ((& $getEvents 'KernelBugChecks') | Select-Object -First 3)) {
+        $dumpPath = if ($bc.Message -match 'A dump was saved in:\s*(\S+\.dmp)') { $Matches[1] } else { $null }
+        $matchedDump = if ($dumpPath) { $ParsedDumps | Where-Object { $_.FileName -ieq (Split-Path $dumpPath -Leaf) } | Select-Object -First 1 } else { $null }
+        if ($matchedDump -and $matchedDump.CdbInspected) {
+            $diagLead = "Bugcheck $($bc.Code) ($($bc.Meaning)): Call stack identified $($matchedDump.FaultingIP). Stage: $($matchedDump.ApiContext)."
+            & $addLead $diagLead "Dump analysis of $($matchedDump.FileName)" 'Direct'
+        } else {
+            $where = if ($dumpPath) { "Dump saved at $dumpPath." } else { 'No dump file named in event log.' }
+            & $addLead "Bugcheck $($bc.Code) ($($bc.Meaning)): $where To inspect the call stack automatically, install WinDbg from the Microsoft Store ('winget install Microsoft.WinDbg') and re-run DriverCheck from an Administrator PowerShell prompt (or open the dump in WinDbg and run '!analyze -v')." "Bugcheck at $(& $fmt $bc.TimeCreated)" 'Direct'
         }
     }
 
-    # -------------------------------------------------------------------------
-    # RULE GROUP 5: PCI BUS RESETS, NETWORK ADAPTER DROPS & PORT EXHAUSTION
-    # -------------------------------------------------------------------------
-    $pciResetCount = if ($Telemetry -and $Telemetry.PciDeviceResets) { $Telemetry.PciDeviceResets.Count } else { 0 }
-    $netDropCount  = if ($Telemetry -and $Telemetry.NetworkDrops) { $Telemetry.NetworkDrops.Count } else { 0 }
-    $wlanCount     = if ($Telemetry -and $Telemetry.WlanFailovers) { $Telemetry.WlanFailovers.Count } else { 0 }
-    $udpExhCount   = if ($Telemetry -and $Telemetry.UdpPortExhaustions) { $Telemetry.UdpPortExhaustions.Count } else { 0 }
-
-    $activeGameSessions = @($SteamGameSessions)
-    if ($activeGameSessions.Count -eq 0 -and $netDropCount -gt 0 -and (Get-Command Get-DcSteamGameSessions -ErrorAction SilentlyContinue)) {
-        try {
-            $sessCutoff = if ($Telemetry -and $Telemetry.CutoffTime) { $Telemetry.CutoffTime.AddHours(-4) } else { (Get-Date).AddDays(-14) }
-            $sessEnd = if ($Telemetry -and $Telemetry.EndTime) { $Telemetry.EndTime } else { (Get-Date) }
-            $activeGameSessions = @(Get-DcSteamGameSessions -Cutoff $sessCutoff -EndTime $sessEnd)
-        } catch {}
-    }
-
-    $gamingCorrelatedDrops = [System.Collections.Generic.List[PSCustomObject]]::new()
-    if ($netDropCount -gt 0 -and $activeGameSessions.Count -gt 0) {
-        foreach ($nd in $Telemetry.NetworkDrops) {
-            foreach ($gs in $activeGameSessions) {
-                if ($nd.TimeCreated -ge $gs.StartTime -and $nd.TimeCreated -le $gs.EndTime.AddMinutes(3)) {
-                    $minsIntoGame = [math]::Round(($nd.TimeCreated - $gs.StartTime).TotalMinutes, 1)
-                    $gamingCorrelatedDrops.Add([PSCustomObject]@{
-                        Drop            = $nd
-                        Session         = $gs
-                        MinutesIntoGame = $minsIntoGame
-                    })
-                    break
-                }
-            }
-        }
-    }
-
-    $silentDmaDrops = if ($netDropCount -gt 0) {
-        @($Telemetry.NetworkDrops | Where-Object { $_.PSObject.Properties['IsSilentDmaHang'] -and $_.IsSilentDmaHang })
-    } else { @() }
-
-    if ($pciResetCount -gt 0 -and ($netDropCount -gt 0 -or $wlanCount -gt 0)) {
-        $firstPci = $Telemetry.PciDeviceResets[0]
-        $devName = if ($firstPci.FriendlyName) { $firstPci.FriendlyName } elseif ($firstPci.DeviceLabel) { $firstPci.DeviceLabel } else { "PCI Network Controller ($($firstPci.Pdo))" }
-        $findings.Add([PSCustomObject]@{
-            Id                = "PCI_NIC_RESET_LINK_DROP"
-            Category          = "Network"
-            Severity          = "Critical"
-            PriorityScore     = 90
-            Title             = "PCI CONTROLLER UNINITIALIZATION & NETWORK LINK DROP ($devName)"
-            Description       = "$devName underwent a PCI bus uninitialization / hardware reset (Microsoft-Windows-PCI Event 1: '$($firstPci.Message)') alongside $netDropCount network link disconnect(s). This controller or driver reset interrupted active network sockets, causing Windows to drop connectivity or trigger Wi-Fi failover."
-            Guidance          = "1. Optimize adapter stability: run '.\Analyze-LatestCrash.ps1 -RepairNetwork' as Administrator (disables NetAdapterCx idle power-down, ULP, and Packet Priority & VLAN, preventing known I225-V/I226-V controller hangs).`n  2. Expand UDP dynamic port space: run '.\Analyze-LatestCrash.ps1 -ExpandUdpPorts' as Administrator to prevent socket exhaustion during bursty matchmaking/server queries.`n  3. If motherboard BIOS is outdated, update BIOS to the latest version with Intel Gigabit Ethernet NVM/firmware updates."
-            Timestamp         = $firstPci.TimeCreated
-            AffectedComponent = $devName
-        })
-    } elseif ($pciResetCount -gt 0) {
-        $firstPci = $Telemetry.PciDeviceResets[0]
-        $devName = if ($firstPci.FriendlyName) { $firstPci.FriendlyName } elseif ($firstPci.DeviceLabel) { $firstPci.DeviceLabel } else { "PCI Device ($($firstPci.Pdo))" }
-        $findings.Add([PSCustomObject]@{
-            Id                = "PCI_DEVICE_RESET"
-            Category          = "Hardware"
-            Severity          = "Warning"
-            PriorityScore     = 78
-            Title             = "PCI BUS DEVICE UNINITIALIZATION / FUNCTION-LEVEL RESET ($devName)"
-            Description       = "A PCI Express endpoint ($devName) underwent a hardware state transition from STARTED to UNINITIALIZED ($pciResetCount incident(s)). This indicates a device driver crash or function-level reset (FLR)."
-            Guidance          = "Check Device Manager for driver warnings on $devName. If this is a network controller, run '.\Analyze-LatestCrash.ps1 -RepairNetwork' to optimize packet handling and prevent driver stalls."
-            Timestamp         = $firstPci.TimeCreated
-            AffectedComponent = $devName
-        })
-    } elseif (($gamingCorrelatedDrops.Count -gt 0 -or $silentDmaDrops.Count -gt 0) -and -not ($steamWatchdogCrash -and $correlatedDrop)) {
-        $primaryDrop = if ($gamingCorrelatedDrops.Count -gt 0) { $gamingCorrelatedDrops[0].Drop } else { $silentDmaDrops[0] }
-        $ifaceLabel = if ($primaryDrop.InterfaceName) { $primaryDrop.InterfaceName } else { "Ethernet" }
-        $sessionNote = if ($gamingCorrelatedDrops.Count -gt 0) {
-            $gcd = $gamingCorrelatedDrops[0]
-            " Telemetry confirms $ifaceLabel failed $($gcd.MinutesIntoGame) minutes after launching Steam AppID $($gcd.Session.AppId) ($($gamingCorrelatedDrops.Count) gaming-correlated network drop(s))."
+    # (b2) GPU driver timeout live dumps on disk
+    $tdrDumps = @((& $getEvents 'TdrEvents') | Where-Object { $_.PSObject.Properties['DumpPath'] -and $_.DumpPath } | Sort-Object TimeCreated -Descending | Select-Object -First 3)
+    foreach ($t in $tdrDumps) {
+        $nearD = @($dumps | Where-Object { [Math]::Abs(($_.Timestamp - $t.TimeCreated).TotalSeconds) -le 120 })
+        $contextLead = if ($nearD.Count -gt 0 -and $nearD[0].ApiContext) {
+            " Correlated with crash of '$($nearD[0].FileName -replace '\.\d+\.dmp$','')' during $($nearD[0].ApiContext)."
         } else { "" }
-        $riskyNic = if ($NetworkHealth) { $NetworkHealth | Where-Object { $_.HasPowerSavingRisk -or $_.HasForced25GSpeed } | Select-Object -First 1 } else { $null }
-        $configNote = if ($riskyNic) {
-            " Active driver config ($($riskyNic.PowerSavingSummary); SpeedDuplex=$($riskyNic.SpeedDuplex)) allows NetAdapterCx 5-second idle power-downs or forces 2.5G without IEEE 802.3bz Auto-Negotiation."
-        } else { "" }
-        $aspmNote = if ($Telemetry -and $Telemetry.PciePowerManagement -and $Telemetry.PciePowerManagement.IsEnabled) {
-            " PCIe Link State Power Management (ASPM) is also enabled ('$($Telemetry.PciePowerManagement.ACSettingName)'), causing chipset PCIe bridge L0s/L1 transitions under 3D load."
-        } else { "" }
-
-        $findings.Add([PSCustomObject]@{
-            Id                = "GAMING_NIC_SILENT_DMA_HANG"
-            Category          = "Network"
-            Severity          = "Critical"
-            PriorityScore     = 91
-            Title             = "SILENT ETHERNET TX/RX DMA HANG DURING GAMING ($ifaceLabel)"
-            Description       = "The network adapter's TX/RX DMA rings froze without dropping physical copper link (NCSI Event 4042 'SuspectArpProbeFailed' with no preceding physical link disconnect), requiring a manual adapter reset.$sessionNote$configNote$aspmNote"
-            Guidance          = "1. Disable NetAdapterCx 5-second idle power-down (*IdleRestriction=1, ULPMode=0, ReduceSpeedOnPowerDown=0), set Speed & Duplex to Auto Negotiation (required by IEEE 802.3bz for 2.5GBASE-T clock training), and disable Packet Priority & VLAN by running '.\Analyze-LatestCrash.ps1 -RepairNetwork' as Administrator.`n  2. Disable PCIe Link State Power Management (ASPM) using '.\Analyze-LatestCrash.ps1 -DisablePciePowerSavings' so the motherboard chipset PCIe switch does not enter L0s/L1 power states during 3D gaming.`n  3. Expand Windows UDP ephemeral port space using '.\Analyze-LatestCrash.ps1 -ExpandUdpPorts' as Administrator."
-            Timestamp         = $primaryDrop.TimeCreated
-            AffectedComponent = $ifaceLabel
-        })
-    } elseif ($netDropCount -gt 0 -and -not ($steamWatchdogCrash -and $correlatedDrop)) {
-        $firstDrop = $Telemetry.NetworkDrops[0]
-        $score = if ($netDropCount -ge 3) { 80 } else { 72 }
-        $findings.Add([PSCustomObject]@{
-            Id                = "NETWORK_LINK_DROP"
-            Category          = "Network"
-            Severity          = "Warning"
-            PriorityScore     = $score
-            Title             = "NETWORK ADAPTER LINK DISCONNECT / INTERNET CAPABILITY LOSS ($netDropCount Incident(s))"
-            Description       = "Windows recorded $netDropCount network disconnect or NCSI probe failure incident(s). Latest: $($firstDrop.Message)"
-            Guidance          = "1. Run '.\Analyze-LatestCrash.ps1 -RepairNetwork' to optimize Ethernet adapter stability.`n  2. Disconnect Wi-Fi while plugged into wired Ethernet to prevent Windows interface flapping.`n  3. Verify physical Ethernet cable and switch port connections."
-            Timestamp         = $firstDrop.TimeCreated
-            AffectedComponent = $firstDrop.InterfaceName
-        })
+        & $addLead "GPU driver timeout live dump from $(& $fmt $t.TimeCreated) saved at $($t.DumpPath).$contextLead Options: (1) Install WinDbg from the Microsoft Store ('winget install Microsoft.WinDbg') and re-run DriverCheck from an Administrator PowerShell to automatically inspect the dump. (2) Open the live dump directly in WinDbg with '!analyze -v'. (3) If developing, enable API validation layers or GPU crash breadcrumbs to capture the hung dispatch." "GPU watchdog live dump (LiveKernelEvent 0x$($t.Code.ToUpper()))" 'Direct'
     }
 
-    if ($udpExhCount -gt 0) {
-        $firstUdp = $Telemetry.UdpPortExhaustions[0]
-        $consumerSuffix = ""
-        if ($Telemetry.PSObject.Properties['TopUdpConsumers'] -and $Telemetry.TopUdpConsumers -and $Telemetry.TopUdpConsumers.Count -gt 0) {
-            $topStr = @($Telemetry.TopUdpConsumers | Select-Object -First 3 | ForEach-Object { "$($_.ProcessName) ($($_.EndpointCount) sockets)" }) -join ", "
-            $consumerSuffix = " Top active UDP socket consumers: $topStr."
+    # (c) Event 41 restarts that record no bugcheck
+    foreach ($e in (@($ev41 | Where-Object { $_.BugcheckCode -eq 0 }) | Select-Object -First 3)) {
+        $btn = if ($e.PowerButtonTimestamp) { " A power-button timestamp is recorded ($($e.PowerButtonTimestamp.ToString('yyyy-MM-dd HH:mm:ss')))." } else { '' }
+        & $addLead "System rebooted without a clean shutdown at $(& $fmt $e.TimeCreated). No bugcheck stop code was generated, indicating an abrupt power interruption or freeze.$btn Check power supply, thermal levels, and events in the minutes prior to this timestamp." "Kernel-Power 41 with BugcheckCode 0" 'Direct'
+    }
+
+    # (d) Evidence gaps
+    foreach ($u in $UnreadableSources) {
+        $folder = ($u -split ' - ')[0]
+        & $addLead "Install WinDbg from the Microsoft Store ('winget install Microsoft.WinDbg') and re-run DriverCheck from an Administrator PowerShell prompt to inspect crash dumps in $folder." "Crash dump location found ($folder)" 'Direct'
+    }
+
+    $leadRank = { param($l) if ($l.BasedOn -like 'Bugcheck at*') { 0 } elseif ($l.BasedOn -like 'Crash dump location*' -or $l.BasedOn -like 'GPU watchdog*') { 1 } elseif ($l.BasedOn -like 'Kernel-Power 41*') { 2 } else { 3 } }
+    $idx = 0
+    $leads = @($leads | ForEach-Object { [PSCustomObject]@{ Item = $_; Rank = (& $leadRank $_); Idx = $idx++ } } | Sort-Object Rank, Idx | ForEach-Object { $_.Item })
+
+    # ---- Order by crash relevance and timestamp ----
+    # 0: Kernel BugChecks (BSOD)
+    # 1: Process Crash Dumps
+    # 2: GPU Driver Timeouts
+    # 3: System Restarts (Kernel-Power 41 / Event 6008)
+    # 4: Other logged events
+    # 5: Evidence notes
+    $groupOf = {
+        param($o)
+        if ($o.Id -eq 'KERNEL_BUGCHECK') { return 0 }
+        if ($o.Id -eq 'CRASH_DUMP') { return 1 }
+        if ($o.Id -eq 'GPU_TIMEOUT_EVENT') { return 2 }
+        if ($o.Id -in @('KERNEL_POWER_41', 'EVENTLOG_6008')) { return 3 }
+        if ($o.Kind -eq 'Evidence') { return 5 }
+        return 4
+    }
+    $sorted = @($observations | Sort-Object @{ Expression = { & $groupOf $_ } }, @{ Expression = { if ($_.Timestamp -is [datetime]) { $_.Timestamp } else { [datetime]::MinValue } }; Descending = $true })
+
+    # Headline = newest crash-class event
+    $crashes = @($sorted | Where-Object { $_.Kind -eq 'Crash' })
+    $primary = $null
+    if ($crashes.Count -gt 0) {
+        $informative = @($crashes | Where-Object { $_.Id -in @('KERNEL_BUGCHECK', 'CRASH_DUMP') -and $_.Timestamp -is [datetime] })
+        if ($informative.Count -gt 0) {
+            $primary = ($informative | Sort-Object Timestamp -Descending | Select-Object -First 1)
+        } else {
+            $primary = $crashes[0]
         }
-        $findings.Add([PSCustomObject]@{
-            Id                = "UDP_PORT_EXHAUSTION"
-            Category          = "Network"
-            Severity          = "Warning"
-            PriorityScore     = 76
-            Title             = "TCP/IP EPHEMERAL PORT EXHAUSTION (Event 4266)"
-            Description       = "Windows dynamic (ephemeral) port space was exhausted during socket bursts ($udpExhCount incident(s)). This prevented applications (such as Steam and multiplayer games) from creating outgoing sockets, causing connection drops and ARP/DNS probe timeouts.$consumerSuffix"
-            Guidance          = "Run '.\Analyze-LatestCrash.ps1 -ExpandUdpPorts' or '.\scripts\Repair-EthernetSettings.ps1 -ExpandUdpPorts' as Administrator to expand the UDP dynamic port range to 64,511 ports (matching TCP)."
-            Timestamp         = $firstUdp.TimeCreated
-            AffectedComponent = "TCP/IP Ephemeral Port Stack"
-        })
-    } elseif ($NetworkHealth -and @($NetworkHealth | Where-Object { $_.IsUdpConstrained }).Count -gt 0 -and ($netDropCount -gt 0 -or $pciResetCount -gt 0)) {
-        $constrainedNic = $NetworkHealth | Where-Object { $_.IsUdpConstrained } | Select-Object -First 1
-        $findings.Add([PSCustomObject]@{
-            Id                = "UDP_PORT_SPACE_CONSTRAINED"
-            Category          = "Network"
-            Severity          = "Warning"
-            PriorityScore     = 62
-            Title             = "CONSTRAINED WINDOWS UDP DYNAMIC PORT RANGE ($($constrainedNic.UdpPortRange))"
-            Description       = "Windows UDP ephemeral port allocation is restricted to $($constrainedNic.UdpPortRange) (vs TCP $($constrainedNic.TcpPortRange)) while network link drops occurred. Bursty multiplayer matchmaking and server browser queries can rapidly exhaust 16,384 UDP ports."
-            Guidance          = "Run '.\Analyze-LatestCrash.ps1 -ExpandUdpPorts' as Administrator to expand the UDP dynamic port range to 64,511 ports (matching TCP)."
-            Timestamp         = (Get-Date)
-            AffectedComponent = "UDP Ephemeral Port Range"
-        })
-    }
+    } elseif ($sorted.Count -gt 0) { $primary = $sorted[0] }
 
-    # -------------------------------------------------------------------------
-    # RULE GROUP 6: POWER, PLATFORM, DRIVERS & HARDWARE CONFIGURATION
-    # -------------------------------------------------------------------------
-    if ($Telemetry -and $Telemetry.AbruptReboots -and $Telemetry.AbruptReboots.Count -gt 0 -and ($Telemetry.AbruptReboots | Where-Object { $_.BugcheckCode -eq 0 })) {
-        $firstReb = $Telemetry.AbruptReboots | Where-Object { $_.BugcheckCode -eq 0 } | Select-Object -First 1
-        $findings.Add([PSCustomObject]@{
-            Id                = "DIRTY_POWER_RESET"
-            Category          = "Power"
-            Severity          = "Warning"
-            PriorityScore     = 82
-            Title             = "DIRTY POWER RESET / INSTANT BLACK SCREEN (Event 41 BugcheckCode 0)"
-            Description       = "The system lost power or restarted abruptly without generating a BugCheck crash dump ($($Telemetry.AbruptReboots.Count) incident(s))."
-            Guidance          = "When occurring during gaming or 3D load, this typically points to PSU transient spike trips (GPU power draw exceeding PSU peak wattage), loose 12VHPWR/PCIe 8-pin power cables, or aggressive GPU power limits."
-            Timestamp         = $firstReb.TimeCreated
-            AffectedComponent = "System Power / PSU"
-        })
-    }
-
-    if ($GpuHealth -and $GpuHealth.DualGpuConflict) {
-        $findings.Add([PSCustomObject]@{
-            Id                = "DUAL_GPU_MISMATCH"
-            Category          = "GPU"
-            Severity          = "Warning"
-            PriorityScore     = 75
-            Title             = "DUAL-GPU DRIVER VERSION MISMATCH"
-            Description       = $GpuHealth.DualGpuDetails
-            Guidance          = "Align both AMD display drivers using '.\Analyze-LatestCrash.ps1 -FixDrivers' or disable CPU Integrated Graphics in Motherboard BIOS if not using motherboard display ports."
-            Timestamp         = (Get-Date)
-            AffectedComponent = "Dual-GPU Display Subsystem"
-        })
-    }
-
-    if ($PnpIssues -and $PnpIssues.Count -gt 0) {
-        $findings.Add([PSCustomObject]@{
-            Id                = "PNP_DEVICE_ERRORS"
-            Category          = "Hardware"
-            Severity          = "Warning"
-            PriorityScore     = 74
-            Title             = "HARDWARE DEVICE ERRORS / MISSING DRIVERS"
-            Description       = "$($PnpIssues.Count) device(s) are reporting errors or missing drivers in Windows Device Manager."
-            Guidance          = "Install official motherboard chipset drivers and check Device Manager for yellow exclamation marks."
-            Timestamp         = (Get-Date)
-            AffectedComponent = "Plug and Play Devices"
-        })
-    }
-
-    if ($MotherboardHealth -and -not $MotherboardHealth.IsHealthy) {
-        $findings.Add([PSCustomObject]@{
-            Id                = "MISSING_CHIPSET_CONTROLLERS"
-            Category          = "Hardware"
-            Severity          = "Warning"
-            PriorityScore     = 73
-            Title             = "MISSING MOTHERBOARD CHIPSET CONTROLLERS"
-            Description       = "One or more core motherboard platform controllers ($($MotherboardHealth.MissingControllers -join ', ')) are missing official drivers or reporting errors. This can cause PCIe link instability, USB disconnects, and intermittent driver hangs."
-            Guidance          = "Download and install the latest official chipset drivers from your motherboard manufacturer's support site or AMD.com / Intel.com ($($MotherboardHealth.Summary))."
-            Timestamp         = (Get-Date)
-            AffectedComponent = "Motherboard Chipset"
-        })
-    }
-
-    if ($Telemetry -and $Telemetry.FastStartup -and $Telemetry.FastStartup.FastStartupEnabled -and $Telemetry.AbruptReboots.Count -gt 0) {
-        $findings.Add([PSCustomObject]@{
-            Id                = "FAST_STARTUP_REBOOT"
-            Category          = "Power"
-            Severity          = "Warning"
-            PriorityScore     = 70
-            Title             = "ABRUPT REBOOT WITH FAST STARTUP ENABLED"
-            Description       = "The system experienced unexpected reboots while Windows Fast Startup was enabled."
-            Guidance          = "Disable Windows Fast Startup (Control Panel -> Power Options -> Choose what the power buttons do -> Turn off Fast Startup) to ensure clean cold reboots."
-            Timestamp         = (Get-Date)
-            AffectedComponent = "Windows Fast Startup"
-        })
-    }
-
-    if ($Telemetry -and $Telemetry.PciePowerManagement -and $Telemetry.PciePowerManagement.IsEnabled -and ($Telemetry.AbruptReboots.Count -gt 0 -or $Telemetry.UnexpectedShutdowns.Count -gt 0)) {
-        $findings.Add([PSCustomObject]@{
-            Id                = "PCIE_ASPM_INSTABILITY"
-            Category          = "Power"
-            Severity          = "Warning"
-            PriorityScore     = 68
-            Title             = "PCIE LINK STATE POWER MANAGEMENT (ASPM) INSTABILITY"
-            Description       = "The system experienced unexpected reboots or sleep-wake issues while PCIe Link State Power Management was enabled ($($Telemetry.PciePowerManagement.ACSettingName))."
-            Guidance          = "Disable PCIe Link State Power Management using '.\Analyze-LatestCrash.ps1 -DisablePciePowerSavings' or '.\scripts\Repair-PciePowerSettings.ps1'."
-            Timestamp         = (Get-Date)
-            AffectedComponent = "PCIe Power Management (ASPM)"
-        })
-    }
-
-    if ($KernelDriverHealth -and $KernelDriverHealth.RogueDriversDetected) {
-        $findings.Add([PSCustomObject]@{
-            Id                = "ROGUE_KERNEL_DRIVER_HAZARD"
-            Category          = "System"
-            Severity          = "Warning"
-            PriorityScore     = 66
-            Title             = "ROGUE KERNEL I/O DRIVER HAZARD (RGB / DIRECT PORT ACCESS)"
-            Description       = $KernelDriverHealth.RiskSummary
-            Guidance          = $KernelDriverHealth.Guidance
-            Timestamp         = (Get-Date)
-            AffectedComponent = "Kernel I/O Driver"
-        })
-    }
-
-    if ($DisplayHealth -and $DisplayHealth.HighRiskTimingsDetected) {
-        $findings.Add([PSCustomObject]@{
-            Id                = "DISPLAY_TIMING_RISK"
-            Category          = "GPU"
-            Severity          = "Warning"
-            PriorityScore     = 65
-            Title             = "DISPLAYPORT BANDWIDTH / MONITOR SCALER INSTABILITY (EDID OVERCLOCK)"
-            Description       = if ($DisplayHealth.RiskSummary) { $DisplayHealth.RiskSummary } else { "Connected display has aggressive factory overclock timings exceeding DisplayPort 1.2a / scaler bandwidth thresholds." }
-            Guidance          = if ($DisplayHealth.Guidance) { $DisplayHealth.Guidance } else { "Lower monitor refresh rate (e.g. from 165Hz to 144Hz) in Windows Advanced Display Settings, or configure CVT-Reduced Blanking (CVT-RB) in Custom Resolution Utility (CRU) to reduce pixel clock below 580 MHz." }
-            Timestamp         = (Get-Date)
-            AffectedComponent = "Display EDID Timings"
-        })
-    }
-
-    if ($ZombieProcesses -and $ZombieProcesses.Count -gt 0) {
-        $findings.Add([PSCustomObject]@{
-            Id                = "ZOMBIE_STEAM_PROCESS"
-            Category          = "Application"
-            Severity          = "Warning"
-            PriorityScore     = 64
-            Title             = "ACTIVE ZOMBIE / HUNG STEAM PROCESS"
-            Description       = "steam.exe (PID: $($ZombieProcesses[0].PID)) is lingering headless in background, blocking the single-instance mutex and preventing relaunch."
-            Guidance          = "Run '.\Analyze-LatestCrash.ps1 -KillHungSteam' or terminate steam.exe in Task Manager."
-            Timestamp         = (Get-Date)
-            AffectedComponent = "steam.exe"
-        })
-    }
-
-    if ($Telemetry -and $Telemetry.PSObject.Properties['StuckServices'] -and $Telemetry.StuckServices -and $Telemetry.StuckServices.Count -gt 0) {
-        $firstStuck = $Telemetry.StuckServices[0]
-        $findings.Add([PSCustomObject]@{
-            Id                = "STUCK_BACKGROUND_SERVICE"
-            Category          = "System"
-            Severity          = "Warning"
-            PriorityScore     = 63
-            Title             = "STUCK WINDOWS SERVICE IN $($firstStuck.State.ToUpper()) ($($firstStuck.Name))"
-            Description       = "$($firstStuck.Message) When services like BcastDVRUserService (Game Bar Capture) hang in StopPending, Windows logs DCOM Event 10029 activation timeouts whenever a 3D game launches."
-            Guidance          = "Terminate the hung service host process using 'Stop-Process -Id $($firstStuck.ProcessId) -Force' in an Administrator PowerShell terminal, or disable background recording in Windows Settings -> Gaming -> Captures."
-            Timestamp         = (Get-Date)
-            AffectedComponent = $firstStuck.Name
-        })
-    }
-
-    $actionCatalog = @{
-        "CleanShaderCache" = [PSCustomObject]@{
-            Id            = "CleanShaderCache"
-            Label         = "Clear DirectX and GPU shader caches"
-            Description   = "Deletes cached shaders so games rebuild them cleanly (fixes shader freezes and GPU timeouts)."
-            SwitchHint    = "-CleanShaderCache"
-            RequiresAdmin = $false
-        }
-        "RepairNetwork" = [PSCustomObject]@{
-            Id            = "RepairNetwork"
-            Label         = "Fix Ethernet adapter drops"
-            Description   = "Disables NetAdapterCx 5s idle power-down, ULP, and Packet Priority & VLAN, and restores 802.3bz Auto-Negotiation."
-            SwitchHint    = "-RepairNetwork"
-            RequiresAdmin = $true
-        }
-        "ExpandUdpPorts" = [PSCustomObject]@{
-            Id            = "ExpandUdpPorts"
-            Label         = "Expand Windows network port limit"
-            Description   = "Increases available UDP ports so multiplayer games and server browsers do not lose connection."
-            SwitchHint    = "-ExpandUdpPorts"
-            RequiresAdmin = $true
-        }
-        "DisablePciePowerSavings" = [PSCustomObject]@{
-            Id            = "DisablePciePowerSavings"
-            Label         = "Turn off PCIe slot power saving"
-            Description   = "Stops the PCIe slot from going into low-power sleep during games, preventing GPU timeouts."
-            SwitchHint    = "-DisablePciePowerSavings"
-            RequiresAdmin = $false
-        }
-        "RepairGpuSleep" = [PSCustomObject]@{
-            Id            = "RepairGpuSleep"
-            Label         = "Increase GPU wake timeout (8 seconds)"
-            Description   = "Gives your GPU and monitor extra time to wake from sleep without crashing (no extra power use)."
-            SwitchHint    = "-RepairGpuSleep"
-            RequiresAdmin = $true
-        }
-        "KillHungSteam" = [PSCustomObject]@{
-            Id            = "KillHungSteam"
-            Label         = "Close stuck Steam and game processes"
-            Description   = "Closes background Steam processes that are stuck and stopping games from launching."
-            SwitchHint    = "-KillHungSteam"
-            RequiresAdmin = $false
-        }
-        "CleanSteamCache" = [PSCustomObject]@{
-            Id            = "CleanSteamCache"
-            Label         = "Clear Steam browser cache"
-            Description   = "Clears Steam's built-in browser cache and overlay state."
-            SwitchHint    = "-CleanSteamCache"
-            RequiresAdmin = $false
-        }
-        "CleanConfigCrimsonDesert" = [PSCustomObject]@{
-            Id            = "CleanConfigCrimsonDesert"
-            Label         = "Reset Crimson Desert crash locks and cache"
-            Description   = "Backs up and clears stuck crash locks and cache files so the game can launch."
-            SwitchHint    = "-CleanConfig -Game CrimsonDesert"
-            RequiresAdmin = $false
-        }
-        "FixDrivers" = [PSCustomObject]@{
-            Id            = "FixDrivers"
-            Label         = "Stop Windows Update from overwriting GPU drivers"
-            Description   = "Locks your GPU driver so Windows Update does not silently replace it with an older version."
-            SwitchHint    = "-FixDrivers"
-            RequiresAdmin = $true
-        }
-        "DisableRogueDrivers" = [PSCustomObject]@{
-            Id            = "DisableRogueDrivers"
-            Label         = "Disable conflicting RGB / hardware monitor drivers"
-            Description   = "Turns off old kernel drivers (inpoutx64 / WinRing0) that cause crashes with game anti-cheat."
-            SwitchHint    = "-DisableRogueDrivers"
-            RequiresAdmin = $true
-        }
-    }
-
-    $gpuTdrTimeoutActions = if ($Telemetry -and $Telemetry.PSObject.Properties['GraphicsDriverSettings'] -and $Telemetry.GraphicsDriverSettings -and ($null -eq $Telemetry.GraphicsDriverSettings.TdrDelay -or $Telemetry.GraphicsDriverSettings.TdrDelay -le 2)) {
-        @("RepairGpuSleep", "CleanShaderCache")
-    } else {
-        @("CleanShaderCache")
-    }
-
-    $findingActionMap = @{
-        "STEAM_WATCHDOG_NETWORK_DROP" = @("KillHungSteam", "RepairNetwork", "ExpandUdpPorts")
-        "STEAM_WATCHDOG_PIPE_STALL"   = @("KillHungSteam", "CleanSteamCache")
-        "SHADER_RUNTIME_CRASH"        = @("CleanShaderCache")
-        "GRAPHICS_DEVICE_REMOVED"     = @("CleanShaderCache", "DisablePciePowerSavings")
-        "ROGUE_KERNEL_DRIVER_CRASH"   = @("DisableRogueDrivers")
-        "ROGUE_KERNEL_DRIVER_HAZARD"  = @("DisableRogueDrivers")
-        "APP_ACCESS_VIOLATION"        = @("CleanShaderCache")
-        "CRIMSON_DESERT_CRASH"        = @("CleanShaderCache", "CleanConfigCrimsonDesert")
-        "CRIMSON_DESERT_APP_HANG"     = @("CleanShaderCache", "CleanConfigCrimsonDesert")
-        "PCIE_WHEA_ERROR"             = @("DisablePciePowerSavings")
-        "PCIE_ASPM_INSTABILITY"       = @("DisablePciePowerSavings")
-        "GPU_TDR_WAKE_FROM_SLEEP"     = @("RepairGpuSleep", "CleanShaderCache")
-        "GPU_TDR_PCIE_ASPM"           = @("DisablePciePowerSavings", "CleanShaderCache")
-        "GPU_TDR_TIMEOUT"             = $gpuTdrTimeoutActions
-        "PCI_NIC_RESET_LINK_DROP"     = @("RepairNetwork", "ExpandUdpPorts")
-        "PCI_DEVICE_RESET"            = @("RepairNetwork")
-        "GAMING_NIC_SILENT_DMA_HANG"  = @("RepairNetwork", "DisablePciePowerSavings", "ExpandUdpPorts")
-        "NETWORK_LINK_DROP"           = @("RepairNetwork")
-        "UDP_PORT_EXHAUSTION"         = @("ExpandUdpPorts")
-        "UDP_PORT_SPACE_CONSTRAINED"  = @("ExpandUdpPorts")
-        "DUAL_GPU_MISMATCH"           = @("FixDrivers")
-        "ZOMBIE_STEAM_PROCESS"        = @("KillHungSteam")
-    }
-
-    $sortedFindings = @($findings | Sort-Object -Property PriorityScore -Descending)
-    $recommendedActions = [System.Collections.Generic.List[object]]::new()
-    $seenActionIds = @{}
-    foreach ($f in $sortedFindings) {
-        $rawParts = @($f.Guidance -split '(?:\r?\n\s*(?:\*|\d+\.)\s*)|(?:\s+\*\s+)|(?:^\s*(?:\*|\d+\.)\s*)' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-        $cleanSteps = [System.Collections.Generic.List[string]]::new()
-        foreach ($p in $rawParts) { $cleanSteps.Add($p.Trim()) }
-        $f | Add-Member -NotePropertyName Steps -NotePropertyValue @($cleanSteps) -Force
-
-        $fActions = [System.Collections.Generic.List[object]]::new()
-        if ($findingActionMap.ContainsKey($f.Id)) {
-            foreach ($actId in $findingActionMap[$f.Id]) {
-                if ($actionCatalog.ContainsKey($actId)) {
-                    $actObj = $actionCatalog[$actId]
-                    $fActions.Add($actObj)
-                    if (-not $seenActionIds.ContainsKey($actId)) {
-                        $seenActionIds[$actId] = $true
-                        $recommendedActions.Add($actObj)
-                    }
-                }
-            }
-        }
-        $f | Add-Member -NotePropertyName Actions -NotePropertyValue @($fActions) -Force
-    }
-
-    if ($sortedFindings.Count -gt 0) {
-        $primary = $sortedFindings[0]
-        $secondary = if ($sortedFindings.Count -gt 1) { @($sortedFindings[1..($sortedFindings.Count - 1)]) } else { @() }
-        $guidanceText = $primary.Guidance
-        if ($ZombieProcesses -and $ZombieProcesses.Count -gt 0 -and $primary.Id -ne "ZOMBIE_STEAM_PROCESS") {
-            $guidanceText += "`n  * Post-Crash Cleanup: steam.exe (PID: $($ZombieProcesses[0].PID)) is currently stuck as a zombie process from this crash; run '.\Analyze-LatestCrash.ps1 -KillHungSteam' to terminate it before relaunching Steam."
-        }
+    if ($primary) {
+        $secondary = @($sorted | Where-Object { $_ -ne $primary })
+        $title = "MOST RECENT CRASH: $($primary.Title) at $(& $fmt $primary.Timestamp)"
+        $desc = $primary.Description
         return [PSCustomObject]@{
             PrimaryFinding       = $primary
             SecondaryFindings    = $secondary
-            Findings             = $sortedFindings
-            RecommendedActions   = @($recommendedActions)
-            RootCauseTitle       = $primary.Title
-            RootCauseDescription = $primary.Description
-            RootCauseGuidance    = $guidanceText
+            Findings             = $sorted
+            RecommendedActions   = @()
+            Leads                = @($leads)
+            RootCauseTitle       = $title
+            RootCauseDescription = $desc
+            RootCauseGuidance    = ''
             RootCauseSeverity    = $primary.Severity
         }
     }
 
-    # Healthy fallback when no rules matched
-    $defaultDesc = if ($ScanMode -eq "LatestIncidentClean") {
-        "Scanned backward $MaxLookbackDays days across crash dumps, game engine logs, and event telemetry. No crash minidumps, GPU driver timeouts (TDR 4101), BSOD bugchecks, or unexpected shutdowns were detected."
-    } else {
-        "No critical hardware faults, GPU driver crashes, or unhandled exceptions detected in the scan window."
+    $none = [PSCustomObject]@{
+        Id = 'NO_EVIDENCE'; Category = 'System'; Kind = 'Evidence'; Severity = 'Healthy'; PriorityScore = 0
+        Title = 'NO CRASH EVIDENCE FOUND IN THE SOURCES THAT WERE READ'
+        Description = "No crash dumps, bugchecks, GPU timeout events or unexpected restarts were found in the scanned window ($ScanMode, $MaxLookbackDays day lookback)."
+        Guidance = ''; Steps = @(); Actions = @(); Timestamp = (Get-Date); AffectedComponent = 'System'; Source = 'All scanned sources'
     }
-    $defaultGuidance = if ($ScanMode -eq "LatestIncidentClean") {
-        "Your system has had no recorded crash dumps or driver timeouts in the past $MaxLookbackDays days. If you are experiencing in-game stutters or disconnects, check Tier 4 hardware health and game server status."
-    } elseif ($ScanMode -eq "LatestIncident" -and $IncidentAnchor) {
-        "Telemetry surrounding the latest incident ($($IncidentAnchor.Timestamp.ToString('yyyy-MM-dd HH:mm'))) reports no cascading hardware faults. If game crashes persist, verify game file integrity."
-    } else {
-        "Your system is reporting normal stability telemetry. If you experienced a game crash, it may have terminated cleanly without writing a dump or occurred outside the current analysis window."
-    }
-
-    $healthyFinding = [PSCustomObject]@{
-        Id                = "SYSTEM_HEALTHY"
-        Category          = "System"
-        Severity          = "Healthy"
-        PriorityScore     = 0
-        Title             = "SYSTEM HEALTHY"
-        Description       = $defaultDesc
-        Guidance          = $defaultGuidance
-        Steps             = @($defaultGuidance)
-        Actions           = @()
-        Timestamp         = (Get-Date)
-        AffectedComponent = "System"
-    }
-
     return [PSCustomObject]@{
-        PrimaryFinding       = $healthyFinding
-        SecondaryFindings    = @()
-        Findings             = @($healthyFinding)
-        RecommendedActions   = @()
-        RootCauseTitle       = $healthyFinding.Title
-        RootCauseDescription = $healthyFinding.Description
-        RootCauseGuidance    = $healthyFinding.Guidance
-        RootCauseSeverity    = $healthyFinding.Severity
+        PrimaryFinding = $none; SecondaryFindings = @(); Findings = @($none); RecommendedActions = @(); Leads = @($leads)
+        RootCauseTitle = $none.Title; RootCauseDescription = $none.Description
+        RootCauseGuidance = ''; RootCauseSeverity = 'Healthy'
     }
 }
 
 Set-Alias -Name Invoke-DcResolvedTimeoutAnalysis -Value Find-DcResolvedIncidentHistory
 
-Export-ModuleMember -Function Get-DcFastStartupStatus, Get-DcSystemTelemetry, Get-DcEventXmlData, Get-DcWinEventsTargeted, Get-DcBugCheckMeaning, Get-DcGraphicsDriverSettings, Get-DcPciePowerManagementStatus, Find-DcLatestIncident, Get-DcWerReportArchive, Get-DcRegistryKeyLastWriteTime, Get-DcSystemChangeHistory, Find-DcResolvedIncidentHistory, Resolve-DcDiagnosticFindings, Protect-DcTelemetryText -Alias Invoke-DcResolvedTimeoutAnalysis
+Export-ModuleMember -Function Get-DcFastStartupStatus, Get-DcSystemTelemetry, Get-DcEventXmlData, Get-DcWinEventsTargeted, Get-DcBugCheckMeaning, Get-DcBugCheckExplanation, Get-DcGraphicsDriverSettings, Get-DcPciePowerManagementStatus, Find-DcLatestIncident, Get-DcWerReportArchive, Get-DcRegistryKeyLastWriteTime, Get-DcSystemChangeHistory, Find-DcResolvedIncidentHistory, Resolve-DcDiagnosticFindings, Protect-DcTelemetryText -Alias Invoke-DcResolvedTimeoutAnalysis
