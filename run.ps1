@@ -33,9 +33,8 @@ $zipFile = Join-Path $env:TEMP "drivercheck_temp.zip"
 
 Write-Host ""
 Write-Host "========================================================================" -ForegroundColor Cyan
-Write-Host "  DRIVERCHECK CLOUD BOOTSTRAPPER (v4.5.0)" -ForegroundColor Cyan
+Write-Host "  DRIVERCHECK LAUNCHER (v4.5.0)" -ForegroundColor Cyan
 Write-Host "========================================================================" -ForegroundColor Cyan
-Write-Host "Downloading DriverCheck to temporary workspace..." -ForegroundColor DarkGray
 
 $scanParams = @{ ExportHtml = $true; OpenReport = $true }
 if ($AllIncidents) { $scanParams['AllIncidents'] = $true }
@@ -43,10 +42,14 @@ if ($Hours -gt 0) { $scanParams['Hours'] = $Hours }
 
 try {
     # If running from a local checkout, use local scripts directly
-    if (Test-Path (Join-Path $PSScriptRoot "Analyze-LatestCrash.ps1")) {
-        & (Join-Path $PSScriptRoot "Analyze-LatestCrash.ps1") @scanParams
+    $localEngine = if ($PSScriptRoot) { Join-Path $PSScriptRoot "Analyze-LatestCrash.ps1" } else { "" }
+    if ($localEngine -and (Test-Path $localEngine)) {
+        Write-Host "Running local DriverCheck engine..." -ForegroundColor DarkGray
+        & $localEngine @scanParams
         return
     }
+
+    Write-Host "Downloading DriverCheck to temporary workspace..." -ForegroundColor DarkGray
 
     if (Test-Path $destDir) { Remove-Item $destDir -Recurse -Force -ErrorAction SilentlyContinue }
     if (Test-Path $zipFile) { Remove-Item $zipFile -Force -ErrorAction SilentlyContinue }

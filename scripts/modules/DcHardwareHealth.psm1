@@ -1044,7 +1044,7 @@ function Get-DcMemoryHealth {
             $memResults.IsRunningBaseJedec = $true
         }
 
-        $memResults.Summary = "${totalGb} GB (${sticks.Count} module(s) @ ${configuredSpeed} MT/s)"
+        $memResults.Summary = "${totalGb} GB ($($sticks.Count) module(s) @ ${configuredSpeed} MT/s)"
     }
 
     return $memResults
@@ -1076,4 +1076,93 @@ function Get-DcStorageHealth {
     return $results
 }
 
-Export-ModuleMember -Function Get-DcPnpHealth, Get-DcGpuDriverHealth, Get-DcRebarStatus, Get-DcMemoryHealth, Get-DcStorageHealth, Get-DcBluetoothHealth, Get-DcNetworkHealth, Get-DcDisplayDiagnostics, Get-DcProblematicKernelDrivers, Get-DcMotherboardAndChipsetHealth
+function Get-DcPhysicalDiskHealth {
+    [CmdletBinding()]
+    param([int]$EventDays = 30)
+
+    $result = [PSCustomObject]@{
+        Disks        = [System.Collections.Generic.List[PSCustomObject]]::new()
+        StorageEvents = [System.Collections.Generic.List[PSCustomObject]]::new()
+        Findings     = [System.Collections.Generic.List[string]]::new()
+        Notes        = [System.Collections.Generic.List[string]]::new()
+    }
+
+    $physical = @()
+    try { $physical = @(Get-PhysicalDisk -ErrorAction Stop) } catch { $result.Notes.Add("Get-PhysicalDisk unavailable: $($_.Exception.Message)") }
+
+    foreach ($pd in $physical) {
+        $rel = $null
+        try { $rel = $pd | Get-StorageReliabilityCounter -ErrorAction Stop } catch {}
+
+        $sizeGb = if ($pd.Size) { [math]::Round([double]$pd.Size / 1GB, 0) } else { 0 }
+        $disk = [PSCustomObject]@{
+            FriendlyName          = $pd.FriendlyName
+            MediaType             = [string]$pd.MediaType
+            BusType               = [string]$pd.BusType
+            SizeGb                = $sizeGb
+            HealthStatus          = [string]$pd.HealthStatus
+            OperationalStatus     = (@($pd.OperationalStatus) -join ', ')
+            Wear                  = if ($rel) { $rel.Wear } else { $null }
+            TemperatureC          = if ($rel) { $rel.Temperature } else { $null }
+            TemperatureMaxC       = if ($rel) { $rel.TemperatureMax } else { $null }
+            PowerOnHours          = if ($rel) { $rel.PowerOnHours } else { $null }
+            ReadErrorsTotal       = if ($rel) { $rel.ReadErrorsTotal } else { $null }
+            ReadErrorsUncorrected = if ($rel) { $rel.ReadErrorsUncorrected } else { $null }
+            WriteErrorsTotal      = if ($rel) { $rel.WriteErrorsTotal } else { $null }
+            WriteErrorsUncorrected = if ($rel) { $rel.WriteErrorsUncorrected } else { $null }
+            ReliabilityAvailable  = ($null -ne $rel)
+        }
+        $result.Disks.Add($disk)
+
+        $name = "$($pd.FriendlyName) ($sizeGb GB $($disk.BusType))"
+        if ($disk.HealthStatus -and $disk.HealthStatus -ne 'Healthy') { $result.Findings.Add("$name reports HealthStatus '$($disk.HealthStatus)' (Operational: $($disk.OperationalStatus)).") }
+        if ($null -ne $disk.Wear -and $disk.Wear -ge 80) { $result.Findings.Add("$name wear is $($disk.Wear)% (SSD nearing end of life).") }
+        if ($null -ne $disk.TemperatureC -and $disk.TemperatureC -ge 70) { $result.Findings.Add("$name temperature is $($disk.TemperatureC) C (max recorded: $($disk.TemperatureMaxC) C).") }
+        if ($disk.ReadErrorsUncorrected -gt 0 -or $disk.WriteErrorsUncorrected -gt 0) { $result.Findings.Add("$name has uncorrected I/O errors (read: $($disk.ReadErrorsUncorrected), write: $($disk.WriteErrorsUncorrected)).") }
+        if (-not $disk.ReliabilityAvailable) { $result.Notes.Add("$($pd.FriendlyName): SMART/reliability counters not available (may require Administrator or driver support).") }
+    }
+
+    # Storage-related errors from the System log (disk, filesystem, NVMe/SATA controller)
+    try {
+        $since = (Get-Date).AddDays(-$EventDays)
+        $wanted = @{
+            'disk'     = @(7, 11, 15, 51, 52, 153)
+            'Ntfs'     = @(55, 137)
+            'stornvme' = @(129, 130)
+            'storahci' = @(129)
+            'volmgr'   = @(46, 161)
+        }
+        $evts = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = @($wanted.Keys); StartTime = $since } -ErrorAction SilentlyContinue)
+        foreach ($e in $evts) {
+            if ($wanted[$e.ProviderName] -and ($wanted[$e.ProviderName] -contains $e.Id)) {
+                $msg = if ($e.Message) { ($e.Message -split "`r?`n")[0] } else { "" }
+                if ($msg.Length -gt 200) { $msg = $msg.Substring(0, 200) }
+                $result.StorageEvents.Add([PSCustomObject]@{ TimeCreated = $e.TimeCreated; Provider = $e.ProviderName; Id = $e.Id; Message = $msg })
+            }
+        }
+        if ($result.StorageEvents.Count -gt 0) {
+            $grp = $result.StorageEvents | Group-Object Provider, Id | Sort-Object Count -Descending
+            $summary = ($grp | Select-Object -First 4 | ForEach-Object { "$($_.Name -replace ', ',' event ') x$($_.Count)" }) -join '; '
+            $result.Findings.Add("$($result.StorageEvents.Count) storage/filesystem error event(s) in the last $EventDays days: $summary.")
+        }
+    } catch {}
+
+    return $result
+}
+
+function Get-DcWheaEvents {
+    [CmdletBinding()]
+    param([int]$Days = 30)
+
+    $events = [System.Collections.Generic.List[PSCustomObject]]::new()
+    try {
+        $since = (Get-Date).AddDays(-$Days)
+        foreach ($e in @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-WHEA-Logger'; StartTime = $since } -ErrorAction SilentlyContinue)) {
+            $msg = if ($e.Message) { ($e.Message -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -First 2) -join ' ' } else { "" }
+            if ($msg.Length -gt 220) { $msg = $msg.Substring(0, 220) }
+            $events.Add([PSCustomObject]@{ TimeCreated = $e.TimeCreated; Id = $e.Id; Level = $e.LevelDisplayName; Message = $msg })
+        }
+    } catch {}
+    return $events
+}
+Export-ModuleMember -Function Get-DcPnpHealth, Get-DcGpuDriverHealth, Get-DcRebarStatus, Get-DcMemoryHealth, Get-DcStorageHealth, Get-DcPhysicalDiskHealth, Get-DcWheaEvents, Get-DcBluetoothHealth, Get-DcNetworkHealth, Get-DcDisplayDiagnostics, Get-DcProblematicKernelDrivers, Get-DcMotherboardAndChipsetHealth

@@ -177,6 +177,7 @@ if (Test-Path $rootModule) {
     Import-Module (Join-Path $modulesDir "DcHardwareHealth.psm1") -Force
     Import-Module (Join-Path $modulesDir "DcRemediation.psm1") -Force
     Import-Module (Join-Path $modulesDir "DcReportGenerator.psm1") -Force
+Import-Module (Join-Path $modulesDir "DcCrashForensics.psm1") -Force
 }
 
 $isCustomHours = ($PSBoundParameters.ContainsKey('Hours') -and $Hours -gt 0)
@@ -465,7 +466,14 @@ if (-not $Quiet) {
 }
 
 if ($dumpFiles.Count -gt 0) {
+    $dumpIdx = 0
+    $dumpTotal = $dumpFiles.Count
     foreach ($df in $dumpFiles) {
+        $dumpIdx++
+        if (-not $Quiet) {
+            $dfSizeMb = [math]::Round($df.Length / 1MB, 2)
+            Write-Host "  [$dumpIdx/$dumpTotal] Inspecting $($df.Name) ($dfSizeMb MB)..." -ForegroundColor DarkGray
+        }
         $dumpObj = Read-DcMinidump -Path $df.FullName
         if ($dumpObj) {
             $parsedDumps.Add($dumpObj)
@@ -480,6 +488,21 @@ if ($dumpFiles.Count -gt 0) {
                 }
                 if ($dumpObj.ApiContext) {
                     Write-Host "  +- API Context:      $($dumpObj.ApiContext)" -ForegroundColor Magenta
+                }
+                if ($dumpObj.BugcheckArgs -and $dumpObj.BugcheckArgs.Count -gt 0) {
+                    Write-Host "  +- Bugcheck Args:    $($dumpObj.BugcheckArgs -join ' ')" -ForegroundColor DarkGray
+                }
+                if ($dumpObj.FailureBucket) {
+                    Write-Host "  +- Failure Bucket:   $($dumpObj.FailureBucket)" -ForegroundColor Yellow
+                }
+                if ($dumpObj.ProbablyCausedBy) {
+                    Write-Host "  +- Probably Caused:  $($dumpObj.ProbablyCausedBy)" -ForegroundColor Yellow
+                }
+                if ($dumpObj.DebuggerImageName -or $dumpObj.DebuggerModuleName) {
+                    Write-Host "  +- Debugger Module:  $($dumpObj.DebuggerModuleName) ($($dumpObj.DebuggerImageName)) $($dumpObj.DebuggerSymbolName)" -ForegroundColor White
+                }
+                if ($dumpObj.RawAnalysisPath) {
+                    Write-Host "  +- Raw cdb output:   $($dumpObj.RawAnalysisPath)" -ForegroundColor DarkGray
                 }
                 if ($dumpObj.CallStack -and $dumpObj.CallStack.Count -gt 0) {
                     Write-Host "  +- Call Stack ($($dumpObj.CallStack.Count) frames):" -ForegroundColor DarkGray
@@ -680,6 +703,8 @@ $gpuHealth = Get-DcGpuDriverHealth
 $mbHealth = Get-DcMotherboardAndChipsetHealth
 $memHealth = Get-DcMemoryHealth
 $storageHealth = Get-DcStorageHealth
+$diskHealth = Get-DcPhysicalDiskHealth
+$wheaEvents = @(Get-DcWheaEvents)
 $netHealth = Get-DcNetworkHealth
 $displayHealth = Get-DcDisplayDiagnostics
 $kernelDriverHealth = Get-DcProblematicKernelDrivers
@@ -707,6 +732,25 @@ if (-not $Quiet) {
         foreach ($ld in $lowDisks) {
             Write-Host "  [i] Low free space: Drive $($ld.DeviceID) ($($ld.VolumeName)) has $($ld.FreeGb) GB free ($($ld.PercentFree)%)." -ForegroundColor Red
         }
+    }
+
+    # Physical disk health (SMART / reliability counters) and storage error events
+    foreach ($pd in $diskHealth.Disks) {
+        $wearTxt = if ($null -ne $pd.Wear) { "Wear $($pd.Wear)%" } else { "Wear n/a" }
+        $tempTxt = if ($null -ne $pd.TemperatureC) { "$($pd.TemperatureC) C" } else { "temp n/a" }
+        $errTxt = if ($pd.ReliabilityAvailable) { "Uncorrected errors R/W: $($pd.ReadErrorsUncorrected)/$($pd.WriteErrorsUncorrected)" } else { "SMART counters unavailable" }
+        $pdColor = if ($pd.HealthStatus -eq 'Healthy' -and $diskHealth.Findings.Count -eq 0) { [ConsoleColor]::White } else { [ConsoleColor]::Yellow }
+        Write-Host "  Disk        : $($pd.FriendlyName) ($($pd.SizeGb) GB $($pd.BusType)) | Health: $($pd.HealthStatus) | $wearTxt | $tempTxt | $errTxt" -ForegroundColor $pdColor
+    }
+    foreach ($df in $diskHealth.Findings) { Write-Host "  [!] Storage: $df" -ForegroundColor Red }
+    foreach ($dn in $diskHealth.Notes) { Write-Host "  [i] $dn" -ForegroundColor DarkGray }
+    if ($wheaEvents.Count -gt 0) {
+        Write-Host "  [!] WHEA hardware error events (last 30 days): $($wheaEvents.Count)" -ForegroundColor Red
+        foreach ($we in ($wheaEvents | Sort-Object TimeCreated -Descending | Select-Object -First 5)) {
+            Write-Host "      [$($we.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss'))] Event $($we.Id) ($($we.Level)): $($we.Message)" -ForegroundColor Red
+        }
+    } else {
+        Write-Host "  [ OK ] No WHEA hardware error events (CPU/memory/PCIe) in the last 30 days." -ForegroundColor Green
     }
 
     if ($pnpIssues.Count -gt 0) {
@@ -819,7 +863,29 @@ if ($InvestigateResolved) {
     Write-Host "  [i] -InvestigateResolved no longer produces cause/resolution attributions (they were inferred, not observed)." -ForegroundColor Yellow
 }
 
+# Crash forensics: per-crash timeline, non-fatal GPU/display events, involved components, cross-crash patterns, plain-English summary
+$forensics = $null
+$forensicsFile = $null
+try {
+    $hwForSummary = [PSCustomObject]@{
+        Memory        = $memHealth
+        PhysicalDisks = $diskHealth
+        WheaEvents    = $wheaEvents
+    }
+    $forensics = Get-DcCrashForensics -Dumps @($parsedDumps) -Telemetry $telemetry -Hardware $hwForSummary -UnreadableSources @($unreadableSources)
+} catch {
+    if (-not $Quiet) {
+        Write-Host "  [!] Crash forensics failed: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
 if (-not $Quiet) {
+    if ($forensics -and $forensics.PlainSummary) {
+        $plainLines = @(Format-DcPlainSummaryReport -PlainSummary $forensics.PlainSummary)
+        foreach ($pl in $plainLines) { Write-Host $pl.Text -ForegroundColor $pl.Color }
+        Write-Host ""
+    }
+
     Write-Host "========================================================================" -ForegroundColor Cyan
     Write-Host "  EVENT SUMMARY" -ForegroundColor Cyan
     Write-Host "========================================================================" -ForegroundColor Cyan
@@ -855,6 +921,23 @@ if (-not $Quiet) {
         }
     }
 
+    # Crash forensics console output & file export
+    if ($forensics) {
+        try {
+            $forensicLines = @(Format-DcCrashForensicsReport -Forensics $forensics)
+            foreach ($fl in $forensicLines) { Write-Host $fl.Text -ForegroundColor $fl.Color }
+            $forensicsFile = Join-Path $PWD ("CrashForensics_" + (Get-Date).ToString("yyyyMMdd_HHmmss") + ".txt")
+            $plainText = if ($forensics.PlainSummary) { (@(Format-DcPlainSummaryReport -PlainSummary $forensics.PlainSummary) | ForEach-Object { $_.Text }) -join "`r`n" } else { "" }
+            $forensicText = (($plainText, (($forensicLines | ForEach-Object { $_.Text }) -join "`r`n")) | Where-Object { $_ }) -join "`r`n"
+            if ($env:USERPROFILE) { $forensicText = $forensicText.Replace($env:USERPROFILE, "%USERPROFILE%") }
+            Set-Content -LiteralPath $forensicsFile -Value $forensicText -Encoding UTF8
+            Write-Host ""
+            Write-Host "  [FORENSICS] Full timeline saved to: $forensicsFile" -ForegroundColor Cyan
+            Write-Host ""
+        } catch {
+            Write-Host "  [!] Crash forensics formatting failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
     if ($leads.Count -gt 0) {
         Write-Host "  ----------------------------------------------------------------------" -ForegroundColor DarkGray
         Write-Host "  NEXT INVESTIGATION STEPS:" -ForegroundColor Green
@@ -893,6 +976,7 @@ $reportObject = [PSCustomObject]@{
     PrimaryFinding       = $findingResult.PrimaryFinding
     ResolvedHistory      = $resolvedHistory
     Dumps                = @($parsedDumps)
+    CrashForensics       = $forensics
     ZombieProcesses      = @($zombieProcesses)
     EngineLogs           = @($engineLogs)
     SteamLogs            = @($steamLogs)
@@ -906,6 +990,8 @@ $reportObject = [PSCustomObject]@{
         IsUlpsEnabled              = $gpuHealth.IsUlpsEnabled
         Motherboard                = $mbHealth
         Memory                     = $memHealth
+        PhysicalDisks              = $diskHealth
+        WheaEvents                 = $wheaEvents
         Storage                    = @($storageHealth)
         RebarStatus                = $gpuHealth.RebarStatus
         GhostGpuDrivers            = @($gpuHealth.GhostGpuDrivers)

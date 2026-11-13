@@ -23,23 +23,28 @@ function Get-DcBugCheckMeaning {
     param([string]$CodeHex)
 
     switch -Regex ($CodeHex) {
-        '0x0*116' { "VIDEO_TDR_ERROR" }
-        '0x0*119' { "VIDEO_SCHEDULER_INTERNAL_ERROR" }
-        '0x0*193' { "VIDEO_DXGKRNL_LIVEDUMP" }
-        '0x0*141' { "VIDEO_ENGINE_TDR_TIMEOUT" }
-        '0x0*117' { "VIDEO_TDR_TIMEOUT_DETECTED" }
-        '0x0*9F'  { "DRIVER_POWER_STATE_FAILURE" }
-        '0x0*3B'  { "SYSTEM_SERVICE_EXCEPTION" }
-        '0x0*50'  { "PAGE_FAULT_IN_NONPAGED_AREA" }
-        '0x0*7E'  { "SYSTEM_THREAD_EXCEPTION_NOT_HANDLED" }
-        '0x0*124' { "WHEA_UNCORRECTABLE_ERROR" }
-        '0x0*D1'  { "DRIVER_IRQL_NOT_LESS_OR_EQUAL" }
-        '0x0*133' { "DPC_WATCHDOG_VIOLATION" }
-        '0x0*139' { "KERNEL_SECURITY_CHECK_FAILURE" }
-        '0x0*1E'  { "KMODE_EXCEPTION_NOT_HANDLED" }
-        '0x0*A'   { "IRQL_NOT_LESS_OR_EQUAL" }
-        '0x0*93'  { "INVALID_KERNEL_HANDLE" }
-        default   { "Kernel BugCheck ($CodeHex)" }
+        '0x0*1A'       { "MEMORY_MANAGEMENT" }
+        '0x0*4E'       { "PFN_LIST_CORRUPT" }
+        '0x0*116'      { "VIDEO_TDR_ERROR" }
+        '0x0*119'      { "VIDEO_SCHEDULER_INTERNAL_ERROR" }
+        '0x0*193'      { "VIDEO_DXGKRNL_LIVEDUMP" }
+        '0x0*141'      { "VIDEO_ENGINE_TDR_TIMEOUT" }
+        '0x0*117'      { "VIDEO_TDR_TIMEOUT_DETECTED" }
+        '0x0*9F'       { "DRIVER_POWER_STATE_FAILURE" }
+        '0x0*3B'       { "SYSTEM_SERVICE_EXCEPTION" }
+        '0x0*50'       { "PAGE_FAULT_IN_NONPAGED_AREA" }
+        '0x10*7E'      { "SYSTEM_THREAD_EXCEPTION_NOT_HANDLED" }
+        '0x0*7E'       { "SYSTEM_THREAD_EXCEPTION_NOT_HANDLED" }
+        '0x0*124'      { "WHEA_UNCORRECTABLE_ERROR" }
+        '0x0*D1'       { "DRIVER_IRQL_NOT_LESS_OR_EQUAL" }
+        '0x0*133'      { "DPC_WATCHDOG_VIOLATION" }
+        '0x0*139'      { "KERNEL_SECURITY_CHECK_FAILURE" }
+        '0x0*1E'       { "KMODE_EXCEPTION_NOT_HANDLED" }
+        '0x0*A'        { "IRQL_NOT_LESS_OR_EQUAL" }
+        '0x0*93'       { "INVALID_KERNEL_HANDLE" }
+        '0x0*EF'       { "CRITICAL_PROCESS_DIED" }
+        '0x0*154'      { "UNEXPECTED_STORE_EXCEPTION" }
+        default        { "Kernel BugCheck ($CodeHex)" }
     }
 }
 
@@ -53,6 +58,16 @@ function Get-DcBugCheckExplanation {
     $p1Hex = if ($Param1) { $Param1.ToLower().Trim() } else { "" }
 
     switch -Regex ($cleanCode) {
+        '0x0*1a' {
+            if ($p1Hex -match '0x0*6000\b') {
+                return "Subtype 0x6000 (MEMORY_MANAGEMENT): Windows detected a corrupted page while reading compressed memory or paging data back from disk/store (MiStoreFaultComplete). This can happen from RAM/memory-controller instability, a storage/NVMe wake hiccup, or stale memory state across idle/sleep."
+            } else {
+                return "Windows kernel memory management detected an invalid page table, pool corruption, or store/page fault (MEMORY_MANAGEMENT)."
+            }
+        }
+        '0x0*4e' {
+            return "Windows detected corruption in the Physical Frame Number (PFN) table tracking RAM pages (PFN_LIST_CORRUPT). Typically points to a buggy kernel driver, corrupted page/sleep transition, or memory instability."
+        }
         '0x0*119' {
             if ($p1Hex -match '0x0*5\b') {
                 return "Subtype 0x5: The DirectX video scheduler detected that a GPU driver command submission timed out and could not be recovered by the driver scheduler."
@@ -102,8 +117,24 @@ function Get-DcBugCheckExplanation {
         '0x0*d1' {
             return "A kernel driver accessed pageable memory at an elevated Interrupt Request Level (DRIVER_IRQL_NOT_LESS_OR_EQUAL)."
         }
+        '0x10*7e' {
+            if ($p1Hex -match '0x0*c0000005\b') {
+                return "A kernel system thread hit an unhandled memory access violation (0xC0000005, SYSTEM_THREAD_EXCEPTION_NOT_HANDLED) — a driver or OS thread read or wrote an invalid pointer."
+            } else {
+                return "A system thread generated an exception that the error handler did not catch (SYSTEM_THREAD_EXCEPTION_NOT_HANDLED)."
+            }
+        }
         '0x0*7e' {
             return "A system thread generated an exception that the error handler did not catch (SYSTEM_THREAD_EXCEPTION_NOT_HANDLED)."
+        }
+        '0x0*1e' {
+            return "A kernel-mode program generated an unhandled exception (KMODE_EXCEPTION_NOT_HANDLED)."
+        }
+        '0x0*ef' {
+            return "A critical Windows process stopped unexpectedly (CRITICAL_PROCESS_DIED)."
+        }
+        '0x0*154' {
+            return "The kernel memory store caught an unexpected I/O or page decompression error (UNEXPECTED_STORE_EXCEPTION), often pointing to an NVMe/SSD wake issue or storage driver hiccup."
         }
         default {
             $m = Get-DcBugCheckMeaning $CodeHex
@@ -485,6 +516,7 @@ function Get-DcSystemTelemetry {
             }
 
             # TCP/IP Ephemeral Port Exhaustion (Tcpip Event 4266, 4227, 4231)
+            # Logged solely to UdpPortExhaustions so port pressure is not misreported as a physical NIC link drop.
             if ($e.Id -in @(4266, 4227, 4231) -and $e.ProviderName -match 'Tcpip') {
                 if ($results.UdpPortExhaustions.Count -lt 10) {
                     $results.UdpPortExhaustions.Add([PSCustomObject]@{
@@ -492,17 +524,6 @@ function Get-DcSystemTelemetry {
                         Id          = $e.Id
                         Provider    = $e.ProviderName
                         Message     = "Global TCP/IP dynamic port space exhausted (Event $($e.Id)): $msgText"
-                    })
-                }
-                if ($results.NetworkDrops.Count -lt 25) {
-                    $results.NetworkDrops.Add([PSCustomObject]@{
-                        TimeCreated   = $e.TimeCreated
-                        Id            = $e.Id
-                        Provider      = "Tcpip"
-                        InterfaceGuid = ""
-                        InterfaceName = "Global TCP/IP"
-                        Reason        = "EphemeralPortExhaustion"
-                        Message       = $msgText
                     })
                 }
             }
@@ -1577,7 +1598,24 @@ function Find-DcLatestIncident {
     } catch {}
 
     if ($candidates.Count -gt 0) {
-        $latest = $candidates | Sort-Object Timestamp -Descending | Select-Object -First 1
+        $ranked = $candidates | ForEach-Object {
+            $pri = if ($_.Source -match 'Network Adapter Link Drop|Network ARP Probe') {
+                3
+            } elseif ($_.Source -match 'Virtual Memory Exhaustion|Application Crash|PCI Bus Device Reset') {
+                2
+            } else {
+                1
+            }
+            [PSCustomObject]@{
+                Candidate = $_
+                Priority  = $pri
+            }
+        }
+        $latest = (
+            $ranked |
+                Sort-Object -Property @{ Expression = 'Priority'; Ascending = $true }, @{ Expression = { $_.Candidate.Timestamp }; Descending = $true } |
+                Select-Object -First 1
+        ).Candidate
         $now = Get-Date
         $age = $now - $latest.Timestamp
         $ageStr = if ($age.TotalMinutes -lt 60) {
@@ -2785,6 +2823,15 @@ function Resolve-DcDiagnosticFindings {
             if ($matchedDump.ApiContext) {
                 $diagParts.Add("Active stage: $($matchedDump.ApiContext)")
             }
+            if ($matchedDump.FailureBucket) {
+                $diagParts.Add("Failure bucket: $($matchedDump.FailureBucket)")
+            }
+            if ($matchedDump.ProbablyCausedBy) {
+                $diagParts.Add("Probably caused by: $($matchedDump.ProbablyCausedBy)")
+            }
+            if ($matchedDump.BugcheckArgs -and $matchedDump.BugcheckArgs.Count -gt 0) {
+                $diagParts.Add("Bugcheck args: $($matchedDump.BugcheckArgs -join ' ')")
+            }
             if ($matchedDump.CallStack.Count -gt 0) {
                 $topFrames = ($matchedDump.CallStack | Select-Object -First 4) -join ' -> '
                 $diagParts.Add("Stack trace: $topFrames")
@@ -2803,20 +2850,37 @@ function Resolve-DcDiagnosticFindings {
         $keyInfoParts.Add("Stop Code: $($bc.Code) ($($bc.Meaning))")
         if ($reportId) { $keyInfoParts.Add("Report ID: $reportId") }
 
-        # Correlate preceding events within 5 minutes
-        $preEvents = [System.Collections.Generic.List[string]]::new()
-        foreach ($nd in (& $getEvents 'NetworkDrops')) {
-            if ($nd.TimeCreated -and ($bc.TimeCreated - $nd.TimeCreated).TotalSeconds -ge 0 -and ($bc.TimeCreated - $nd.TimeCreated).TotalSeconds -le 300) {
-                $preEvents.Add("Network link drop at $($nd.TimeCreated.ToString('HH:mm:ss'))")
-            }
+        # Correlate nearby events. Event 1001 is logged AFTER the reboot, so anchor on the dump's own crash time when known.
+        $anchorTime = if ($matchedDump -and $matchedDump.CrashTime) { [datetime]$matchedDump.CrashTime } else { $bc.TimeCreated }
+        if ($matchedDump -and $matchedDump.CrashTime) {
+            $keyInfoParts.Add("Crash time (from dump): $($anchorTime.ToString('yyyy-MM-dd HH:mm:ss'))")
+            if ($matchedDump.Uptime) { $keyInfoParts.Add("Uptime at crash: $($matchedDump.Uptime)") }
         }
-        foreach ($dh in (& $getEvents 'DisplayHotplugEvents')) {
-            if ($dh.TimeCreated -and ($bc.TimeCreated - $dh.TimeCreated).TotalSeconds -ge 0 -and ($bc.TimeCreated - $dh.TimeCreated).TotalSeconds -le 300) {
-                $preEvents.Add("Display disconnect at $($dh.TimeCreated.ToString('HH:mm:ss'))")
+        $preEvents = [System.Collections.Generic.List[string]]::new()
+        $postEvents = [System.Collections.Generic.List[string]]::new()
+        $nearList = @(
+            @{ Label = 'Network link drop';   Events = @(& $getEvents 'NetworkDrops') },
+            @{ Label = 'Display disconnect';  Events = @(& $getEvents 'DisplayHotplugEvents') }
+        )
+        foreach ($grp in $nearList) {
+            foreach ($ev in $grp.Events) {
+                if (-not $ev.TimeCreated) { continue }
+                $delta = ($anchorTime - $ev.TimeCreated).TotalSeconds   # positive = event happened before the crash
+                if (-not ($matchedDump -and $matchedDump.CrashTime) -and [math]::Abs($delta) -le 300) {
+                    # Crash time unknown (dump unreadable): the anchor is the post-reboot log time, so before/after cannot be determined.
+                    $postEvents.Add("$($grp.Label) at $($ev.TimeCreated.ToString('HH:mm:ss')) (logged around the reboot; exact crash time unknown, so it cannot be classed as before or after the crash)")
+                } elseif ($delta -ge 0 -and $delta -le 300) {
+                    $preEvents.Add("$($grp.Label) at $($ev.TimeCreated.ToString('HH:mm:ss')) ($([int]$delta)s before crash)")
+                } elseif ($delta -lt 0 -and $delta -ge -180) {
+                    $postEvents.Add("$($grp.Label) at $($ev.TimeCreated.ToString('HH:mm:ss')) ($([int](-$delta))s AFTER crash - likely a consequence of the crash/reboot)")
+                }
             }
         }
         if ($preEvents.Count -gt 0) {
             $keyInfoParts.Add("Preceding events: " + ($preEvents -join ', '))
+        }
+        if ($postEvents.Count -gt 0) {
+            $keyInfoParts.Add("Other nearby events: " + ($postEvents -join ', '))
         }
         $keyInfoText = $keyInfoParts -join ' | '
 
@@ -3055,7 +3119,11 @@ function Resolve-DcDiagnosticFindings {
         $dumpPath = if ($bc.Message -match 'A dump was saved in:\s*(\S+\.dmp)') { $Matches[1] } else { $null }
         $matchedDump = if ($dumpPath) { $ParsedDumps | Where-Object { $_.FileName -ieq (Split-Path $dumpPath -Leaf) } | Select-Object -First 1 } else { $null }
         if ($matchedDump -and $matchedDump.CdbInspected) {
-            $diagLead = "Bugcheck $($bc.Code) ($($bc.Meaning)): Call stack identified $($matchedDump.FaultingIP). Stage: $($matchedDump.ApiContext)."
+            $diagLead = "Bugcheck $($bc.Code) ($($bc.Meaning)): Call stack identified $($matchedDump.FaultingIP)."
+            if ($matchedDump.ApiContext) { $diagLead += " Stage: $($matchedDump.ApiContext)." }
+            if ($matchedDump.FailureBucket) { $diagLead += " Failure bucket: $($matchedDump.FailureBucket)." }
+            if ($matchedDump.ProbablyCausedBy) { $diagLead += " Probably caused by: $($matchedDump.ProbablyCausedBy)." }
+            if ($matchedDump.RawAnalysisPath) { $diagLead += " Raw cdb output: $($matchedDump.RawAnalysisPath)." }
             & $addLead $diagLead "Dump analysis of $($matchedDump.FileName)" 'Direct'
         } else {
             $where = if ($dumpPath) { "Dump saved at $dumpPath." } else { 'No dump file named in event log.' }

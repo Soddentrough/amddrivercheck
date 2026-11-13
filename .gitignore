@@ -1,6 +1,7 @@
 # DriverCheck generated reports and bundles
 CrashReport_*.html
 CrashReport_*.json
+CrashForensics_*.txt
 DriverCheck_SupportBundle_*.zip
 
 # Backup files created by Clean-GameConfig
@@ -26,3 +27,5 @@ __pycache__/
 Thumbs.db
 .vscode/
 .idea/
+
+dump-analysis/

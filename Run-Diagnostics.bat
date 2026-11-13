@@ -46,20 +46,43 @@ goto menu
 :latest_scan
 cls
 echo Checking for recent crashes and creating your report...
-PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Analyze-LatestCrash.ps1" -ExportHtml -OpenReport
+call :run_with_optional_admin "-ExportHtml -OpenReport"
 goto finish
 
 :history_scan
 cls
 echo Checking full crash history and creating your report...
-PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Analyze-LatestCrash.ps1" -AllIncidents -ExportHtml -OpenReport
+call :run_with_optional_admin "-AllIncidents -ExportHtml -OpenReport"
 goto finish
 
 :export_bundle
 cls
 echo Running crash check and saving support ZIP...
-PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Analyze-LatestCrash.ps1" -ExportZip -ExportHtml -OpenReport
+call :run_with_optional_admin "-ExportZip -ExportHtml -OpenReport"
 goto finish
+
+:run_with_optional_admin
+set "DC_ARGS=%~1"
+net session >nul 2>&1
+if not errorlevel 1 (
+    PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Analyze-LatestCrash.ps1" %DC_ARGS%
+    exit /b
+)
+if exist "%SystemRoot%\Minidump" (
+    echo.
+    echo [i] C:\WINDOWS\Minidump exists, which requires Administrator access to read.
+    echo     Without Administrator access, Event Logs still work, but Blue Screen .dmp files are skipped.
+    set "elevate="
+    set /p elevate="Run this scan as Administrator to read Windows crash dumps? [Y/n]: "
+    if "!elevate!"=="" set "elevate=Y"
+    if /i "!elevate!"=="Y" (
+        echo Launching elevated PowerShell window...
+        PowerShell.exe -NoProfile -Command "Start-Process PowerShell.exe -Verb RunAs -Wait -ArgumentList '-NoProfile -ExecutionPolicy Bypass -NoExit -Command \"Set-Location -LiteralPath ''%~dp0''; & ''.\Analyze-LatestCrash.ps1'' %DC_ARGS%\"'"
+        exit /b
+    )
+)
+PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Analyze-LatestCrash.ps1" %DC_ARGS%
+exit /b
 
 :pnp_audit
 cls

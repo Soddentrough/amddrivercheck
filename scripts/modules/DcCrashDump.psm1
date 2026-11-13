@@ -22,14 +22,13 @@ function Get-DcDumpDirectories {
     $winMinidump = Join-Path $env:SystemRoot "Minidump"
     try { if (Test-Path $winMinidump -ErrorAction SilentlyContinue) { $dirs.Add($winMinidump) } } catch {}
 
-    $liveWatchdog = Join-Path $env:SystemRoot "LiveKernelReports\WATCHDOG"
-    try { if (Test-Path $liveWatchdog -ErrorAction SilentlyContinue) { $dirs.Add($liveWatchdog) } } catch {}
     $liveKernelReports = Join-Path $env:SystemRoot "LiveKernelReports"
     try {
         if (Test-Path $liveKernelReports -ErrorAction SilentlyContinue) {
             $dirs.Add($liveKernelReports)
-            $lkrSubDirs = Get-ChildItem -Path $liveKernelReports -Directory -ErrorAction SilentlyContinue
-            foreach ($sd in $lkrSubDirs) { $dirs.Add($sd.FullName) }
+        } else {
+            $liveWatchdog = Join-Path $env:SystemRoot "LiveKernelReports\WATCHDOG"
+            if (Test-Path $liveWatchdog -ErrorAction SilentlyContinue) { $dirs.Add($liveWatchdog) }
         }
     } catch {}
 
@@ -128,7 +127,31 @@ function Get-DcCrashDumps {
         }
     }
 
-    $sorted = $foundFiles | Sort-Object LastWriteTime -Descending
+    # Deduplicate by canonical path, and deduplicate exact file copies (e.g. a minidump copied into $PWD),
+    # preferring Windows system dump directories over local working-directory copies.
+    $uniqueByPath = @{}
+    foreach ($f in $foundFiles) {
+        $canon = try { [System.IO.Path]::GetFullPath($f.FullName).ToLowerInvariant() } catch { $f.FullName.ToLowerInvariant() }
+        if (-not $uniqueByPath.ContainsKey($canon)) { $uniqueByPath[$canon] = $f }
+    }
+
+    $winRootNorm = if ($env:SystemRoot) { $env:SystemRoot.ToLowerInvariant() } else { "c:\windows" }
+    $uniqueByIdentity = @{}
+    foreach ($f in $uniqueByPath.Values) {
+        $idKey = "{0}|{1}|{2}" -f $f.Name.ToLowerInvariant(), $f.Length, $f.LastWriteTimeUtc.ToString("yyyyMMddHHmmss")
+        if (-not $uniqueByIdentity.ContainsKey($idKey)) {
+            $uniqueByIdentity[$idKey] = $f
+        } else {
+            $existing = $uniqueByIdentity[$idKey]
+            $newIsSys = $f.FullName.ToLowerInvariant().StartsWith($winRootNorm)
+            $oldIsSys = $existing.FullName.ToLowerInvariant().StartsWith($winRootNorm)
+            if ($newIsSys -and -not $oldIsSys) {
+                $uniqueByIdentity[$idKey] = $f
+            }
+        }
+    }
+
+    $sorted = $uniqueByIdentity.Values | Sort-Object LastWriteTime -Descending
     if ($LatestOnly -and $sorted) {
         return @($sorted | Select-Object -First 1)
     }
@@ -226,36 +249,61 @@ function Invoke-DcDumpStackTrace {
         [Parameter(Mandatory = $true)]
         [string]$DumpPath,
         [string]$CdbPath = $null,
-        [int]$TimeoutSeconds = 8
+        [int]$TimeoutSeconds = 40,
+        [string]$RawOutputDir = $null
     )
+
+    $emptyResult = [PSCustomObject]@{
+        CallStack       = @()
+        ApiContext      = $null
+        BugcheckCode    = $null
+        BugcheckArgs    = @()
+        FailureBucket   = $null
+        CrashTime       = $null
+        Uptime          = $null
+        AnalysisDetail  = $null
+        ProbablyCausedBy = $null
+        ModuleName      = $null
+        ImageName       = $null
+        SymbolName      = $null
+        RawOutputPath   = $null
+        CdbInspected    = $false
+    }
 
     $resolvedCdb = if ($CdbPath) { $CdbPath } else { Find-DcCdbPath }
     if (-not $resolvedCdb -or -not (Test-Path -LiteralPath $resolvedCdb)) {
-        return [PSCustomObject]@{
-            CallStack    = @()
-            ApiContext   = $null
-            CdbInspected = $false
-        }
+        return $emptyResult
     }
 
     $isKernel = ($DumpPath -match '(?i)SystemRoot|Windows\\(Minidump|LiveKernelReports)|MEMORY\.DMP|WATCHDOG|\d{6}-\d{5}-\d{2}\.dmp')
 
-    $symArg = ""
+    # Symbols: local cache plus Microsoft symbol server. Set DRIVERCHECK_OFFLINE_SYMBOLS=1 to use the local cache only.
     $localSym = Join-Path $PSScriptRoot "..\..\symcache"
-    if (Test-Path $localSym) {
-        $symArg = "-y `"cache*$localSym`""
-    }
+    if (-not (Test-Path $localSym)) { New-Item -ItemType Directory -Path $localSym -Force -ErrorAction SilentlyContinue | Out-Null }
+    $symPath = if ($env:DRIVERCHECK_OFFLINE_SYMBOLS -eq '1') { "cache*$localSym" } else { "srv*$localSym*https://msdl.microsoft.com/download/symbols" }
+    $symArg = "-y `"$symPath`""
 
-    $cdbArgs = if ($isKernel) {
-        if ($symArg) { "-z `"$DumpPath`" $symArg -c `".bugcheck; k 25; q`"" } else { "-z `"$DumpPath`" -c `".bugcheck; k 25; q`"" }
+    $cdbCommands = if ($isKernel) {
+        ".bugcheck; .echo ===ANALYZE===; !analyze -v; .echo ===STACK===; k 25; .echo ===ENDSTACK===; q"
     } else {
-        if ($symArg) { "-z `"$DumpPath`" $symArg -c `".ecxr; k 25; q`"" } else { "-z `"$DumpPath`" -c `".ecxr; k 25; q`"" }
+        ".ecxr; .echo ===STACK===; k 25; .echo ===ENDSTACK===; q"
     }
+    $cdbArgs = "-z `"$DumpPath`" $symArg -c `"$cdbCommands`""
 
     $frames = [System.Collections.Generic.List[string]]::new()
     $apiContext = $null
     $kernelBugcheck = $null
     $kernelBugcheckArgs = @()
+    $failureBucket = $null
+    $probablyCausedBy = $null
+    $moduleName = $null
+    $imageName = $null
+    $symbolName = $null
+    $rawPath = $null
+    $crashTime = $null
+    $uptimeText = $null
+    $analysisDetail = $null
+    $out = ""
 
     try {
         $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -267,34 +315,105 @@ function Invoke-DcDumpStackTrace {
         $psi.CreateNoWindow = $true
 
         $proc = [System.Diagnostics.Process]::Start($psi)
-        $out = $proc.StandardOutput.ReadToEnd()
-        $proc.WaitForExit($TimeoutSeconds * 1000)
-
-        $lines = $out -split '\r?\n'
-        $inStack = $false
-        foreach ($l in $lines) {
-            if ($l -match 'Bugcheck code\s+([0-9a-fA-F]+)') {
-                $kernelBugcheck = "0x$($Matches[1])"
-            }
-            if ($l -match 'Arguments\s+([0-9a-fA-F`\s]+)') {
-                $kernelBugcheckArgs = @($Matches[1].Trim() -split '\s+' | ForEach-Object { "0x$($_ -replace '`','')" })
-            }
-            if ($l -match '^\s*Child-SP|\s*RetAddr\s+:\s+Args|#\s+Child-SP') {
-                $inStack = $true
-                continue
-            }
-            if ($inStack) {
-                if ($l -match '^(?:[0-9a-fA-F]+\s+)?([0-9a-fA-F`]+)\s+([0-9a-fA-F`]+)\s+(.+)$') {
-                    $frame = $Matches[3].Trim()
-                    $frames.Add($frame)
-                } elseif ($l -match '^quit:' -or ($frames.Count -gt 0 -and $l -match '^\s*$')) {
-                    $inStack = $false
-                }
-            }
+        $outTask = $proc.StandardOutput.ReadToEndAsync()
+        $errTask = $proc.StandardError.ReadToEndAsync()
+        if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $proc.Kill() } catch {}
         }
+        $out = $outTask.GetAwaiter().GetResult()
     } catch {}
 
+    if ($out) {
+        # Persist raw debugger output so it can be shared / reviewed.
+        try {
+            if (-not $RawOutputDir) { $RawOutputDir = Join-Path $PSScriptRoot "..\..\dump-analysis" }
+            if (-not (Test-Path $RawOutputDir)) { New-Item -ItemType Directory -Path $RawOutputDir -Force | Out-Null }
+            $rawPath = Join-Path $RawOutputDir ("{0}.cdb.txt" -f [System.IO.Path]::GetFileName($DumpPath))
+            Set-Content -LiteralPath $rawPath -Value $out -Encoding UTF8
+        } catch { $rawPath = $null }
+
+        # Markers must be on their own line (cdb also echoes the command string containing them).
+        $mkIdx = {
+            param($name)
+            $m = [regex]::Match($out, "(?m)^$([regex]::Escape($name))\s*$")
+            if ($m.Success) { $m.Index } else { -1 }
+        }
+        $analyzeIdx = & $mkIdx '===ANALYZE==='
+        $stackIdx = & $mkIdx '===STACK==='
+        $endIdx = & $mkIdx '===ENDSTACK==='
+
+        $headText = if ($analyzeIdx -ge 0) { $out.Substring(0, $analyzeIdx) } elseif ($stackIdx -ge 0) { $out.Substring(0, $stackIdx) } else { $out }
+        $analyzeText = if ($analyzeIdx -ge 0 -and $stackIdx -gt $analyzeIdx) { $out.Substring($analyzeIdx, $stackIdx - $analyzeIdx) } else { "" }
+        $stackText = if ($stackIdx -ge 0) {
+            if ($endIdx -gt $stackIdx) { $out.Substring($stackIdx, $endIdx - $stackIdx) } else { $out.Substring($stackIdx) }
+        } else { "" }
+
+        foreach ($l in ($headText -split '\r?\n')) {
+            if ($l -match 'Bugcheck code\s+([0-9a-fA-F]+)') { $kernelBugcheck = "0x$($Matches[1])" }
+            if ($l -match '^Debug session time:\s+(\w{3} \w{3}\s+\d+ \d{2}:\d{2}:\d{2}(?:\.\d+)? \d{4})') {
+                $dt = [datetime]::MinValue
+                $s = ($Matches[1] -replace '\s+', ' ' -replace '(\.\d+)', '')
+                if ([datetime]::TryParseExact($s, 'ddd MMM d HH:mm:ss yyyy', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$dt)) { $crashTime = $dt }
+            }
+            if ($l -match '^System Uptime:\s+(.+?)\s*$') { $uptimeText = $Matches[1] }
+            if ($l -match '^Arguments\s+([0-9a-fA-F`\s]+)') {
+                $kernelBugcheckArgs = @($Matches[1].Trim() -split '\s+' | ForEach-Object { "0x$($_ -replace '`','')" })
+            }
+        }
+
+        foreach ($l in ($analyzeText -split '\r?\n')) {
+            if (-not $failureBucket -and $l -match '^FAILURE_BUCKET_ID:\s+(.+?)\s*$') { $failureBucket = $Matches[1] }
+            elseif (-not $probablyCausedBy -and $l -match '^PROBABLY_CAUSED_BY:\s+(.+?)\s*$') { $probablyCausedBy = $Matches[1] }
+            elseif (-not $moduleName -and $l -match '^MODULE_NAME:\s+(\S+)') { $moduleName = $Matches[1] }
+            elseif (-not $imageName -and $l -match '^IMAGE_NAME:\s+(\S+)') { $imageName = $Matches[1] }
+            elseif (-not $symbolName -and $l -match '^SYMBOL_NAME:\s+(.+?)\s*$') { $symbolName = $Matches[1] }
+        }
+
+        # Bugcheck name/description, argument meanings and process context straight from the debugger's analysis.
+        $bcName = $null; $bcDesc = New-Object System.Collections.Generic.List[string]; $argDescs = New-Object System.Collections.Generic.List[object]; $procName = $null
+        $aLines = $analyzeText -split '\r?\n'
+        $hdr = -1
+        for ($i = 0; $i -lt $aLines.Count; $i++) { if ($aLines[$i] -match 'Bugcheck Analysis') { $hdr = $i; break } }
+        if ($hdr -ge 0) {
+            $j = $hdr + 1
+            while ($j -lt $aLines.Count -and ($aLines[$j] -match '^\*+\s*$' -or $aLines[$j] -match '^\*\s*\*?\s*$' -or [string]::IsNullOrWhiteSpace($aLines[$j]))) { $j++ }
+            if ($j -lt $aLines.Count) { $bcName = $aLines[$j].Trim(); $j++ }
+            while ($j -lt $aLines.Count -and $aLines[$j] -notmatch '^Arguments:') { if ($aLines[$j].Trim()) { $bcDesc.Add($aLines[$j].Trim()) }; $j++ }
+        }
+        foreach ($l in $aLines) {
+            if ($l -match '^Arg([1-4]):\s*([0-9a-fA-F`]+)(?:,\s*(.*))?$') {
+                if (@($argDescs | Where-Object { $_.Index -eq [int]$Matches[1] }).Count -eq 0) {
+                    $argDescs.Add([PSCustomObject]@{ Index = [int]$Matches[1]; Value = "0x$($Matches[2])"; Description = $(if ($Matches[3]) { $Matches[3].Trim() } else { '' }) })
+                }
+            }
+            if (-not $procName -and $l -match '^PROCESS_NAME:\s+(.+?)\s*$') { $procName = $Matches[1] }
+        }
+        $analysisDetail = [PSCustomObject]@{
+            BugcheckName = $bcName
+            Description  = [string]::Join(' ', $bcDesc.ToArray())
+            ArgList      = $argDescs.ToArray()
+            ProcessName  = $procName
+        }
+        # If the kernel image/symbols could not be loaded, !analyze reports a bogus WRONG_SYMBOLS bucket. Don't present that as a finding.
+        if ($failureBucket -match 'WRONG_SYMBOLS' -or $imageName -match 'wrong\.symbols') {
+            $failureBucket = $null
+            $moduleName = $null
+            $imageName = $null
+            $symbolName = $null
+            $probablyCausedBy = "Undetermined - ntoskrnl symbols/image could not be loaded (symbol server unreachable or build not published); 'nt' frame names are unreliable"
+        }
+
+        $inStack = $false
+        foreach ($l in ($stackText -split '\r?\n')) {
+            if ($l -match 'Child-SP|RetAddr') { $inStack = $true; continue }
+            if ($inStack -and $l -match '^(?:[0-9a-fA-F]+\s+)?([0-9a-fA-F`]+)\s+([0-9a-fA-F`]+)\s+(.+)$') {
+                $frames.Add($Matches[3].Trim())
+            }
+        }
+    }
+
     $allFramesText = $frames -join "`n"
+    $hay = $allFramesText + "`n" + $moduleName + "`n" + $imageName + "`n" + $failureBucket
     if ($allFramesText -match '(?i)CreateComputePipelines') {
         $apiContext = "Vulkan Compute Pipeline Creation / Shader Compilation (vkCreateComputePipelines)"
     } elseif ($allFramesText -match '(?i)CreateGraphicsPipelines') {
@@ -311,10 +430,11 @@ function Invoke-DcDumpStackTrace {
         $apiContext = "Compute Shader Dispatch Execution"
     } elseif ($allFramesText -match '(?i)vkCmdDraw|DrawIndexedInstanced|DrawInstanced') {
         $apiContext = "Geometry Draw Call Dispatch"
-    } elseif ($allFramesText -match '(?i)VidSchiResetEngine|VidSchiSendToExecutionQueue|KeBugCheckEx|watchdog!WdLogSingleEntry|dxgmms2') {
-        if ($allFramesText -match 'amdkmdag') {
+    } elseif ($hay -match '(?i)VidSchiResetEngine|VidSchiSendToExecutionQueue|dxgmms2|dxgkrnl|amdkmdag|nvlddmkm') {
+        # Only label as a GPU scheduler problem when GPU-stack modules actually appear (not merely KeBugCheckEx).
+        if ($hay -match 'amdkmdag') {
             $apiContext = "AMD Kernel Display Driver (amdkmdag.sys) GPU Scheduler Timeout / Reset"
-        } elseif ($allFramesText -match 'nvlddmkm') {
+        } elseif ($hay -match 'nvlddmkm') {
             $apiContext = "NVIDIA Kernel Display Driver (nvlddmkm.sys) GPU Scheduler Timeout / Reset"
         } else {
             $apiContext = "DirectX Graphics Kernel Scheduler Watchdog Timeout (dxgkrnl / dxgmms2)"
@@ -326,6 +446,15 @@ function Invoke-DcDumpStackTrace {
         ApiContext       = $apiContext
         BugcheckCode     = $kernelBugcheck
         BugcheckArgs     = @($kernelBugcheckArgs)
+        FailureBucket    = $failureBucket
+        CrashTime        = $crashTime
+        Uptime           = $uptimeText
+        AnalysisDetail   = $analysisDetail
+        ProbablyCausedBy = $probablyCausedBy
+        ModuleName       = $moduleName
+        ImageName        = $imageName
+        SymbolName       = $symbolName
+        RawOutputPath    = $rawPath
         CdbInspected     = ($frames.Count -gt 0 -or $null -ne $kernelBugcheck)
     }
 }
@@ -369,6 +498,16 @@ function Read-DcMinidump {
         IsKernelDump          = ($fileInfo.DirectoryName -match '(?i)SystemRoot|Windows\\(Minidump|LiveKernelReports)' -or $fileInfo.Name -match '(?i)MEMORY\.DMP|WATCHDOG|^\d{6}-\d{5}-\d{2}\.dmp$')
         CallStack             = @()
         ApiContext            = $null
+        BugcheckArgs          = @()
+        FailureBucket         = $null
+        CrashTime             = $null
+        Uptime                = $null
+        AnalysisDetail        = $null
+        ProbablyCausedBy      = $null
+        DebuggerModuleName    = $null
+        DebuggerImageName     = $null
+        DebuggerSymbolName    = $null
+        RawAnalysisPath       = $null
         CdbInspected          = $false
     }
 
@@ -408,6 +547,15 @@ function Read-DcMinidump {
                         $result.CallStack = @($stackInfo.CallStack)
                         $result.ApiContext = $stackInfo.ApiContext
                         $result.CdbInspected = $true
+                        $result.FailureBucket = $stackInfo.FailureBucket
+                        $result.CrashTime = $stackInfo.CrashTime
+                        $result.Uptime = $stackInfo.Uptime
+                        $result.AnalysisDetail = $stackInfo.AnalysisDetail
+                        $result.ProbablyCausedBy = $stackInfo.ProbablyCausedBy
+                        $result.DebuggerModuleName = $stackInfo.ModuleName
+                        $result.DebuggerImageName = $stackInfo.ImageName
+                        $result.DebuggerSymbolName = $stackInfo.SymbolName
+                        $result.RawAnalysisPath = $stackInfo.RawOutputPath
                         if ($stackInfo.BugcheckCode) {
                             $result.ExceptionCode = $stackInfo.BugcheckCode
                             $result.ExceptionMeaning = Get-DcBugCheckMeaning $stackInfo.BugcheckCode
@@ -739,7 +887,17 @@ function Read-DcMinidump {
                 $result.CallStack = @($stackInfo.CallStack)
                 $result.ApiContext = $stackInfo.ApiContext
                 $result.CdbInspected = $true
+                $result.FailureBucket = $stackInfo.FailureBucket
+                        $result.CrashTime = $stackInfo.CrashTime
+                        $result.Uptime = $stackInfo.Uptime
+                        $result.AnalysisDetail = $stackInfo.AnalysisDetail
+                $result.ProbablyCausedBy = $stackInfo.ProbablyCausedBy
+                $result.DebuggerModuleName = $stackInfo.ModuleName
+                $result.DebuggerImageName = $stackInfo.ImageName
+                $result.DebuggerSymbolName = $stackInfo.SymbolName
+                $result.RawAnalysisPath = $stackInfo.RawOutputPath
                 if (-not $result.ExceptionCode -and $stackInfo.BugcheckCode) {
+                    $result.BugcheckArgs = $stackInfo.BugcheckArgs
                     $result.ExceptionCode = $stackInfo.BugcheckCode
                     $result.ExceptionMeaning = Get-DcBugCheckMeaning $stackInfo.BugcheckCode
                     $result.IsKernelDump = $true

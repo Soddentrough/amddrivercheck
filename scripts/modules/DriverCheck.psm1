@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     DriverCheck Unified PowerShell Root Module
 .DESCRIPTION
@@ -12,7 +12,8 @@ $subModules = @(
     "DcSystemTelemetry.psm1",
     "DcHardwareHealth.psm1",
     "DcRemediation.psm1",
-    "DcReportGenerator.psm1"
+    "DcReportGenerator.psm1",
+    "DcCrashForensics.psm1"
 )
 
 foreach ($modFile in $subModules) {
