@@ -227,7 +227,10 @@ function Get-DcCrashForensics {
         [int]$PreWindowMinutes = 20,
         $Telemetry = $null,
         $Hardware = $null,
-        $UnreadableSources = @()
+        $UnreadableSources = @(),
+        [object[]]$EngineLogs = @(),
+        [object[]]$SteamLogs = @(),
+        [object[]]$SteamGameSessions = @()
     )
 
     $crashList = @(Get-DcCrashList -Days $LookbackDays)
@@ -245,7 +248,7 @@ function Get-DcCrashForensics {
         $prevBoot = if ($osStart) { $bootStarts | Where-Object { $_ -lt $osStart } | Select-Object -Last 1 } else { $null }
 
         $dumpName = if ($c.DumpPath) { Split-Path $c.DumpPath -Leaf } else { $null }
-        $dump = if ($dumpName) { @($Dumps | Where-Object { $_.FileName -ieq $dumpName } | Select-Object -First 1)[0] } else { $null }
+        $dump = if ($dumpName) { @($Dumps | Where-Object { $_ -and -not ($_.PSObject.Properties['IsLiveKernelReport'] -and $_.IsLiveKernelReport) -and $_.FileName -ieq $dumpName } | Select-Object -First 1)[0] } else { $null }
         $crashTime = $null
         $crashTimeSource = 'unknown'
         if ($dump -and $dump.CrashTime) { $crashTime = [datetime]$dump.CrashTime; $crashTimeSource = 'dump' }
@@ -388,20 +391,24 @@ function Get-DcCrashForensics {
     # Cross-crash precursor analysis (crashes with a known crash time only)
     $patterns = Get-DcCrashPatterns -Items @($items | Where-Object { $_.CrashTime }) -LookbackDays $LookbackDays
 
+    # Evidence-backed cause separation (Driver vs App/Overlay vs Shader/Workload vs OS/Hardware vs Unattributed)
+    $attributions = @(Resolve-DcIncidentAttribution -Dumps $Dumps -Telemetry $Telemetry -Hardware $Hardware -ForensicsCrashes $items -EngineLogs $EngineLogs -SteamLogs $SteamLogs -SteamGameSessions $SteamGameSessions)
+
     $forensics = [PSCustomObject]@{
-        Crashes           = @($items)
-        Detailed          = [math]::Min($MaxDetailed, $items.Count)
-        Patterns          = $patterns
-        LiveKernelHistory = $liveKernel
-        GpuDisplayEvents  = $gpuDisplayEvents
-        PlainSummary      = $null
+        Crashes              = @($items)
+        Detailed             = [math]::Min($MaxDetailed, $items.Count)
+        Patterns             = $patterns
+        LiveKernelHistory    = $liveKernel
+        GpuDisplayEvents     = $gpuDisplayEvents
+        IncidentAttributions = @($attributions)
+        PlainSummary         = $null
     }
-    $forensics.PlainSummary = Get-DcPlainEnglishSummary -Forensics $forensics -Dumps $Dumps -Telemetry $Telemetry -Hardware $Hardware -UnreadableSources $UnreadableSources
+    $forensics.PlainSummary = Get-DcPlainEnglishSummary -Forensics $forensics -Dumps $Dumps -Telemetry $Telemetry -Hardware $Hardware -UnreadableSources $UnreadableSources -Attributions $attributions
     return $forensics
 }
 
 function Get-DcStopCodePlainEnglish {
-    param($Code, $Bucket, $ModuleName, $ImageName, $Args)
+    param($Code, $Bucket, $ModuleName, $ImageName, $Args, $HardwareId = $null, $HardwareDeviceName = $null)
 
     $c = if ($Code) { $Code.ToLower().Trim() } else { '' }
     $b = if ($Bucket) { [string]$Bucket } else { '' }
@@ -418,6 +425,11 @@ function Get-DcStopCodePlainEnglish {
         return 'RAM Page-Tracking Corruption (0x4E, PFN_LIST_CORRUPT): Windows'' internal list tracking physical RAM pages became inconsistent (often a bad sleep transition, unstable RAM/XMP/EXPO timing, or driver bug).'
     }
     if ($c -match '0x0*9f\b') {
+        if ($HardwareDeviceName -or $HardwareId) {
+            $hwDesc = if ($HardwareDeviceName -and $HardwareId) { "$HardwareDeviceName ($HardwareId)" } elseif ($HardwareDeviceName) { "$HardwareDeviceName" } else { "$HardwareId" }
+            $modSuffix = if ($m) { " via $m" } else { '' }
+            return "Device Power-State Hang (0x9F blaming $hwDesc$modSuffix): The PCI/hardware device failed to complete a sleep, idle, or wake power transition in time and triggered a BugCheck reboot."
+        }
         if ($m -match 'HDAudBus') {
             return 'Device Power-State Hang (0x9F blaming HDAudBus.sys): Windows waited too long for the High Definition Audio Bus Driver to finish an idle/sleep power transition and triggered a BugCheck reboot.'
         }
@@ -433,7 +445,23 @@ function Get-DcStopCodePlainEnglish {
         return 'Kernel System Thread Exception (0x7E / 0x1000007E): A background Windows kernel thread hit an unhandled RAM access or driver fault.'
     }
     if ($c -match '0x0*119\b') {
-        return 'Graphics Scheduler Crash (0x119, dxgmms2): Windows'' DirectX graphics scheduler timed out waiting for a GPU command (subtype ' + $(if ($a0) { $a0 } else { 'unknown' }) + ').'
+        $subHex = $a0
+        if (-not $subHex -and $b -match '^0x0*119_([0-9a-fA-F]+)_') {
+            $subHex = "0x$($Matches[1])"
+        }
+        $subDesc = if ($subHex -match '^0x0*1$') { '0x1: invalid fence' }
+                   elseif ($subHex -match '^0x0*2$') { '0x2: failed command' }
+                   elseif ($subHex -match '^0x0*3$') { '0x3: unable to schedule DMA buffer' }
+                   elseif ($subHex -match '^0x0*5$') { '0x5: driver faulted system command' }
+                   elseif ($subHex -match '^0x0*400$') { '0x400: invalid video memory operation' }
+                   elseif ($subHex) { $subHex }
+                   else { 'unknown' }
+        $blk = if ($m -and $m -notin @('nt', 'ntkrnlmp', 'dxgmms2', 'watchdog')) { " blaming $m" } else { '' }
+        return "Graphics Scheduler Crash (0x119$blk): Windows' DirectX graphics scheduler timed out waiting for a GPU command (subtype $subDesc)."
+    }
+    if ($c -match '0x0*15e\b') {
+        $blk = if ($m) { " blaming $m" } elseif ($ImageName) { " blaming $ImageName" } else { '' }
+        return "Non-Fatal NDIS Network Driver Live Dump (0x15E$blk): Windows recorded a network miniport buffer leak or stall without rebooting."
     }
     if ($c -match '0x0*116\b') {
         return 'Unrecoverable GPU Driver Hang (0x116): Your graphics card stopped responding and Windows'' automatic GPU driver reset failed, causing a full restart.'
@@ -600,6 +628,890 @@ function Get-DcNonFatalGpuAndDisplayEvents {
     return @($grouped)
 }
 
+function Format-DcDriverInstallTiming {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [datetime]$IncidentTime,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$InstallTime,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DriverLabel,
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaxWindowDays = 30
+    )
+
+    $span = $IncidentTime - $InstallTime
+    if ([Math]::Abs($span.TotalDays) -gt $MaxWindowDays) {
+        return $null
+    }
+
+    $installStamp = $InstallTime.ToString('yyyy-MM-dd HH:mm')
+    if ($span.TotalSeconds -ge 0) {
+        $calDays = [int]($IncidentTime.Date - $InstallTime.Date).TotalDays
+        if ($span.TotalMinutes -lt 60) {
+            $mins = [Math]::Max(1, [int][Math]::Round($span.TotalMinutes))
+            $phrase = "$mins minute$(if ($mins -ne 1) { 's' }) after $DriverLabel was installed ($installStamp)"
+        } elseif ($calDays -eq 0 -or $span.TotalHours -lt 12) {
+            $hrs = [Math]::Max(1, [int][Math]::Round($span.TotalHours))
+            $phrase = "$hrs hour$(if ($hrs -ne 1) { 's' }) after $DriverLabel was installed ($installStamp)"
+        } elseif ($calDays -eq 1) {
+            $phrase = "the day after $DriverLabel was installed ($installStamp)"
+        } else {
+            $phrase = "$calDays days after $DriverLabel was installed ($installStamp)"
+        }
+
+        return [PSCustomObject]@{
+            Relation     = 'AfterInstall'
+            Phrase       = $phrase
+            DeltaHours   = [math]::Round($span.TotalHours, 1)
+            CalendarDays = $calDays
+            InstallStamp = $installStamp
+            DriverLabel  = $DriverLabel
+        }
+    }
+
+    $beforeSpan = $InstallTime - $IncidentTime
+    $calDaysBefore = [int]($InstallTime.Date - $IncidentTime.Date).TotalDays
+    if ($beforeSpan.TotalMinutes -lt 60) {
+        $mins = [Math]::Max(1, [int][Math]::Round($beforeSpan.TotalMinutes))
+        $lead = "$mins minute$(if ($mins -ne 1) { 's' }) before"
+    } elseif ($calDaysBefore -eq 0 -or $beforeSpan.TotalHours -lt 12) {
+        $hrs = [Math]::Max(1, [int][Math]::Round($beforeSpan.TotalHours))
+        $lead = "$hrs hour$(if ($hrs -ne 1) { 's' }) before"
+    } elseif ($calDaysBefore -eq 1) {
+        $lead = "the day before"
+    } else {
+        $lead = "$calDaysBefore days before"
+    }
+
+    return [PSCustomObject]@{
+        Relation     = 'BeforeInstall'
+        Phrase       = "$lead $DriverLabel was installed ($installStamp) (on the previous driver)"
+        DeltaHours   = [math]::Round($span.TotalHours, 1)
+        CalendarDays = -$calDaysBefore
+        InstallStamp = $installStamp
+        DriverLabel  = $DriverLabel
+    }
+}
+
+function Select-DcRelevantGpu {
+    param(
+        $Hardware = $null,
+        [string]$ModuleHint = '',
+        [string]$DriverVersionHint = ''
+    )
+
+    if (-not $Hardware -or -not $Hardware.PSObject.Properties['Gpus'] -or -not $Hardware.Gpus) {
+        return $null
+    }
+
+    $gpus = @($Hardware.Gpus | Where-Object { $_ })
+    if ($gpus.Count -eq 0) { return $null }
+
+    $active = @($gpus | Where-Object { -not ($_.PSObject.Properties['IsGeneric'] -and $_.IsGeneric) })
+    if ($active.Count -eq 0) { $active = $gpus }
+
+    $vendorHint = ''
+    if ($ModuleHint) {
+        if ($ModuleHint -match '(?i)amd|ati') { $vendorHint = 'AMD' }
+        elseif ($ModuleHint -match '(?i)nvlddm|nvwgf|nvoglv|nvd3d|nvgpu|nvidia') { $vendorHint = 'NVIDIA' }
+        elseif ($ModuleHint -match '(?i)igdkmd|igd1|igfx|igc|ze_intel|intel') { $vendorHint = 'Intel' }
+    }
+
+    $candidates = if ($vendorHint) {
+        $vm = @($active | Where-Object { $_.Vendor -ieq $vendorHint })
+        if ($vm.Count -gt 0) { $vm } else { $active }
+    } else {
+        $active
+    }
+
+    $scored = $candidates | ForEach-Object {
+        $score = 0
+        if ($DriverVersionHint -and $_.PSObject.Properties['DriverVersion'] -and $_.DriverVersion -eq $DriverVersionHint) { $score += 50 }
+        if ($_.PSObject.Properties['IsHighBoostCard'] -and $_.IsHighBoostCard) { $score += 20 }
+        if ($_.Name -match '(?i)\b(RX\s*\d|RTX\s*\d|GTX\s*\d|Radeon\s+PRO|Quadro|Arc\s+[AB]\d|XT\b|XTX\b|Ti\b)') { $score += 20 }
+        if ($_.Name -match '(?i)^AMD Radeon\(TM\) Graphics$|^AMD Radeon Graphics$|Radeon Vega \d+ Graphics|Intel\(R\) UHD|Intel\(R\) HD Graphics|Intel\(R\) Iris') { $score -= 10 }
+        if ($_.PSObject.Properties['DriverInstallDate'] -and $_.DriverInstallDate -is [datetime]) { $score += 2 }
+        [PSCustomObject]@{ Gpu = $_; Score = $score }
+    }
+
+    $best = ($scored | Sort-Object Score -Descending | Select-Object -First 1).Gpu
+    if (-not $best) { return $null }
+
+    $friendlyLabel = if ($best.PSObject.Properties['FriendlyDriverLabel'] -and $best.FriendlyDriverLabel) {
+        [string]$best.FriendlyDriverLabel
+    } else { $null }
+    $displayVer = if ($best.PSObject.Properties['DisplayVersion'] -and $best.DisplayVersion) {
+        [string]$best.DisplayVersion
+    } else { $null }
+
+    if (-not $friendlyLabel -or -not $displayVer) {
+        $wddm = if ($best.PSObject.Properties['DriverVersion'] -and $best.DriverVersion) { [string]$best.DriverVersion } else { '' }
+        $mkt = if ($best.PSObject.Properties['MarketingVersion'] -and $best.MarketingVersion) { [string]$best.MarketingVersion } else { '' }
+        $vend = if ($best.PSObject.Properties['Vendor'] -and $best.Vendor) { [string]$best.Vendor } else { '' }
+        $isGen = [bool]($best.PSObject.Properties['IsGeneric'] -and $best.IsGeneric)
+        if (Get-Command ConvertTo-DcFriendlyGpuVersion -ErrorAction SilentlyContinue) {
+            $conv = ConvertTo-DcFriendlyGpuVersion -Vendor $vend -WddmVersion $wddm -MarketingVersion $mkt -IsGeneric $isGen
+            if (-not $displayVer) { $displayVer = $conv.DisplayVersion }
+            if (-not $friendlyLabel) { $friendlyLabel = $conv.FriendlyDriverLabel }
+        } else {
+            if (-not $displayVer) { $displayVer = if ($mkt -and $wddm) { "$mkt ($wddm)" } elseif ($wddm) { $wddm } else { 'Unknown' } }
+            if (-not $friendlyLabel) { $friendlyLabel = if ($vend) { "$vend GPU driver $displayVer" } else { "GPU driver $displayVer" } }
+        }
+    }
+
+    $instDt = $null
+    if ($best.PSObject.Properties['DriverInstallDate'] -and $null -ne $best.DriverInstallDate) {
+        if ($best.DriverInstallDate -is [datetimeoffset]) { $instDt = $best.DriverInstallDate.LocalDateTime }
+        elseif ($best.DriverInstallDate -is [datetime]) { $instDt = $best.DriverInstallDate }
+        else {
+            $tmpDt = [datetime]::MinValue
+            if ([datetime]::TryParse([string]$best.DriverInstallDate, [ref]$tmpDt)) { $instDt = $tmpDt }
+        }
+    }
+
+    return [PSCustomObject]@{
+        Name                = [string]$best.Name
+        Vendor              = [string]$best.Vendor
+        DriverVersion       = if ($best.PSObject.Properties['DriverVersion']) { [string]$best.DriverVersion } else { $null }
+        DisplayVersion      = $displayVer
+        FriendlyDriverLabel = $friendlyLabel
+        DriverInstallDate   = $instDt
+        RawGpu              = $best
+    }
+}
+
+function Resolve-DcIncidentAttribution {
+    [CmdletBinding()]
+    param(
+        $Dumps = @(),
+        $Telemetry = $null,
+        $Hardware = $null,
+        $ForensicsCrashes = @(),
+        $EngineLogs = @(),
+        $SteamLogs = @(),
+        $SteamGameSessions = @()
+    )
+
+    $overlayRegex = '(?i)^(NahimicOSD|A-Volute|SonicStudio|RTSSHooks|RTSSVkLayer|DiscordHook|GameOverlayRenderer|obs-vulkan|obs-graphics|Overwolf|OWClient|ReShade|SpecialK|MedalHook|MedalEncoder|nvspcap|bdcam|fraps|dxtory|playclaw|Action_x64)'
+    $gpuUmdRegex = '(?i)^(amdvlk|amdxc|amdxn|amdxx|atidxx|amdhdl|atiumd|nvwgf2um|nvoglv|nvd3dum|nvgpucomp|igc|igd10|igd12|igfx|ze_intel)'
+    $gpuKmdRegex = '(?i)^(amdkmdag|nvlddmkm|igdkmd|dxgmms2|dxgkrnl)'
+    $inboxShellRegex = '(?i)^(ApplicationFrameHost|dwm|ShellExperienceHost|SearchHost|Explorer|StartMenuExperienceHost|SystemSettings)(\.exe)?$'
+    $appEngineNonDriverRegex = '(?i)(UnityPlayer|UnrealEditor|UE4Game|UE5Game|GameAssembly|mono-2\.0|vcruntime|msvcp|ucrtbase|\.exe$)'
+
+    $stripModBase = {
+        param([string]$Mod)
+        if (-not $Mod) { return "" }
+        $s = $Mod.Trim() -replace '(?i)_unloaded$', '' -replace '^<Unloaded_', '' -replace '>$', ''
+        return $s.Trim()
+    }
+
+    $parseFaultKey = {
+        param([string]$FaultIp, [string]$ModuleName, [string]$OffsetStr)
+        $mod = ""
+        $offVal = [uint64]0
+        if ($FaultIp -and $FaultIp -match '^\s*(<Unloaded_[^>]+>|[A-Za-z0-9_\.\-]+\.(?:dll|sys|exe))\s*\+\s*0x([0-9a-fA-F]+)') {
+            $mod = $Matches[1].Trim()
+            try { $offVal = [Convert]::ToUInt64($Matches[2], 16) } catch { $offVal = 0 }
+        } elseif ($FaultIp -and $FaultIp -match 'in\s+(<Unloaded_[^>]+>|[A-Za-z0-9_\.\-]+\.(?:dll|sys|exe))(?:\+0x([0-9a-fA-F]+))?') {
+            $mod = $Matches[1].Trim()
+            if ($Matches[2]) { try { $offVal = [Convert]::ToUInt64($Matches[2], 16) } catch { $offVal = 0 } }
+        }
+        if (-not $mod -and $ModuleName) { $mod = $ModuleName.Trim() }
+        if ($offVal -eq 0 -and $OffsetStr -and $OffsetStr -match '^(?:0x)?([0-9a-fA-F]+)$') {
+            try { $offVal = [Convert]::ToUInt64($Matches[1], 16) } catch { $offVal = 0 }
+        }
+        if (-not $mod) { return "" }
+        if ($offVal -gt 0) {
+            return ("{0}+0x{1:x}" -f $mod.ToLowerInvariant(), $offVal)
+        }
+        return ""
+    }
+
+    $getProcName = {
+        param($Obj)
+        if (-not $Obj) { return "" }
+        if ($Obj.PSObject.Properties['MainExecutable'] -and $Obj.MainExecutable) { return ([IO.Path]::GetFileName([string]$Obj.MainExecutable)).ToLowerInvariant() }
+        if ($Obj.PSObject.Properties['AppName'] -and $Obj.AppName) { return ([IO.Path]::GetFileName([string]$Obj.AppName)).ToLowerInvariant() }
+        if ($Obj.PSObject.Properties['FileName'] -and $Obj.FileName) {
+            $clean = $Obj.FileName -replace '\.\d+\.dmp$', ''
+            return ([IO.Path]::GetFileName($clean)).ToLowerInvariant()
+        }
+        return ""
+    }
+
+    $getTelArr = {
+        param([string]$Prop)
+        if ($Telemetry -and $Telemetry.PSObject.Properties[$Prop] -and $Telemetry.$Prop) { return @($Telemetry.$Prop) }
+        return @()
+    }
+
+    $getGpuContext = {
+        param([string]$ModuleHint, [string]$DriverVersionHint, $IncidentTime)
+        $gpu = Select-DcRelevantGpu -Hardware $Hardware -ModuleHint $ModuleHint -DriverVersionHint $DriverVersionHint
+        if (-not $gpu) { return $null }
+        $timing = $null
+        if ($gpu.DriverInstallDate -is [datetime] -and $IncidentTime -is [datetime]) {
+            $timing = Format-DcDriverInstallTiming -IncidentTime $IncidentTime -InstallTime $gpu.DriverInstallDate -DriverLabel $gpu.FriendlyDriverLabel
+        }
+        return [PSCustomObject]@{
+            Gpu    = $gpu
+            Label  = $gpu.FriendlyDriverLabel
+            Timing = $timing
+        }
+    }
+
+    # Pre-compute cross-app GPU module+offset fault map (UMDs hitting identical non-zero FaultKey across 2+ distinct executables)
+    $faultKeyProcs = @{}
+    $registerFaultKey = {
+        param([string]$Proc, [string]$Fk)
+        if (-not $Proc -or -not $Fk) { return }
+        $modPart = ($Fk -split '\+')[0]
+        $base = & $stripModBase $modPart
+        if ($base -notmatch $gpuUmdRegex) { return }
+        $normFk = ("{0}+{1}" -f $base.ToLowerInvariant(), ($Fk -split '\+')[1])
+        if (-not $faultKeyProcs.ContainsKey($normFk)) {
+            $faultKeyProcs[$normFk] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        }
+        [void]$faultKeyProcs[$normFk].Add($Proc)
+    }
+
+    $userDumps = @($Dumps | Where-Object { $_ -and -not $_.IsKernelDump -and -not ($_.PSObject.Properties['IsLiveKernelReport'] -and $_.IsLiveKernelReport) })
+    $werAppReports = @(& $getTelArr 'WerAppReports' | Where-Object { $_ -and $_.EventType -notmatch '(?i)LiveKernelEvent' })
+    $appCrashes = @(& $getTelArr 'AppCrashes')
+    $tdrEvents = @(& $getTelArr 'TdrEvents')
+    $werKernelEvents = @(& $getTelArr 'WerKernelEvents')
+    $tdrWorkloads = @(& $getTelArr 'TdrWorkloads')
+    $oomEvents = @(& $getTelArr 'MemoryExhaustion')
+    $sleepEvents = @(& $getTelArr 'SleepTransitions')
+    $wheaAll = @(& $getTelArr 'PcieWheaErrors') + @(& $getTelArr 'WheaErrors')
+    $dispHotplugs = @(& $getTelArr 'DisplayHotplugEvents')
+    $kernelBugChecks = @(& $getTelArr 'KernelBugChecks')
+    $abruptReboots = @(& $getTelArr 'AbruptReboots')
+
+    foreach ($d in $userDumps) {
+        $p = & $getProcName $d
+        $m = if ($d.PSObject.Properties['FaultingModule'] -and $d.FaultingModule) { $d.FaultingModule } else { "" }
+        $fk = & $parseFaultKey ([string]$d.FaultingIP) ([string]$m) ""
+        & $registerFaultKey $p $fk
+    }
+    foreach ($w in $werAppReports) {
+        $p = & $getProcName $w
+        $m = if ($w.PSObject.Properties['FaultModule'] -and $w.FaultModule) { $w.FaultModule } else { $w.Parameter4 }
+        $off = if ($w.PSObject.Properties['ExceptionOffset']) { $w.ExceptionOffset } else { "" }
+        $fk = & $parseFaultKey "" ([string]$m) ([string]$off)
+        & $registerFaultKey $p $fk
+    }
+    foreach ($ac in $appCrashes) {
+        $p = & $getProcName $ac
+        $m = if ($ac.PSObject.Properties['FaultingModule'] -and $ac.FaultingModule) { $ac.FaultingModule } elseif ($ac.PSObject.Properties['FaultModule'] -and $ac.FaultModule) { $ac.FaultModule } else { "" }
+        $off = if ($ac.PSObject.Properties['FaultModuleOffset'] -and $ac.FaultModuleOffset) { $ac.FaultModuleOffset } elseif ($ac.PSObject.Properties['FaultOffset'] -and $ac.FaultOffset) { $ac.FaultOffset } else { "" }
+        $fk = & $parseFaultKey "" ([string]$m) ([string]$off)
+        & $registerFaultKey $p $fk
+    }
+
+    $crossAppGpuFaults = @{}
+    foreach ($k in $faultKeyProcs.Keys) {
+        if ($faultKeyProcs[$k].Count -ge 2) {
+            $crossAppGpuFaults[$k] = @($faultKeyProcs[$k] | Sort-Object)
+        }
+    }
+
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $absorbedDumps = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $absorbedWer = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $absorbedEngine = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $absorbedDisplayTimes = [System.Collections.Generic.List[datetime]]::new()
+    $absorbedWheaTimes = [System.Collections.Generic.List[datetime]]::new()
+
+    $addAttr = {
+        param(
+            [string]$Classification,
+            [string]$LayerBadge,
+            [string]$Confidence,
+            [string]$BlamedComponent,
+            [string]$FaultKey,
+            [string[]]$Evidence,
+            [string]$PlainVerdict,
+            [bool]$IsGpuDriverFault,
+            $Timestamp,
+            [string]$SurfaceSymptom
+        )
+        $results.Add([PSCustomObject]@{
+            Classification   = $Classification
+            LayerBadge       = $LayerBadge
+            Confidence       = $Confidence
+            BlamedComponent  = $BlamedComponent
+            FaultKey         = $FaultKey
+            Evidence         = @($Evidence | Where-Object { $_ })
+            PlainVerdict     = $PlainVerdict
+            IsGpuDriverFault = $IsGpuDriverFault
+            Timestamp        = $Timestamp
+            SurfaceSymptom   = $SurfaceSymptom
+        })
+    }
+
+    # ---- 1. GPU Timeout Episodes (TdrEvents) + standalone WerKernelEvents (e.g. 0x193) ----
+    $tdrCandidates = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $gpuTdrCodeSet = @('141', '117', '193', 'a1000001', 'a2000002', '1b8', '1a8')
+    foreach ($t in ($tdrEvents | Sort-Object TimeCreated -Descending)) {
+        if ($t -and $t.TimeCreated) {
+            $tCode = if ($t.PSObject.Properties['Code'] -and $t.Code) { (([string]$t.Code).Trim() -replace '^(?i)0x', '').ToLowerInvariant() } else { '' }
+            if (-not $tCode) { $tCode = '4101' }
+            $tdrCandidates.Add([PSCustomObject]@{ Source = 'TDR'; Item = $t; Time = [datetime]$t.TimeCreated; Code = $tCode; P2 = if ($t.PSObject.Properties['Parameter2']) { [string]$t.Parameter2 } else { '' }; Msg = [string]$t.Message; Comp = if ($t.PSObject.Properties['Component']) { [string]$t.Component } else { '' } })
+        }
+    }
+    foreach ($wk in $werKernelEvents) {
+        if (-not $wk -or -not $wk.TimeCreated) { continue }
+        $wkFile = if ($wk.PSObject.Properties['DumpFile'] -and $wk.DumpFile) { [string]$wk.DumpFile } else { '' }
+        $wkComp = if ($wk.PSObject.Properties['Component'] -and $wk.Component) { [string]$wk.Component } else { '' }
+        $wkMsg = if ($wk.PSObject.Properties['Message'] -and $wk.Message) { [string]$wk.Message } else { $wkComp }
+        $wkCode = if ($wk.PSObject.Properties['BugCheckOrCode'] -and $wk.BugCheckOrCode) { [string]$wk.BugCheckOrCode } elseif ($wk.PSObject.Properties['Code'] -and $wk.Code) { [string]$wk.Code } else { '' }
+        $wkCode = ($wkCode.Trim() -replace '^(?i)0x', '').ToLowerInvariant()
+        if (-not $wkCode) {
+            if ($wkFile -match '(?i)^AMD_WATCHDOG' -or $wkComp -match '(?i)^AMD_WATCHDOG' -or $wkMsg -match '(?i)AMD_WATCHDOG') { $wkCode = 'a1000001' }
+            elseif ($wkFile -match '(?i)^AMD_REPORT_UM' -or $wkComp -match '(?i)^AMD_REPORT_UM' -or $wkMsg -match '(?i)AMD_REPORT_UM') { $wkCode = 'a2000002' }
+            elseif ($wkFile -match '(?i)^WATCHDOG' -or $wkComp -match '(?i)^WATCHDOG' -or $wkMsg -match '(?i)\bWATCHDOG-\d+') { $wkCode = '141' }
+            elseif ($wkFile -match '(?i)DXGKRNL' -or $wkComp -match '(?i)ProcessDeadlockThread' -or $wkMsg -match '(?i)ProcessDeadlockThread|\b0x193\b') { $wkCode = '193' }
+            elseif ($wkMsg -match '(?i)\b0x117\b') { $wkCode = '117' }
+        }
+        if ($wkCode -notin $gpuTdrCodeSet) { continue }
+        $wkTime = [datetime]$wk.TimeCreated
+        $already = @($tdrCandidates | Where-Object { [Math]::Abs(($_.Time - $wkTime).TotalSeconds) -le 120 }).Count -gt 0
+        $nearBsod = @($kernelBugChecks | Where-Object { $_.TimeCreated -and [Math]::Abs(([datetime]$_.TimeCreated - $wkTime).TotalSeconds) -le 300 }).Count -gt 0
+        if (-not $already -and -not $nearBsod) {
+            $tdrCandidates.Add([PSCustomObject]@{
+                Source = 'WerKernel'
+                Item   = $wk
+                Time   = $wkTime
+                Code   = $wkCode
+                P2     = if ($wk.PSObject.Properties['Parameter2']) { [string]$wk.Parameter2 } else { '' }
+                Msg    = $wkMsg
+                Comp   = $wkComp
+            })
+        }
+    }
+
+    foreach ($cand in ($tdrCandidates | Sort-Object Time -Descending)) {
+        $tTime = $cand.Time
+        $codeHex = if ($cand.Code) { "0x$($cand.Code.ToUpper() -replace '^0X', '')" } else { "TDR" }
+        $sym = "GPU Driver Timeout (LiveKernelEvent $codeHex)"
+
+        $nearDumps = @($userDumps | Where-Object { $_.Timestamp -and [Math]::Abs(($_.Timestamp - $tTime).TotalSeconds) -le 120 })
+        $nearWer = @($werAppReports | Where-Object { $_.Timestamp -and [Math]::Abs(($_.Timestamp - $tTime).TotalSeconds) -le 120 })
+        $nearAppCr = @($appCrashes | Where-Object { $_.TimeCreated -and [Math]::Abs(($_.TimeCreated - $tTime).TotalSeconds) -le 120 })
+        $nearEngine = @($EngineLogs | Where-Object { $_.Timestamp -and [Math]::Abs(($_.Timestamp - $tTime).TotalSeconds) -le 120 })
+        $nearSteamShad = @($SteamLogs | Where-Object { $_.PSObject.Properties['IsShaderError'] -and $_.IsShaderError -and $_.Timestamp -and [Math]::Abs(($_.Timestamp - $tTime).TotalSeconds) -le 120 })
+        $nearWl = @($tdrWorkloads | Where-Object {
+            ($_.PSObject.Properties['TdrTime'] -and $_.TdrTime -and [Math]::Abs(($_.TdrTime - $tTime).TotalSeconds) -le 120) -or
+            ($_.PSObject.Properties['TimeCreated'] -and $_.TimeCreated -and [Math]::Abs(($_.TimeCreated - $tTime).TotalSeconds) -le 120)
+        })
+        $nearOom = @($oomEvents | Where-Object { $_.TimeCreated -and (($tTime - $_.TimeCreated).TotalSeconds -ge -30) -and (($tTime - $_.TimeCreated).TotalSeconds -le 180) })
+        $nearSleep = @($sleepEvents | Where-Object { $_.TimeCreated -and [Math]::Abs(($_.TimeCreated - $tTime).TotalSeconds) -le 120 })
+        $nearWhea = @($wheaAll | Where-Object { $_.TimeCreated -and [Math]::Abs(($_.TimeCreated - $tTime).TotalSeconds) -le 120 })
+        $nearDisp = @($dispHotplugs | Where-Object { $_.TimeCreated -and [Math]::Abs(($_.TimeCreated - $tTime).TotalSeconds) -le 60 })
+        foreach ($dh in $nearDisp) { $absorbedDisplayTimes.Add([datetime]$dh.TimeCreated) }
+
+        # Priority 1: Check cross-app GPU UMD fault or Inbox Windows shell GPU UMD fault near TDR
+        $crossMatch = $null
+        $inboxGpuMatch = $null
+        $overlayMatch = $null
+        $appOwnFault = $null
+        $shaderDumpMatch = $null
+
+        foreach ($d in $nearDumps) {
+            $proc = & $getProcName $d
+            $mod = if ($d.PSObject.Properties['FaultingModule'] -and $d.FaultingModule) { $d.FaultingModule } else { "" }
+            $modBase = & $stripModBase $mod
+            $fk = & $parseFaultKey ([string]$d.FaultingIP) ([string]$mod) ""
+            $normGpuFk = if ($fk -and $modBase -match $gpuUmdRegex) { ("{0}+{1}" -f $modBase.ToLowerInvariant(), ($fk -split '\+')[1]) } else { "" }
+
+            if ($normGpuFk -and $crossAppGpuFaults.ContainsKey($normGpuFk)) {
+                $crossMatch = [PSCustomObject]@{ Proc = $proc; Fk = $normGpuFk; Dump = $d }
+            } elseif (($d.PSObject.Properties['IsOverlayFault'] -and $d.IsOverlayFault) -or $modBase -match $overlayRegex -or ($mod -match '^<Unloaded_|_unloaded$' -and $modBase -notmatch $gpuUmdRegex)) {
+                $overlayMatch = [PSCustomObject]@{ Proc = $proc; Mod = $mod; Overlay = $(if ($d.OverlayName) { $d.OverlayName } else { $mod }); Fk = $fk; Dump = $d }
+            } elseif ($proc -match $inboxShellRegex -and $modBase -match $gpuUmdRegex) {
+                $inboxGpuMatch = [PSCustomObject]@{ Proc = $proc; Mod = $modBase; Fk = $fk; Dump = $d }
+            } elseif (($d.PSObject.Properties['IsShaderCompiler'] -and $d.IsShaderCompiler) -or ($d.PSObject.Properties['ApiContext'] -and $d.ApiContext -match '(?i)Shader|Pipeline')) {
+                $shaderDumpMatch = [PSCustomObject]@{ Proc = $proc; Mod = $mod; Fk = $fk; Api = $d.ApiContext; Dump = $d }
+            } elseif ($modBase -and $modBase -notmatch $gpuUmdRegex -and ($modBase -match $appEngineNonDriverRegex -or ($proc -and $modBase -ieq $proc))) {
+                $appOwnFault = [PSCustomObject]@{ Proc = $proc; Mod = $mod; Fk = $fk; Dump = $d }
+            }
+        }
+        if (-not $overlayMatch -and -not $crossMatch) {
+            foreach ($w in $nearWer) {
+                $proc = & $getProcName $w
+                $mod = if ($w.PSObject.Properties['FaultModule'] -and $w.FaultModule) { $w.FaultModule } else { $w.Parameter4 }
+                $off = if ($w.PSObject.Properties['ExceptionOffset']) { $w.ExceptionOffset } else { "" }
+                $modBase = & $stripModBase $mod
+                $fk = & $parseFaultKey "" ([string]$mod) ([string]$off)
+                $normGpuFk = if ($fk -and $modBase -match $gpuUmdRegex) { ("{0}+{1}" -f $modBase.ToLowerInvariant(), ($fk -split '\+')[1]) } else { "" }
+                if ($normGpuFk -and $crossAppGpuFaults.ContainsKey($normGpuFk)) {
+                    $crossMatch = [PSCustomObject]@{ Proc = $proc; Fk = $normGpuFk; Wer = $w }
+                } elseif (($w.PSObject.Properties['IsOverlayFault'] -and $w.IsOverlayFault) -or $modBase -match $overlayRegex -or ($mod -match '^<Unloaded_|_unloaded$' -and $modBase -notmatch $gpuUmdRegex)) {
+                    $overlayMatch = [PSCustomObject]@{ Proc = $proc; Mod = $mod; Overlay = $(if ($w.OverlayName) { $w.OverlayName } else { $mod }); Fk = $fk; Wer = $w }
+                } elseif ($proc -match $inboxShellRegex -and $modBase -match $gpuUmdRegex) {
+                    $inboxGpuMatch = [PSCustomObject]@{ Proc = $proc; Mod = $modBase; Fk = $fk; Wer = $w }
+                } elseif ($modBase -and $modBase -notmatch $gpuUmdRegex -and ($modBase -match $appEngineNonDriverRegex -or ($proc -and $modBase -ieq $proc))) {
+                    $appOwnFault = [PSCustomObject]@{ Proc = $proc; Mod = $mod; Fk = $fk; Wer = $w }
+                }
+            }
+        }
+
+        if ($overlayMatch) {
+            foreach ($nd in $nearDumps) { [void]$absorbedDumps.Add($nd.FileName) }
+            foreach ($nw in $nearWer) { if ($nw.ReportPath) { [void]$absorbedWer.Add($nw.ReportPath) } }
+            $evList = @("TDR $codeHex at $($tTime.ToString('yyyy-MM-dd HH:mm:ss'))", "Overlay/hook fault: $($overlayMatch.Mod) in $($overlayMatch.Proc)")
+            & $addAttr 'APP_OR_OVERLAY' 'Application / Overlay' 'Confirmed' $overlayMatch.Overlay $overlayMatch.Fk $evList `
+                "Third-party overlay or injected hook ($($overlayMatch.Overlay)) faulted inside $($overlayMatch.Proc) right at the GPU timeout. Remove or disable this overlay rather than reinstalling GPU drivers." `
+                $false $tTime $sym
+            continue
+        }
+
+        if ($appOwnFault) {
+            foreach ($nd in $nearDumps) { [void]$absorbedDumps.Add($nd.FileName) }
+            foreach ($nw in $nearWer) { if ($nw.ReportPath) { [void]$absorbedWer.Add($nw.ReportPath) } }
+            $evList = @("TDR $codeHex at $($tTime.ToString('yyyy-MM-dd HH:mm:ss'))", "App module fault: $($appOwnFault.Mod) in $($appOwnFault.Proc)")
+            & $addAttr 'APP_OR_OVERLAY' 'Application' 'Confirmed' $appOwnFault.Proc $appOwnFault.Fk $evList `
+                "Application '$($appOwnFault.Proc)' crashed in its own code module ($($appOwnFault.Mod)) around the GPU timeout. This is an application-level defect, not a GPU driver failure." `
+                $false $tTime $sym
+            continue
+        }
+
+        if ($crossMatch) {
+            # Note: cross-app GPU driver fault also gets confirmed attribution; absorb nearDump to avoid duplicate card
+            foreach ($nd in $nearDumps) { [void]$absorbedDumps.Add($nd.FileName) }
+            foreach ($nw in $nearWer) { if ($nw.ReportPath) { [void]$absorbedWer.Add($nw.ReportPath) } }
+            $apps = @($crossAppGpuFaults[$crossMatch.Fk]) -join ', '
+            $drvHint = if ($crossMatch.Dump -and $crossMatch.Dump.PSObject.Properties['GpuDriverVersion']) { [string]$crossMatch.Dump.GpuDriverVersion } elseif ($crossMatch.Wer -and $crossMatch.Wer.PSObject.Properties['GpuDriverVersion']) { [string]$crossMatch.Wer.GpuDriverVersion } else { '' }
+            $gCtx = & $getGpuContext $crossMatch.Fk $drvHint $tTime
+            $evList = [System.Collections.Generic.List[string]]::new()
+            $evList.Add("TDR $codeHex at $($tTime.ToString('yyyy-MM-dd HH:mm:ss'))")
+            $evList.Add("Identical driver fault offset $($crossMatch.Fk) hit across 2+ unrelated apps ($apps)")
+            if ($gCtx -and $gCtx.Label) { $evList.Add("Active GPU driver: $($gCtx.Label)") }
+            if ($gCtx -and $gCtx.Timing) { $evList.Add("Driver install timing: $($gCtx.Timing.Phrase)") }
+            $blamedComp = if ($gCtx -and $gCtx.Label) { "$($crossMatch.Fk) ($($gCtx.Label))" } else { $crossMatch.Fk }
+            $timingClause = if ($gCtx -and $gCtx.Timing) { ", $($gCtx.Timing.Phrase)" } elseif ($gCtx -and $gCtx.Label) { " under $($gCtx.Label)" } else { "" }
+            & $addAttr 'GPU_DRIVER' 'GPU Driver' 'Confirmed' $blamedComp $crossMatch.Fk $evList.ToArray() `
+                "Two or more separate applications ($apps) crashed at the exact same GPU driver instruction ($($crossMatch.Fk))$timingClause, confirming a driver-level defect." `
+                $true $tTime $sym
+            continue
+        }
+
+        if ($inboxGpuMatch) {
+            foreach ($nd in $nearDumps) { [void]$absorbedDumps.Add($nd.FileName) }
+            foreach ($nw in $nearWer) { if ($nw.ReportPath) { [void]$absorbedWer.Add($nw.ReportPath) } }
+            $drvHint = if ($inboxGpuMatch.Dump -and $inboxGpuMatch.Dump.PSObject.Properties['GpuDriverVersion']) { [string]$inboxGpuMatch.Dump.GpuDriverVersion } elseif ($inboxGpuMatch.Wer -and $inboxGpuMatch.Wer.PSObject.Properties['GpuDriverVersion']) { [string]$inboxGpuMatch.Wer.GpuDriverVersion } else { '' }
+            $gCtx = & $getGpuContext $inboxGpuMatch.Mod $drvHint $tTime
+            $evList = [System.Collections.Generic.List[string]]::new()
+            $evList.Add("TDR $codeHex at $($tTime.ToString('yyyy-MM-dd HH:mm:ss'))")
+            $evList.Add("Windows system shell '$($inboxGpuMatch.Proc)' faulted in $($inboxGpuMatch.Mod)")
+            if ($gCtx -and $gCtx.Label) { $evList.Add("Active GPU driver: $($gCtx.Label)") }
+            if ($gCtx -and $gCtx.Timing) { $evList.Add("Driver install timing: $($gCtx.Timing.Phrase)") }
+            $blamedComp = if ($gCtx -and $gCtx.Label) { "$($inboxGpuMatch.Mod) ($($gCtx.Label))" } else { $inboxGpuMatch.Mod }
+            $timingClause = if ($gCtx -and $gCtx.Timing) { " ($($gCtx.Timing.Phrase))" } elseif ($gCtx -and $gCtx.Label) { " under $($gCtx.Label)" } else { "" }
+            & $addAttr 'GPU_DRIVER' 'GPU Driver' 'Likely' $blamedComp $inboxGpuMatch.Fk $evList.ToArray() `
+                "Windows' built-in shell process ($($inboxGpuMatch.Proc)) faulted directly inside the GPU user-mode driver ($($inboxGpuMatch.Mod))$timingClause." `
+                $true $tTime $sym
+            continue
+        }
+
+        # Check OS / System Event (0x193 ProcessDeadlockThread P2=0x810, Event 2004 OOM, Sleep transitions)
+        if ($cand.Code -ieq '193' -and ($cand.P2 -match '(?i)^0*810$' -or $cand.Msg -match '(?i)0x810|ProcessDeadlockThread' -or $cand.Comp -match '(?i)ProcessDeadlockThread')) {
+            $evList = @("LiveKernelEvent 0x193 (P2=0x810 ProcessDeadlockThread) at $($tTime.ToString('yyyy-MM-dd HH:mm:ss'))")
+            & $addAttr 'OS_OR_SYSTEM_EVENT' 'Windows / System Event' 'Confirmed' 'Windows CSGSS / ProcessDeadlockThread (0x193 P2=0x810)' '' $evList `
+                "Windows recorded a kernel/graphics thread deadlock (0x193 P2=0x810 ProcessDeadlockThread) rather than a GPU shader hang. Check stuck services or OS deadlock triggers before blaming the GPU driver." `
+                $false $tTime "Kernel Graphics Deadlock (0x193 P2=0x810)"
+            continue
+        }
+
+        if ($nearOom.Count -gt 0) {
+            $topCons = if ($nearOom[0].PSObject.Properties['TopConsumers'] -and $nearOom[0].TopConsumers) { " Top consumers: $($nearOom[0].TopConsumers)." } else { "" }
+            $evList = @("Event 2004 (Resource-Exhaustion-Detector) at $($nearOom[0].TimeCreated.ToString('HH:mm:ss'))$topCons", "TDR $codeHex at $($tTime.ToString('HH:mm:ss'))")
+            & $addAttr 'OS_OR_SYSTEM_EVENT' 'Windows / System Event' 'Likely' 'Windows Virtual Memory Exhaustion (Event 2004)' '' $evList `
+                "Windows ran out of virtual commit memory (Event 2004)$topCons right before the GPU timeout. Memory pressure starved GPU allocations and triggered the timeout — close leaking apps or raise pagefile size." `
+                $false $tTime $sym
+            continue
+        }
+
+        if ($nearWhea.Count -gt 0) {
+            foreach ($wh in $nearWhea) { $absorbedWheaTimes.Add([datetime]$wh.TimeCreated) }
+            $evList = @("WHEA hardware/PCIe error (Event $($nearWhea[0].Id)) at $($nearWhea[0].TimeCreated.ToString('HH:mm:ss'))", "TDR $codeHex")
+            & $addAttr 'DEVICE_OR_HARDWARE' 'Device / Hardware' 'Likely' 'WHEA PCIe / Hardware Error' '' $evList `
+                "A hardware or PCIe bus error (WHEA) was logged within 2 minutes of the GPU timeout — inspect GPU seating, PCIe riser/power cables, and hardware stability." `
+                $false $tTime $sym
+            continue
+        }
+
+        # Shader / Workload evidence (DRED, shader error, shader compiler stage, compute benchmark TdrWorkload)
+        $dredEng = @($nearEngine | Where-Object { $_.ShaderInfo -or $_.Breadcrumbs -or ($_.PSObject.Properties['GpuErrorCode'] -and $_.GpuErrorCode) })
+        if ($shaderDumpMatch -or $dredEng.Count -gt 0 -or $nearSteamShad.Count -gt 0 -or $nearWl.Count -gt 0) {
+            foreach ($nd in $nearDumps) { [void]$absorbedDumps.Add($nd.FileName) }
+            foreach ($ne in $nearEngine) { if ($ne.FullName) { [void]$absorbedEngine.Add($ne.FullName) } }
+            $evList = [System.Collections.Generic.List[string]]::new()
+            $evList.Add("TDR $codeHex at $($tTime.ToString('yyyy-MM-dd HH:mm:ss'))")
+            $blamed = ""
+            if ($shaderDumpMatch) {
+                $blamed = "$($shaderDumpMatch.Proc) ($($shaderDumpMatch.Api))"
+                $evList.Add("Shader/pipeline compile stage: $($shaderDumpMatch.Api)")
+            } elseif ($dredEng.Count -gt 0) {
+                $el = $dredEng[0]
+                $gName = if ($el.PSObject.Properties['GameName'] -and $el.GameName) { $el.GameName } elseif ($el.ExecutableName) { $el.ExecutableName } else { $el.Engine }
+                $blamed = if ($el.PSObject.Properties['GpuErrorCode'] -and $el.GpuErrorCode) { "$gName ($($el.GpuErrorCode))" } else { "$gName shader/DRED fault" }
+                if ($el.ShaderInfo) { $evList.Add("Shader: $($el.ShaderInfo)") }
+                if ($el.Breadcrumbs) { $evList.Add("Breadcrumbs: $($el.Breadcrumbs)") }
+            } elseif ($nearWl.Count -gt 0) {
+                $w = $nearWl[0]
+                $blamed = "$($w.ProcessName) (compute/GPU workload)"
+                $evList.Add("Active GPU workload: $($w.ProcessName)$(if ($w.CommandLine) { " ($($w.CommandLine))" })")
+            } else {
+                $blamed = "Steam Shader Pipeline Error"
+                $evList.Add("Steam shader_log reported shader error near timeout")
+            }
+            & $addAttr 'SHADER_OR_WORKLOAD' 'Shader / Workload' 'Likely' $blamed $(if ($shaderDumpMatch) { $shaderDumpMatch.Fk } else { '' }) $evList.ToArray() `
+                "A specific shader, D3D12/Vulkan draw call (DRED), or heavy compute dispatch ($blamed) exceeded the 2-second watchdog threshold. This is workload/shader-specific rather than a broken driver installation." `
+                $false $tTime $sym
+            continue
+        }
+
+        if ($nearSleep.Count -gt 0) {
+            $evList = @("Sleep/wake transition at $($nearSleep[0].TimeCreated.ToString('HH:mm:ss'))", "TDR $codeHex")
+            & $addAttr 'OS_OR_SYSTEM_EVENT' 'Windows / System Event' 'Suspected' 'Windows Sleep / Power Transition' '' $evList `
+                "The GPU timeout occurred right around a Windows sleep or wake transition." `
+                $false $tTime $sym
+            continue
+        }
+
+        $checkedParts = @("Event Logs", "WER Archives", "Engine/DRED Logs", "Steam Sessions", "WHEA", "Event 2004 OOM")
+        $dispNote = if ($nearDisp.Count -gt 0) { " Monitor link reconnected at timeout (downstream consequence)." } else { "" }
+        $gCtx = & $getGpuContext $cand.Comp "" $tTime
+        $unattrEv = [System.Collections.Generic.List[string]]::new()
+        $unattrEv.Add("TDR $codeHex at $($tTime.ToString('yyyy-MM-dd HH:mm:ss'))")
+        $unattrEv.Add("Checked & cleared: $($checkedParts -join ', ')")
+        if ($gCtx -and $gCtx.Label) {
+            $tSuffix = if ($gCtx.Timing) { " (occurred $($gCtx.Timing.Phrase))" } else { "" }
+            $unattrEv.Add("Active GPU driver: $($gCtx.Label)$tSuffix")
+        }
+        $timingVerdictNote = if ($gCtx -and $gCtx.Timing) { " This occurred $($gCtx.Timing.Phrase)." } elseif ($gCtx -and $gCtx.Label) { " Active driver: $($gCtx.Label)." } else { "" }
+        & $addAttr 'UNATTRIBUTED' 'Unattributed' 'Unattributed' 'Unidentified GPU Queue Stall' '' $unattrEv.ToArray() `
+            "Windows detected a 2-second GPU queue stall ($codeHex), but no single app dump, shader error, OOM, or cross-app driver signature proved the exact trigger.$timingVerdictNote$dispNote" `
+            $false $tTime $sym
+    }
+
+    # ---- 2. Unabsorbed User-Mode Crash Dumps & WER App Reports ----
+    foreach ($d in ($userDumps | Sort-Object Timestamp -Descending)) {
+        if ($absorbedDumps.Contains($d.FileName)) { continue }
+        $proc = & $getProcName $d
+        $mod = if ($d.PSObject.Properties['FaultingModule'] -and $d.FaultingModule) { $d.FaultingModule } else { "" }
+        $modBase = & $stripModBase $mod
+        $fk = & $parseFaultKey ([string]$d.FaultingIP) ([string]$mod) ""
+        $normGpuFk = if ($fk -and $modBase -match $gpuUmdRegex) { ("{0}+{1}" -f $modBase.ToLowerInvariant(), ($fk -split '\+')[1]) } else { "" }
+
+        if ($normGpuFk -and $crossAppGpuFaults.ContainsKey($normGpuFk)) {
+            $apps = @($crossAppGpuFaults[$normGpuFk]) -join ', '
+            if (-not (@($results | Where-Object { $_.Classification -eq 'GPU_DRIVER' -and $_.FaultKey -ieq $normGpuFk }).Count -gt 0)) {
+                $drvHint = if ($d.PSObject.Properties['GpuDriverVersion']) { [string]$d.GpuDriverVersion } else { '' }
+                $gCtx = & $getGpuContext $modBase $drvHint $d.Timestamp
+                $isBeforeCurrent = ($gCtx -and $gCtx.Timing -and $gCtx.Timing.Relation -eq 'BeforeInstall')
+                $evList = [System.Collections.Generic.List[string]]::new()
+                $evList.Add("Cross-app GPU driver fault in $($d.FileName): $fk")
+                $evList.Add("Identical address across apps: $apps")
+                if ($gCtx -and $gCtx.Label) {
+                    $drvPrefix = if ($isBeforeCurrent) { "Current GPU driver" } else { "Active GPU driver" }
+                    $evList.Add("${drvPrefix}: $($gCtx.Label)")
+                }
+                if ($gCtx -and $gCtx.Timing) { $evList.Add("Driver install timing: $($gCtx.Timing.Phrase)") }
+                $blamedComp = if ($isBeforeCurrent) {
+                    if ($drvHint -and (-not $gCtx.Gpu.DriverVersion -or $drvHint -ne $gCtx.Gpu.DriverVersion)) { "$normGpuFk ($drvHint)" } else { "$normGpuFk (previous driver)" }
+                } elseif ($gCtx -and $gCtx.Label) {
+                    "$normGpuFk ($($gCtx.Label))"
+                } else {
+                    $normGpuFk
+                }
+                $timingClause = if ($gCtx -and $gCtx.Timing) { ", $($gCtx.Timing.Phrase)" } elseif ($gCtx -and $gCtx.Label) { " under $($gCtx.Label)" } else { "" }
+                & $addAttr 'GPU_DRIVER' 'GPU Driver' 'Confirmed' $blamedComp $normGpuFk $evList.ToArray() `
+                    "Multiple separate applications ($apps) faulted at the exact same GPU driver instruction ($normGpuFk)$timingClause, confirming a GPU driver bug." `
+                    $true $d.Timestamp "App Crash ($apps)"
+            }
+            continue
+        }
+        if (($d.PSObject.Properties['IsOverlayFault'] -and $d.IsOverlayFault) -or $modBase -match $overlayRegex -or ($mod -match '^<Unloaded_|_unloaded$' -and $modBase -notmatch $gpuUmdRegex)) {
+            $ov = if ($d.PSObject.Properties['OverlayName'] -and $d.OverlayName) { $d.OverlayName } else { $mod }
+            $evList = @("Dump $($d.FileName) faulted at $(if ($fk) { $fk } else { $mod })")
+            & $addAttr 'APP_OR_OVERLAY' 'Application / Overlay' 'Confirmed' $ov $fk $evList `
+                "Third-party overlay or injected hook ($ov) crashed inside $proc (at $fk). Disable or update the overlay." `
+                $false $d.Timestamp "App Crash ($proc)"
+            continue
+        }
+        if ($proc -match $inboxShellRegex -and $modBase -match $gpuUmdRegex) {
+            $drvHint = if ($d.PSObject.Properties['GpuDriverVersion']) { [string]$d.GpuDriverVersion } else { '' }
+            $gCtx = & $getGpuContext $modBase $drvHint $d.Timestamp
+            $evList = [System.Collections.Generic.List[string]]::new()
+            $evList.Add("Inbox Windows process '$proc' faulted in '$modBase' ($($d.FileName))")
+            if ($gCtx -and $gCtx.Label) { $evList.Add("Active GPU driver: $($gCtx.Label)") }
+            if ($gCtx -and $gCtx.Timing) { $evList.Add("Driver install timing: $($gCtx.Timing.Phrase)") }
+            $blamedComp = if ($gCtx -and $gCtx.Label) { "$modBase ($($gCtx.Label))" } else { $modBase }
+            $timingClause = if ($gCtx -and $gCtx.Timing) { " ($($gCtx.Timing.Phrase))" } elseif ($gCtx -and $gCtx.Label) { " under $($gCtx.Label)" } else { "" }
+            & $addAttr 'GPU_DRIVER' 'GPU Driver' 'Likely' $blamedComp $fk $evList.ToArray() `
+                "Windows system shell process '$proc' crashed inside the vendor GPU driver DLL ($modBase)$timingClause." `
+                $true $d.Timestamp "Windows Shell Crash ($proc)"
+            continue
+        }
+        if (($d.PSObject.Properties['IsShaderCompiler'] -and $d.IsShaderCompiler) -or ($d.PSObject.Properties['ApiContext'] -and $d.ApiContext -match '(?i)Shader|Pipeline')) {
+            $evList = @("Dump $($d.FileName) at $($d.ApiContext): $fk")
+            & $addAttr 'SHADER_OR_WORKLOAD' 'Shader / Workload' 'Likely' "$proc ($($d.ApiContext))" $fk $evList `
+                "Single-application shader/pipeline crash in $proc ($($d.ApiContext)). Clear shader cache or report to the app/game developer." `
+                $false $d.Timestamp "App Shader Crash ($proc)"
+            continue
+        }
+        if ($modBase -and $modBase -match $gpuUmdRegex) {
+            $evList = @("Single-app dump $($d.FileName) in $modBase ($fk); no matching fault offset in any other application")
+            & $addAttr 'UNATTRIBUTED' 'Unattributed' 'Unattributed' "$proc in $modBase" $fk $evList `
+                "Only '$proc' faulted inside $modBase$(if ($fk) { " at $fk" }), with no cross-app replication or shader log proof — cannot separate app bad-data from a driver bug yet." `
+                $false $d.Timestamp "App Crash ($proc)"
+            continue
+        }
+        if ($modBase) {
+            $appModLabel = if ($proc -and $modBase -ine $proc) { "$proc ($modBase)" } else { $modBase }
+            $evList = @("Dump $($d.FileName) faulted inside $modBase ($fk)")
+            & $addAttr 'APP_OR_OVERLAY' 'Application' 'Confirmed' $appModLabel $fk $evList `
+                "Application '$proc' crashed inside its own/third-party module '$modBase' (unrelated to the GPU driver)." `
+                $false $d.Timestamp "App Crash ($proc)"
+        }
+    }
+
+    foreach ($w in $werAppReports) {
+        if ($w.ReportPath -and $absorbedWer.Contains($w.ReportPath)) { continue }
+        $proc = & $getProcName $w
+        $nearDupDump = @($userDumps | Where-Object { $dp = & $getProcName $_; $dp -ieq $proc -and $_.Timestamp -and $w.Timestamp -and [Math]::Abs(($_.Timestamp - $w.Timestamp).TotalSeconds) -le 90 }).Count -gt 0
+        if ($nearDupDump) { continue }
+        $mod = if ($w.PSObject.Properties['FaultModule'] -and $w.FaultModule) { $w.FaultModule } else { $w.Parameter4 }
+        $off = if ($w.PSObject.Properties['ExceptionOffset']) { $w.ExceptionOffset } else { "" }
+        $modBase = & $stripModBase $mod
+        $fk = & $parseFaultKey "" ([string]$mod) ([string]$off)
+        $normGpuFk = if ($fk -and $modBase -match $gpuUmdRegex) { ("{0}+{1}" -f $modBase.ToLowerInvariant(), ($fk -split '\+')[1]) } else { "" }
+
+        if ($normGpuFk -and $crossAppGpuFaults.ContainsKey($normGpuFk)) {
+            $apps = @($crossAppGpuFaults[$normGpuFk]) -join ', '
+            if (-not (@($results | Where-Object { $_.Classification -eq 'GPU_DRIVER' -and $_.FaultKey -ieq $normGpuFk }).Count -gt 0)) {
+                $drvHint = if ($w.PSObject.Properties['GpuDriverVersion']) { [string]$w.GpuDriverVersion } else { '' }
+                $gCtx = & $getGpuContext $modBase $drvHint $w.Timestamp
+                $evList = [System.Collections.Generic.List[string]]::new()
+                $evList.Add("WER reports across $apps at $normGpuFk")
+                if ($gCtx -and $gCtx.Label) { $evList.Add("Active GPU driver: $($gCtx.Label)") }
+                if ($gCtx -and $gCtx.Timing) { $evList.Add("Driver install timing: $($gCtx.Timing.Phrase)") }
+                $blamedComp = if ($gCtx -and $gCtx.Label) { "$normGpuFk ($($gCtx.Label))" } else { $normGpuFk }
+                $timingClause = if ($gCtx -and $gCtx.Timing) { ", $($gCtx.Timing.Phrase)" } elseif ($gCtx -and $gCtx.Label) { " under $($gCtx.Label)" } else { "" }
+                & $addAttr 'GPU_DRIVER' 'GPU Driver' 'Confirmed' $blamedComp $normGpuFk $evList.ToArray() `
+                    "Multiple separate applications ($apps) faulted at the exact same GPU driver offset ($normGpuFk)$timingClause." `
+                    $true $w.Timestamp "WER App Crash ($apps)"
+            }
+            continue
+        }
+        if (($w.PSObject.Properties['IsOverlayFault'] -and $w.IsOverlayFault) -or $modBase -match $overlayRegex -or ($mod -match '^<Unloaded_|_unloaded$' -and $modBase -notmatch $gpuUmdRegex)) {
+            $ov = if ($w.PSObject.Properties['OverlayName'] -and $w.OverlayName) { $w.OverlayName } else { $mod }
+            & $addAttr 'APP_OR_OVERLAY' 'Application / Overlay' 'Confirmed' $ov $fk @("WER $($w.FolderName): FaultModule=$mod") `
+                "Third-party overlay or hook ($ov) crashed inside '$proc' without involving the GPU driver." `
+                $false $w.Timestamp "WER App Crash ($proc)"
+            continue
+        }
+        if ($proc -match $inboxShellRegex -and $modBase -match $gpuUmdRegex) {
+            $drvHint = if ($w.PSObject.Properties['GpuDriverVersion']) { [string]$w.GpuDriverVersion } else { '' }
+            $gCtx = & $getGpuContext $modBase $drvHint $w.Timestamp
+            $evList = [System.Collections.Generic.List[string]]::new()
+            $evList.Add("WER: $proc faulted in $modBase")
+            if ($gCtx -and $gCtx.Label) { $evList.Add("Active GPU driver: $($gCtx.Label)") }
+            if ($gCtx -and $gCtx.Timing) { $evList.Add("Driver install timing: $($gCtx.Timing.Phrase)") }
+            $blamedComp = if ($gCtx -and $gCtx.Label) { "$modBase ($($gCtx.Label))" } else { $modBase }
+            $timingClause = if ($gCtx -and $gCtx.Timing) { " ($($gCtx.Timing.Phrase))" } elseif ($gCtx -and $gCtx.Label) { " under $($gCtx.Label)" } else { "" }
+            & $addAttr 'GPU_DRIVER' 'GPU Driver' 'Likely' $blamedComp $fk $evList.ToArray() `
+                "Windows shell '$proc' crashed inside GPU driver module $modBase$timingClause." `
+                $true $w.Timestamp "WER Shell Crash ($proc)"
+        }
+    }
+
+    # ---- 3. Standalone DRED / Engine Shader Errors without a nearby TDR ----
+    foreach ($el in $EngineLogs) {
+        if ($el.FullName -and $absorbedEngine.Contains($el.FullName)) { continue }
+        $hasDred = ($el.PSObject.Properties['GpuErrorCode'] -and $el.GpuErrorCode) -or ($el.PSObject.Properties['Breadcrumbs'] -and $el.Breadcrumbs) -or ($el.PSObject.Properties['ShaderInfo'] -and $el.ShaderInfo)
+        if (-not $hasDred) { continue }
+        $nearTdr = @($tdrCandidates | Where-Object { $el.Timestamp -and [Math]::Abs(($_.Time - $el.Timestamp).TotalSeconds) -le 120 }).Count -gt 0
+        if ($nearTdr) { continue }
+        $gName = if ($el.PSObject.Properties['GameName'] -and $el.GameName) { $el.GameName } elseif ($el.ExecutableName) { $el.ExecutableName } else { $el.Engine }
+        $detail = if ($el.GpuErrorCode) { $el.GpuErrorCode } elseif ($el.ShaderInfo) { $el.ShaderInfo } else { "DRED Breadcrumbs" }
+        & $addAttr 'SHADER_OR_WORKLOAD' 'Shader / Workload' 'Confirmed' "$gName ($detail)" '' @("Engine log $($el.LogName): $detail$(if ($el.Breadcrumbs) { " - $($el.Breadcrumbs)" })") `
+            "Engine log for '$gName' captured a GPU workload/shader error ($detail) directly in its own diagnostics." `
+            $false $el.Timestamp "Engine GPU Error ($gName)"
+    }
+
+    # ---- 4. Kernel BSODs ----
+    foreach ($bc in $kernelBugChecks) {
+        $matchedC = @($ForensicsCrashes | Where-Object { $_.Kind -match 'Bugcheck' -and $_.BugcheckCode -ieq $bc.Code -and [Math]::Abs(($_.LogTime - $bc.TimeCreated).TotalSeconds) -le 120 } | Select-Object -First 1)
+        $anchor = if ($matchedC.Count -gt 0 -and $matchedC[0].CrashTime) { [datetime]$matchedC[0].CrashTime } else { [datetime]$bc.TimeCreated }
+        $dumpObj = if ($matchedC.Count -gt 0) { $matchedC[0].Dump } else { $null }
+        if (-not $dumpObj -and $Dumps) {
+            $dumpObj = @($Dumps | Where-Object {
+                $_ -and $_.IsKernelDump -and -not ($_.PSObject.Properties['IsLiveKernelReport'] -and $_.IsLiveKernelReport) -and
+                $_.ExceptionCode -ieq $bc.Code -and (
+                    ($_.CrashTime -and [Math]::Abs(([datetime]$_.CrashTime - [datetime]$bc.TimeCreated).TotalSeconds) -le 600) -or
+                    ($_.Timestamp -and [Math]::Abs(([datetime]$_.Timestamp - [datetime]$bc.TimeCreated).TotalSeconds) -le 180)
+                )
+            } | Select-Object -First 1)[0]
+            if ($dumpObj -and $dumpObj.CrashTime) { $anchor = [datetime]$dumpObj.CrashTime }
+        }
+        $blamedMod = if ($dumpObj -and $dumpObj.DebuggerModuleName) { [string]$dumpObj.DebuggerModuleName } elseif ($dumpObj -and $dumpObj.FaultingModule) { [string]$dumpObj.FaultingModule } else { "" }
+        $bucket = if ($bc.PSObject.Properties['WatsonBucket'] -and $bc.WatsonBucket) { [string]$bc.WatsonBucket } elseif ($dumpObj -and $dumpObj.FailureBucket) { [string]$dumpObj.FailureBucket } else { "" }
+
+        $nearOom = @($oomEvents | Where-Object { $_.TimeCreated -and (($anchor - $_.TimeCreated).TotalSeconds -ge -30) -and (($anchor - $_.TimeCreated).TotalSeconds -le 180) })
+        $nearSleep = @($sleepEvents | Where-Object { $_.TimeCreated -and [Math]::Abs(($_.TimeCreated - $anchor).TotalSeconds) -le 120 })
+        $nearWhea = @($wheaAll | Where-Object { $_.TimeCreated -and [Math]::Abs(($_.TimeCreated - $anchor).TotalSeconds) -le 120 })
+
+        if ($bc.Code -match '0x0*124\b' -or $nearWhea.Count -gt 0) {
+            foreach ($wh in $nearWhea) { $absorbedWheaTimes.Add([datetime]$wh.TimeCreated) }
+            & $addAttr 'DEVICE_OR_HARDWARE' 'Device / Hardware' 'Confirmed' "Hardware / WHEA Stop $($bc.Code)" $bucket @("Kernel BugCheck $($bc.Code)", "WHEA hardware error correlation") `
+                "Windows hit a hardware/machine-check BugCheck ($($bc.Code)), indicating a CPU, PCIe, or motherboard hardware error rather than a software driver timeout." `
+                $false $anchor "BSOD $($bc.Code)"
+        } elseif ($bc.Code -match '0x0*(116|119)\b' -and $nearOom.Count -eq 0 -and $nearWhea.Count -eq 0 -and $nearSleep.Count -eq 0 -and ($blamedMod -match $gpuKmdRegex -or -not $blamedMod)) {
+            $modOrBucketHint = if ($blamedMod) { $blamedMod } else { $bucket }
+            $drvHint = if ($dumpObj -and $dumpObj.PSObject.Properties['GpuDriverVersion']) { [string]$dumpObj.GpuDriverVersion } else { '' }
+            $gCtx = & $getGpuContext $modOrBucketHint $drvHint $anchor
+            $isBeforeCurrent = ($gCtx -and $gCtx.Timing -and $gCtx.Timing.Relation -eq 'BeforeInstall')
+            $kmdLabel = if ($isBeforeCurrent) {
+                if ($blamedMod -and $drvHint -and (-not $gCtx.Gpu.DriverVersion -or $drvHint -ne $gCtx.Gpu.DriverVersion)) {
+                    "$blamedMod ($drvHint)"
+                } elseif ($blamedMod) {
+                    "$blamedMod (previous GPU driver)"
+                } else {
+                    "Previous GPU Kernel Driver ($($bc.Code))"
+                }
+            } elseif ($blamedMod -and $gCtx -and $gCtx.Label) {
+                "$blamedMod ($($gCtx.Label))"
+            } elseif ($gCtx -and $gCtx.Label) {
+                "$($gCtx.Label) ($($bc.Code))"
+            } elseif ($blamedMod) {
+                $blamedMod
+            } else {
+                "GPU Kernel Driver ($($bc.Code))"
+            }
+            $bsodEv = [System.Collections.Generic.List[string]]::new()
+            $bsodEv.Add("Kernel BugCheck $($bc.Code)$(if ($blamedMod) { " blaming $blamedMod" })")
+            if ($gCtx -and $gCtx.Label) {
+                $drvPrefix = if ($isBeforeCurrent) { "Current GPU driver" } else { "Active GPU driver" }
+                $bsodEv.Add("${drvPrefix}: $($gCtx.Label)")
+            }
+            if ($gCtx -and $gCtx.Timing) { $bsodEv.Add("Driver install timing: $($gCtx.Timing.Phrase)") }
+            $bsodEv.Add("No OOM/WHEA/sleep precursors")
+            $inModTxt = if ($blamedMod) { "in $blamedMod" } else { "in the GPU kernel driver" }
+            $verdict = if ($gCtx -and $gCtx.Timing) {
+                "Kernel graphics stop code ($($bc.Code)) triggered $inModTxt, $($gCtx.Timing.Phrase), without OOM, WHEA, or sleep precursors."
+            } elseif ($gCtx -and $gCtx.Label) {
+                "Kernel graphics stop code ($($bc.Code)) triggered $inModTxt under $($gCtx.Label) without OOM, WHEA, or sleep precursors."
+            } else {
+                "Kernel graphics stop code ($($bc.Code)) triggered $(if ($blamedMod) { "in $blamedMod " })without OOM, WHEA, or sleep precursors."
+            }
+            & $addAttr 'GPU_DRIVER' 'GPU Driver' 'Likely' $kmdLabel $bucket $bsodEv.ToArray() `
+                $verdict `
+                $true $anchor "BSOD $($bc.Code)"
+        } elseif ($bc.Code -match '0x0*9f\b' -and $dumpObj -and (($dumpObj.PSObject.Properties['HardwareId'] -and $dumpObj.HardwareId) -or ($dumpObj.PSObject.Properties['HardwareDeviceName'] -and $dumpObj.HardwareDeviceName))) {
+            $hwDisp = if ($dumpObj.PSObject.Properties['HardwareDeviceName'] -and $dumpObj.HardwareDeviceName -and $dumpObj.PSObject.Properties['HardwareId'] -and $dumpObj.HardwareId) {
+                "$($dumpObj.HardwareDeviceName) ($($dumpObj.HardwareId))"
+            } elseif ($dumpObj.PSObject.Properties['HardwareDeviceName'] -and $dumpObj.HardwareDeviceName) {
+                "$($dumpObj.HardwareDeviceName)"
+            } else {
+                "$($dumpObj.HardwareId)"
+            }
+            $hwComp = if ($blamedMod) { "$hwDisp ($blamedMod)" } else { $hwDisp }
+            $ev9f = [System.Collections.Generic.List[string]]::new()
+            $ev9f.Add("Kernel BugCheck $($bc.Code)$(if ($blamedMod) { " in $blamedMod" })")
+            if ($dumpObj.PSObject.Properties['HardwareId'] -and $dumpObj.HardwareId) { $ev9f.Add("Hardware ID: $($dumpObj.HardwareId)") }
+            if ($bucket) { $ev9f.Add("Bucket: $bucket") }
+            & $addAttr 'DEVICE_OR_HARDWARE' 'Device / Driver Power' 'Confirmed' $hwComp $bucket $ev9f.ToArray() `
+                "PCI/PnP hardware device $hwComp failed to complete a Windows power/sleep transition ($($bc.Code)) — unrelated to the GPU driver." `
+                $false $anchor "BSOD $($bc.Code)"
+        } elseif ($bc.Code -match '0x(?:10*)?0*(9f|1a|4e|7e|3b|50|d1|133)\b' -or $nearOom.Count -gt 0 -or $nearSleep.Count -gt 0) {
+            $comp = if ($blamedMod) { "$($bc.Code) ($blamedMod)" } else { "Windows Kernel ($($bc.Code))" }
+            & $addAttr 'OS_OR_SYSTEM_EVENT' 'Windows / System Event' 'Likely' $comp $bucket @("Kernel BugCheck $($bc.Code)$(if ($blamedMod) { ", module: $blamedMod" })$(if ($bucket) { ", bucket: $bucket" })") `
+                "Kernel crash $($bc.Code) happened in OS/power/memory management$(if ($blamedMod) { " ($blamedMod)" }) — separate from a GPU driver TDR." `
+                $false $anchor "BSOD $($bc.Code)"
+        } else {
+            & $addAttr 'UNATTRIBUTED' 'Unattributed' 'Unattributed' $(if ($bucket) { $bucket } else { "Kernel BugCheck $($bc.Code)" }) $bucket @("Kernel BugCheck $($bc.Code) (stack not decoded)") `
+                "Windows recorded BugCheck $($bc.Code), but protected dump symbols are needed to confirm the faulting kernel driver." `
+                $false $anchor "BSOD $($bc.Code)"
+        }
+    }
+
+    # ---- 4b. Unabsorbed Non-GPU LiveKernelReport Dumps (e.g. NDIS 0x15E) ----
+    $nonGpuLiveDumps = @($Dumps | Where-Object {
+        $_ -and ($_.PSObject.Properties['IsLiveKernelReport'] -and $_.IsLiveKernelReport) -and
+        -not $_.IsGraphicsCrash -and -not $absorbedDumps.Contains($_.FileName)
+    })
+    foreach ($ld in ($nonGpuLiveDumps | Sort-Object Timestamp -Descending)) {
+        $ldMod = if ($ld.PSObject.Properties['DebuggerImageName'] -and $ld.DebuggerImageName) {
+            [string]$ld.DebuggerImageName
+        } elseif ($ld.PSObject.Properties['DebuggerModuleName'] -and $ld.DebuggerModuleName) {
+            [string]$ld.DebuggerModuleName
+        } elseif ($ld.PSObject.Properties['FaultingModule'] -and $ld.FaultingModule) {
+            [string]$ld.FaultingModule
+        } else {
+            [string]$ld.FileName
+        }
+        $ldCode = if ($ld.ExceptionCode) { [string]$ld.ExceptionCode } else { 'LiveDump' }
+        $ldBucket = if ($ld.PSObject.Properties['FailureBucket'] -and $ld.FailureBucket) { [string]$ld.FailureBucket } else { '' }
+        $ldEv = [System.Collections.Generic.List[string]]::new()
+        $ldEv.Add("LiveKernelReport $($ld.FileName) ($ldCode)")
+        if ($ldBucket) { $ldEv.Add("Failure bucket: $ldBucket") }
+        $compInfo = Get-DcComponentInfo -Name $ldMod
+        if ($compInfo -and $compInfo.Found -and $compInfo.Company) {
+            $ldEv.Add("Driver vendor: $($compInfo.Company) v$($compInfo.Version)")
+        }
+        & $addAttr 'DEVICE_OR_HARDWARE' 'Device / Driver (Non-Fatal)' 'Confirmed' "$ldMod (Non-Fatal Live Dump)" $ldBucket $ldEv.ToArray() `
+            "Non-fatal Windows live kernel report ($ldCode) flagged $ldMod — Windows captured diagnostic state and recovered without rebooting the PC." `
+            $false $ld.Timestamp "Live Dump ($ldCode)"
+    }
+
+    # ---- 5. Abrupt Power Restarts & Standalone Display Link Drops & WHEA ----
+    foreach ($rb in $abruptReboots) {
+        if ($rb.BugcheckCode -ne 0) { continue }
+        $hasBc = @($kernelBugChecks | Where-Object { $_.TimeCreated -and $rb.TimeCreated -and [Math]::Abs(($_.TimeCreated - $rb.TimeCreated).TotalMinutes) -le 10 }).Count -gt 0
+        if ($hasBc) { continue }
+        & $addAttr 'DEVICE_OR_HARDWARE' 'Device / Hardware' 'Suspected' 'Power Delivery / Unlogged Hard Reset (Event 41)' '' @("Kernel-Power Event 41 (BugcheckCode=0) at $($rb.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss'))") `
+            "PC lost power or froze completely before Windows could write a crash dump or stop code." `
+            $false $rb.TimeCreated "Sudden Power Reset (Event 41)"
+    }
+
+    $emittedDisp = [System.Collections.Generic.List[PSCustomObject]]::new()
+    foreach ($dh in ($dispHotplugs | Sort-Object TimeCreated -Descending)) {
+        if (-not $dh.TimeCreated) { continue }
+        $tDh = [datetime]$dh.TimeCreated
+        $absTdr = @($absorbedDisplayTimes | Where-Object { [Math]::Abs(($_ - $tDh).TotalSeconds) -le 60 }).Count -gt 0
+        $nearBc = @($kernelBugChecks | Where-Object { $_.TimeCreated -and [Math]::Abs(([datetime]$_.TimeCreated - $tDh).TotalSeconds) -le 180 }).Count -gt 0
+        $nearRb = @($abruptReboots | Where-Object { $_.TimeCreated -and [Math]::Abs(([datetime]$_.TimeCreated - $tDh).TotalSeconds) -le 180 }).Count -gt 0
+        if ($absTdr -or $nearBc -or $nearRb) { continue }
+        $devId = if ($dh.PSObject.Properties['DeviceInstanceId'] -and $dh.DeviceInstanceId) { $dh.DeviceInstanceId } else { "Display link" }
+        $dupDisp = @($emittedDisp | Where-Object { $_.DevId -ieq $devId -and [Math]::Abs(($_.Time - $tDh).TotalSeconds) -le 60 }).Count -gt 0
+        if ($dupDisp) { continue }
+        $emittedDisp.Add([PSCustomObject]@{ DevId = $devId; Time = $tDh })
+        & $addAttr 'DEVICE_OR_HARDWARE' 'Device / Hardware' 'Confirmed' "Display / Cable Link ($devId)" '' @("Kernel-PnP Event 1010 ($devId) with zero concurrent TDR or BugCheck") `
+            "Standalone monitor disconnect/reconnect ($devId) on DisplayPort/HDMI without any GPU driver reset or OS crash — typically monitor standby, input switching, or cable contact." `
+            $false $tDh "Display Link Drop (Event 1010)"
+    }
+
+    foreach ($wh in $wheaAll) {
+        if (-not $wh.TimeCreated) { continue }
+        $tWh = [datetime]$wh.TimeCreated
+        if (@($absorbedWheaTimes | Where-Object { [Math]::Abs(($_ - $tWh).TotalSeconds) -le 120 }).Count -gt 0) { continue }
+        & $addAttr 'DEVICE_OR_HARDWARE' 'Device / Hardware' 'Confirmed' "WHEA Hardware Error (Event $($wh.Id))" '' @("WHEA-Logger Event $($wh.Id) at $($tWh.ToString('yyyy-MM-dd HH:mm:ss'))") `
+            "Hardware/PCIe error correction alert reported by WHEA-Logger." `
+            $false $tWh "WHEA Hardware Event $($wh.Id)"
+    }
+
+    return @($results | Sort-Object @{ Expression = { if ($_.Timestamp -is [datetime]) { $_.Timestamp } else { [datetime]::MinValue } }; Descending = $true })
+}
+
 function Get-DcPlainEnglishSummary {
     [CmdletBinding()]
     param(
@@ -607,7 +1519,8 @@ function Get-DcPlainEnglishSummary {
         $Dumps = @(),
         $Telemetry = $null,
         $Hardware = $null,
-        $UnreadableSources = @()
+        $UnreadableSources = @(),
+        $Attributions = @()
     )
 
     $crashes = @($Forensics.Crashes)
@@ -619,23 +1532,28 @@ function Get-DcPlainEnglishSummary {
     $appCrashes = @($gpuDisp | Where-Object { $_.Category -match 'Application Crash|App / Game Crash' })
     $lkAll = @($Forensics.LiveKernelHistory)
     $lkGpuAll = @($lkAll | Where-Object { $_.Code -match '^(141|117|193|a1000001|a2000002)$' })
+    $attrList = if (@($Attributions).Count -gt 0) { @($Attributions) } elseif ($Forensics -and $Forensics.PSObject.Properties['IncidentAttributions'] -and $Forensics.IncidentAttributions) { @($Forensics.IncidentAttributions) } else { @() }
 
     $translated = [System.Collections.Generic.List[PSCustomObject]]::new()
     foreach ($c in ($bsods | Select-Object -First 6)) {
         $d = $c.Dump
         $plain = if ($d) {
-            Get-DcStopCodePlainEnglish -Code $c.BugcheckCode -Bucket $d.FailureBucket -ModuleName $d.DebuggerModuleName -ImageName $d.DebuggerImageName -Args $d.BugcheckArgs
+            $dHwId = if ($d.PSObject.Properties['HardwareId']) { $d.HardwareId } else { $null }
+            $dHwName = if ($d.PSObject.Properties['HardwareDeviceName']) { $d.HardwareDeviceName } else { $null }
+            Get-DcStopCodePlainEnglish -Code $c.BugcheckCode -Bucket $d.FailureBucket -ModuleName $d.DebuggerModuleName -ImageName $d.DebuggerImageName -Args $d.BugcheckArgs -HardwareId $dHwId -HardwareDeviceName $dHwName
         } else {
             $cArgs = if ($c.PSObject.Properties['BugcheckArgs']) { $c.BugcheckArgs } else { @() }
             Get-DcStopCodePlainEnglish -Code $c.BugcheckCode -Args $cArgs
         }
         $whenTxt = if ($c.CrashTime) { $c.CrashTime.ToString('yyyy-MM-dd HH:mm') } else { $c.LogTime.ToString('yyyy-MM-dd HH:mm') + ' (log time)' }
-        $procTxt = if ($d -and $d.AnalysisDetail -and $d.AnalysisDetail.ProcessName -and $d.AnalysisDetail.ProcessName -notmatch 'wrong\.symbols') { " while $($d.AnalysisDetail.ProcessName) was active" } else { '' }
+        $procTxt = if ($d -and $d.AnalysisDetail -and $d.AnalysisDetail.ProcessName -and $d.AnalysisDetail.ProcessName -notmatch 'wrong\.symbols|^System$') { " while $($d.AnalysisDetail.ProcessName) was active." } else { '' }
+        $plainTrim = $plain.TrimEnd('.')
+        $plainFinal = if ($procTxt) { "$plainTrim$procTxt" } else { $plain }
         $translated.Add([PSCustomObject]@{
             Kind = 'BSOD'
             When = $whenTxt
             Code = if ($c.BugcheckCode) { $c.BugcheckCode } else { 'Unknown' }
-            PlainText = "$plain$procTxt"
+            PlainText = $plainFinal
         })
     }
 
@@ -675,7 +1593,53 @@ function Get-DcPlainEnglishSummary {
         $facts.Add("$($dispDrops.Count) monitor/display link drop(s) (Kernel-PnP 1010). On its own this is just DisplayPort/HDMI disconnecting (e.g. monitor sleep), not a PC crash.")
     }
     if ($appCrashes.Count -gt 0) {
-        $facts.Add("$($appCrashes.Count) user-mode app crash dump(s) — only those individual programs closed; they did not reboot Windows.")
+        $facts.Add("$($appCrashes.Count) user-mode app crash dump(s) -- only those individual programs closed; they did not reboot Windows.")
+    }
+
+    $primaryGpu = Select-DcRelevantGpu -Hardware $Hardware
+    $gpuIncidentTimes = [System.Collections.Generic.List[datetime]]::new()
+    foreach ($b in $bsods) {
+        if ($b.BugcheckCode -match '0x0*(116|119)\b') {
+            $bt = if ($b.CrashTime -is [datetime]) { [datetime]$b.CrashTime } elseif ($b.LogTime -is [datetime]) { [datetime]$b.LogTime } else { $null }
+            if ($bt) { $gpuIncidentTimes.Add($bt) }
+        }
+    }
+    foreach ($gt in $gpuTdrs) {
+        if ($gt.Time -is [datetime]) { $gpuIncidentTimes.Add([datetime]$gt.Time) }
+    }
+    foreach ($at in $attrList) {
+        if ($at.IsGpuDriverFault -and $at.Timestamp -is [datetime]) {
+            $dup = @($gpuIncidentTimes | Where-Object { [Math]::Abs(($_ - [datetime]$at.Timestamp).TotalSeconds) -le 120 }).Count -gt 0
+            if (-not $dup) { $gpuIncidentTimes.Add([datetime]$at.Timestamp) }
+        }
+    }
+    $gpuAfterInstall = @()
+    $gpuBeforeInstall = @()
+    if ($primaryGpu) {
+        if ($primaryGpu.DriverInstallDate -is [datetime] -and $gpuIncidentTimes.Count -gt 0) {
+            $instTime = [datetime]$primaryGpu.DriverInstallDate
+            $gpuAfterInstall = @($gpuIncidentTimes | Where-Object { $_ -ge $instTime } | Sort-Object)
+            $gpuBeforeInstall = @($gpuIncidentTimes | Where-Object { $_ -lt $instTime } | Sort-Object)
+            $postTiming = if ($gpuAfterInstall.Count -gt 0) {
+                Format-DcDriverInstallTiming -IncidentTime $gpuAfterInstall[0] -InstallTime $instTime -DriverLabel $primaryGpu.FriendlyDriverLabel
+            } else { $null }
+            $preTiming = if ($gpuBeforeInstall.Count -gt 0) {
+                Format-DcDriverInstallTiming -IncidentTime $gpuBeforeInstall[0] -InstallTime $instTime -DriverLabel $primaryGpu.FriendlyDriverLabel
+            } else { $null }
+
+            if ($postTiming -and $gpuBeforeInstall.Count -eq 0) {
+                $lead = if ($gpuAfterInstall.Count -eq 1) { "the recorded GPU incident occurred" } else { "all $($gpuAfterInstall.Count) recorded GPU incidents started" }
+                $facts.Add("GPU driver install timing: $lead $($postTiming.Phrase).")
+            } elseif ($postTiming -and $gpuBeforeInstall.Count -gt 0) {
+                $facts.Add("GPU driver install timing: $($primaryGpu.FriendlyDriverLabel) was installed on $($instTime.ToString('yyyy-MM-dd HH:mm')); GPU incidents occurred both before ($($gpuBeforeInstall[0].ToString('yyyy-MM-dd HH:mm')), on the previous driver) and $($postTiming.Phrase).")
+            } elseif ($preTiming -and $gpuAfterInstall.Count -eq 0) {
+                $facts.Add("GPU driver install timing: $($primaryGpu.FriendlyDriverLabel) was installed on $($instTime.ToString('yyyy-MM-dd HH:mm')) after the earlier GPU incident(s); 0 GPU crashes or timeouts have occurred since that update.")
+            } else {
+                $facts.Add("Active GPU driver: $($primaryGpu.FriendlyDriverLabel) (installed $($instTime.ToString('yyyy-MM-dd HH:mm'))).")
+            }
+        } elseif ($gpuIncidentTimes.Count -gt 0) {
+            $facts.Add("Active GPU driver: $($primaryGpu.FriendlyDriverLabel).")
+        }
     }
 
     $idleNoWarningNote = $null
@@ -712,32 +1676,108 @@ function Get-DcPlainEnglishSummary {
         }
     }
 
-    # Build Next Checks strictly from what was actually seen
-    if (@($UnreadableSources).Count -gt 0) {
-        $nextChecks.Add("Run DriverCheck as Administrator (with WinDbg installed) so Windows' protected C:\WINDOWS\Minidump crash files can be decoded.")
+    # Build Next Checks strictly from attributed causes (never recommend DDU unless GPU driver fault is evidenced)
+    $appOverlayAttrs = @($attrList | Where-Object { $_.Classification -eq 'APP_OR_OVERLAY' })
+    $overlayAttrs = @($appOverlayAttrs | Where-Object { $_.LayerBadge -eq 'Application / Overlay' -or $_.PlainVerdict -match '(?i)overlay|injected hook' })
+    $appOnlyAttrs = @($appOverlayAttrs | Where-Object { -not ($_.LayerBadge -eq 'Application / Overlay' -or $_.PlainVerdict -match '(?i)overlay|injected hook') })
+    if ($overlayAttrs.Count -gt 0) {
+        $ovComps = (@($overlayAttrs | ForEach-Object { $_.BlamedComponent } | Select-Object -Unique) -join ', ')
+        $nextChecks.Add("Disable or update the third-party overlay/hook ($ovComps): evidence points directly to this injected component rather than the GPU driver.")
+    }
+    if ($appOnlyAttrs.Count -gt 0) {
+        $appComps = (@($appOnlyAttrs | ForEach-Object { $_.BlamedComponent } | Select-Object -Unique) -join ', ')
+        $nextChecks.Add("Investigate or update the crashing application ($appComps): the fault occurred in user-space application/runtime code rather than the GPU driver.")
+    }
+    $shaderAttrs = @($attrList | Where-Object { $_.Classification -eq 'SHADER_OR_WORKLOAD' })
+    if ($shaderAttrs.Count -gt 0) {
+        $comps = (@($shaderAttrs | ForEach-Object { $_.BlamedComponent } | Select-Object -Unique) -join ', ')
+        $nextChecks.Add("Clear the game/app shader cache or verify game files ($comps); if testing your own app or Unreal game, launch with DRED / '-gpucrashdebugging' to capture the specific offending shader/draw call.")
+    }
+    $osOomAttrs = @($attrList | Where-Object { $_.Classification -eq 'OS_OR_SYSTEM_EVENT' -and ($_.BlamedComponent -match '2004|Memory|Exhaustion|0x193') })
+    if ($osOomAttrs.Count -gt 0) {
+        $nextChecks.Add("Check Windows memory & background services (Event 2004 virtual commit exhaustion / 0x193 thread deadlock): inspect top memory-consuming processes or increase pagefile size rather than reinstalling display drivers.")
+    }
+
+    $isElevated = [bool]($Telemetry -and $Telemetry.PSObject.Properties['IsElevated'] -and $Telemetry.IsElevated)
+    $uninspectedPresentDumps = @($bsods | Where-Object { $_.Dump -and -not $_.Dump.CdbInspected })
+    $undecodedBsods = @($bsods | Where-Object { -not $_.Dump -or -not $_.Dump.CdbInspected })
+    if (-not $isElevated -and ((@($UnreadableSources).Count -gt 0 -and $bsods.Count -gt 0) -or $undecodedBsods.Count -gt 0)) {
+        $nextChecks.Add("Optional for kernel BSOD call stacks: Windows' protected C:\WINDOWS\Minidump folder requires an Administrator shell (and WinDbg/CDB) to unwind kernel crash stacks.")
+    } elseif ($isElevated -and $uninspectedPresentDumps.Count -gt 0) {
+        $nextChecks.Add("Optional for kernel BSOD call stacks: install Windows SDK Debugging Tools (cdb.exe) or WinDbg so DriverCheck can unwind symbols from $($uninspectedPresentDumps.Count) minidump file(s).")
     }
     $hasMem = @($bsods | Where-Object { $_.BugcheckCode -match '0x0*(1a|4e|50|d1|3b|7e|1000007e)' }).Count -gt 0
     if ($hasMem) {
         $expoTxt = if ($Hardware -and $Hardware.Memory -and $Hardware.Memory.ConfiguredClockSpeed -ge 5600) { " (your RAM is at $($Hardware.Memory.ConfiguredClockSpeed) MT/s)" } else { "" }
         $nextChecks.Add("Test system memory (RAM) stability: Windows hit multiple memory/page-corruption BSODs (0x1A / 0x4E / 0x1000007E)$expoTxt. Run Windows Memory Diagnostic (mdsched.exe) or TestMem5/OCCT memory test; if it errors at current speed, temporarily test at JEDEC base speed (or update motherboard BIOS for AGESA/memory stability).")
     }
-    $hasPowerHang = @($bsods | Where-Object { $_.BugcheckCode -match '0x0*9f' -or ($_.Dump -and $_.Dump.DebuggerModuleName -match 'HDAudBus') }).Count -gt 0
-    if ($hasPowerHang) {
-        $nextChecks.Add("Check audio/power-state stability (0x9F HDAudBus.sys + idle pattern): update Motherboard Chipset & Realtek/HD Audio drivers from your motherboard vendor, and test turning OFF Windows Fast Startup or PCIe Link State Power Management (and disable unused HDMI/DisplayPort audio devices in Device Manager).")
+    $powerHangBsods = @($bsods | Where-Object { $_.BugcheckCode -match '0x0*9f' -or ($_.Dump -and $_.Dump.DebuggerModuleName -match 'HDAudBus') })
+    if ($powerHangBsods.Count -gt 0) {
+        $powerTargets = [System.Collections.Generic.List[string]]::new()
+        $hasHdAud = $false
+        $hasPciHw = $false
+        foreach ($pb in $powerHangBsods) {
+            if ($pb.Dump) {
+                $d = $pb.Dump
+                if ($d.DebuggerModuleName -match 'HDAudBus' -or $d.FailureBucket -match 'HDAudBus') {
+                    $hasHdAud = $true
+                    if (-not $powerTargets.Contains('HDAudBus.sys')) { $powerTargets.Add('HDAudBus.sys') }
+                }
+                if ($d.PSObject.Properties['HardwareDeviceName'] -and $d.HardwareDeviceName) {
+                    $hasPciHw = $true
+                    $hwLbl = if ($d.DebuggerModuleName) { "$($d.HardwareDeviceName) via $($d.DebuggerModuleName)" } else { "$($d.HardwareDeviceName)" }
+                    if (-not $powerTargets.Contains($hwLbl)) { $powerTargets.Add($hwLbl) }
+                } elseif ($d.PSObject.Properties['HardwareId'] -and $d.HardwareId) {
+                    $hasPciHw = $true
+                    if (-not $powerTargets.Contains($d.HardwareId)) { $powerTargets.Add($d.HardwareId) }
+                } elseif ($d.DebuggerModuleName -and $d.DebuggerModuleName -notmatch 'HDAudBus') {
+                    if (-not $powerTargets.Contains($d.DebuggerModuleName)) { $powerTargets.Add($d.DebuggerModuleName) }
+                }
+            }
+        }
+        $powerTag = if ($powerTargets.Count -gt 0) { "0x9F: $($powerTargets -join ', ')" } else { "0x9F DRIVER_POWER_STATE_FAILURE" }
+        if ($hasPciHw -and $hasHdAud) {
+            $nextChecks.Add("Check device/power-state stability ($powerTag): update the blamed network/Wi-Fi and Realtek/HD Audio drivers plus Motherboard Chipset drivers from your vendor, and test turning OFF PCIe Link State Power Management (ASPM) and Windows Fast Startup (and disable unused HDMI/DisplayPort audio devices in Device Manager).")
+        } elseif ($hasPciHw) {
+            $nextChecks.Add("Check PCI device power-state stability ($powerTag): update the blamed device driver and Motherboard Chipset drivers from your vendor, and test turning OFF PCIe Link State Power Management (ASPM) and Windows Fast Startup.")
+        } else {
+            $nextChecks.Add("Check audio/power-state stability ($powerTag + idle pattern): update Motherboard Chipset & Realtek/HD Audio drivers from your motherboard vendor, and test turning OFF Windows Fast Startup or PCIe Link State Power Management (and disable unused HDMI/DisplayPort audio devices in Device Manager).")
+        }
     }
     if ($restarts.Count -gt 0 -and $bsods.Count -eq 0) {
         $nextChecks.Add("Check power delivery & PSU cables because the PC restarted cleanly without a crash dump (reseat 24-pin ATX / 8-pin EPS / GPU power connectors, check wall outlet/UPS, and inspect motherboard BIOS Event Log if available).")
     }
-    if ($gpuTdrs.Count -gt 0 -or @($bsods | Where-Object { $_.BugcheckCode -match '0x0*(116|119)' }).Count -gt 0) {
-        $nextChecks.Add("Refresh the GPU driver cleanly (AMD Cleanup Utility / DDU in Safe Mode, then reinstall WHQL driver) because recent GPU timeout/scheduler events (0x119 / 0x141 / 0x117) were recorded.")
+    $confirmedGpuDriverAttrs = @($attrList | Where-Object { $_.IsGpuDriverFault })
+    if ($confirmedGpuDriverAttrs.Count -gt 0) {
+        $gpuMention = if ($primaryGpu -and $primaryGpu.FriendlyDriverLabel) { $primaryGpu.FriendlyDriverLabel } else { "the GPU driver" }
+        $cleanDrvParts = [System.Collections.Generic.List[string]]::new()
+        foreach ($ga in $confirmedGpuDriverAttrs) {
+            $c = [string]$ga.BlamedComponent
+            if (-not $c) { continue }
+            if ($gpuMention -and $gpuMention -ne 'the GPU driver') {
+                $escGpu = [regex]::Escape($gpuMention)
+                $c = ($c -replace "\s*\($escGpu\)", '').Trim()
+                if ($c -ieq $gpuMention -and $ga.SurfaceSymptom) { $c = [string]$ga.SurfaceSymptom }
+                elseif ($c -match "^$escGpu\s*\((.+)\)$") { $c = $Matches[1].Trim() }
+            }
+            if ($c -and -not $cleanDrvParts.Contains($c)) { $cleanDrvParts.Add($c) }
+        }
+        $drvDetails = if ($cleanDrvParts.Count -gt 0) { $cleanDrvParts -join ', ' } else { (@($confirmedGpuDriverAttrs | ForEach-Object { $_.BlamedComponent } | Select-Object -Unique) -join ', ') }
+        if ($gpuAfterInstall.Count -gt 0 -and $gpuBeforeInstall.Count -eq 0 -and $primaryGpu -and $primaryGpu.DriverInstallDate -is [datetime]) {
+            $instTiming = Format-DcDriverInstallTiming -IncidentTime $gpuAfterInstall[0] -InstallTime $primaryGpu.DriverInstallDate -DriverLabel $gpuMention
+            $afterPhrase = if ($instTiming) { $instTiming.Phrase } else { "after $gpuMention was installed" }
+            $nextChecks.Add("Roll back or cleanly reinstall the GPU driver (AMD Cleanup Utility / DDU in Safe Mode): GPU-driver faults ($drvDetails) started $afterPhrase -- testing the previous WHQL version is a strong check.")
+        } else {
+            $nextChecks.Add("Refresh the GPU driver cleanly (AMD Cleanup Utility / DDU in Safe Mode, then reinstall a WHQL driver): cross-app / system evidence directly implicates $gpuMention ($drvDetails).")
+        }
     }
     if ($nextChecks.Count -eq 0 -and $dispDrops.Count -gt 0) {
         $nextChecks.Add("If your screen went black while actively gaming/working, try a certified DisplayPort/HDMI cable or another GPU port; if it only logged while idle, it's just normal monitor sleep.")
     }
 
     return [PSCustomObject]@{
-        Headline          = $headline
-        Counts            = [PSCustomObject]@{
+        Headline            = $headline
+        Counts              = [PSCustomObject]@{
             Bsods          = $bsods.Count
             SuddenRestarts = $restarts.Count
             GpuTimeouts    = $gpuTdrs.Count
@@ -746,6 +1786,7 @@ function Get-DcPlainEnglishSummary {
             AppGpuCrashes  = $appCrashes.Count
         }
         TranslatedIncidents = @($translated)
+        Attributions        = @($attrList)
         IdleNoWarningNote   = $idleNoWarningNote
         ConfirmedFacts      = @($facts)
         WhatThisRulesOut    = @($rulesOut)
@@ -770,6 +1811,16 @@ function Format-DcPlainSummaryReport {
     & $add ''
     & $add ('  Breakdown (scan period): BSODs: {0} | Sudden Power Restarts: {1} | GPU Driver Timeouts: {2} (14d history: {3}) | Monitor Drops: {4} | App Crashes: {5}' -f `
         $PlainSummary.Counts.Bsods, $PlainSummary.Counts.SuddenRestarts, $PlainSummary.Counts.GpuTimeouts, $PlainSummary.Counts.GpuHistory14d, $PlainSummary.Counts.DisplayDrops, $PlainSummary.Counts.AppGpuCrashes) 'White'
+
+    if ($PlainSummary.PSObject.Properties['Attributions'] -and @($PlainSummary.Attributions).Count -gt 0) {
+        & $add ''
+        & $add '  CAUSE SEPARATION (DRIVER vs. APP vs. SHADER vs. WINDOWS / HARDWARE):' 'Cyan'
+        foreach ($at in ($PlainSummary.Attributions | Select-Object -First 10)) {
+            $when = if ($at.Timestamp -is [datetime]) { $at.Timestamp.ToString('yyyy-MM-dd HH:mm') } else { 'unknown time' }
+            $col = if ($at.IsGpuDriverFault) { 'Red' } elseif ($at.Classification -in @('APP_OR_OVERLAY', 'SHADER_OR_WORKLOAD', 'OS_OR_SYSTEM_EVENT')) { 'Yellow' } else { 'Gray' }
+            & $add ("   * [{0}] [{1}] {2} -> {3}: {4}" -f $when, $at.LayerBadge, $at.SurfaceSymptom, $at.BlamedComponent, $at.PlainVerdict) $col
+        }
+    }
 
     if (@($PlainSummary.TranslatedIncidents).Count -gt 0) {
         & $add ''
@@ -1031,4 +2082,4 @@ function Format-DcCrashForensicsReport {
     return @($L)
 }
 
-Export-ModuleMember -Function Get-DcLiveKernelReports, Get-DcCrashForensics, Format-DcCrashForensicsReport, Format-DcPlainSummaryReport, Get-DcPlainEnglishSummary, Get-DcNonFatalGpuAndDisplayEvents, Get-DcCrashList, Get-DcComponentInfo
+Export-ModuleMember -Function Get-DcLiveKernelReports, Get-DcCrashForensics, Resolve-DcIncidentAttribution, Format-DcDriverInstallTiming, Format-DcCrashForensicsReport, Format-DcPlainSummaryReport, Get-DcPlainEnglishSummary, Get-DcNonFatalGpuAndDisplayEvents, Get-DcCrashList, Get-DcComponentInfo

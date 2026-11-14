@@ -24,6 +24,13 @@ function Export-DcHtmlReport {
     $statusClass = if ($ReportData.RootCauseSeverity -eq "Critical") { "badge-critical" } elseif ($ReportData.RootCauseSeverity -eq "Warning") { "badge-warning" } else { "badge-healthy" }
     $statusText = if ($ReportData.RootCauseSeverity -eq "Critical") { "CRITICAL ISSUES DETECTED" } elseif ($ReportData.RootCauseSeverity -eq "Warning") { "POTENTIAL ISSUES FOUND" } else { "SYSTEM HEALTHY" }
     $enc = { param($t) [System.Net.WebUtility]::HtmlEncode([string]$t) }
+    $hw = if ($ReportData.PSObject.Properties['HardwareHealth'] -and $ReportData.HardwareHealth) {
+        $ReportData.HardwareHealth
+    } elseif ($ReportData.PSObject.Properties['Hardware'] -and $ReportData.Hardware) {
+        $ReportData.Hardware
+    } else {
+        $null
+    }
 
     # Build Dump HTML
     $dumpRows = [System.Collections.Generic.List[string]]::new()
@@ -36,7 +43,15 @@ function Export-DcHtmlReport {
                 $assertHtml = "<div class='assert-box'>" + (($d.Assertions | ForEach-Object { "<div><code>" + (& $enc $_) + "</code></div>" }) -join "") + "</div>"
             }
 
-            $drvBadgeHtml = if ($d.GpuDriverVersion) { "<div><strong>Loaded GPU Driver:</strong> <span class='badge-module'>v" + (& $enc $d.GpuDriverVersion) + "</span></div>" } else { "" }
+            $matchedDumpGpu = if ($d.GpuDriverVersion -and $hw -and $hw.PSObject.Properties['Gpus'] -and $hw.Gpus) {
+                $hw.Gpus | Where-Object { $_.DriverVersion -eq $d.GpuDriverVersion } | Select-Object -First 1
+            } else { $null }
+            $drvVerLabel = if ($matchedDumpGpu -and $matchedDumpGpu.PSObject.Properties['FriendlyDriverLabel'] -and $matchedDumpGpu.FriendlyDriverLabel) {
+                $matchedDumpGpu.FriendlyDriverLabel
+            } elseif ($d.GpuDriverVersion) {
+                "v$($d.GpuDriverVersion)"
+            } else { "" }
+            $drvBadgeHtml = if ($drvVerLabel) { "<div><strong>Loaded GPU Driver:</strong> <span class='badge-module'>" + (& $enc $drvVerLabel) + "</span></div>" } else { "" }
             $apiContextHtml = if ($d.ApiContext) { "<div><strong>Graphics API Stage:</strong> <span class='badge-module' style='background: rgba(192, 132, 252, 0.2); color: var(--magenta);'>" + (& $enc $d.ApiContext) + "</span></div>" } else { "" }
             $stackHtml = ""
             if ($d.CallStack -and $d.CallStack.Count -gt 0) {
@@ -44,14 +59,27 @@ function Export-DcHtmlReport {
                 $stackHtml = "<details style='margin-top: 8px;'><summary style='cursor: pointer; color: var(--cyan); font-size: 0.85rem;'>Call Stack ($($d.CallStack.Count) frames)</summary><div class='code-block' style='font-size: 0.8rem; max-height: 200px; overflow-y: auto;'>$stackLines</div></details>"
             }
 
+            $liveBadgeHtml = if ($d.PSObject.Properties['IsLiveKernelReport'] -and $d.IsLiveKernelReport) {
+                "<span class='badge-warning' style='margin-left:8px;'>Non-Fatal Live Dump</span>"
+            } else { "" }
+            $hwBadgeHtml = if ($d.PSObject.Properties['HardwareId'] -and $d.HardwareId) {
+                $hwLabel = if ($d.PSObject.Properties['HardwareDeviceName'] -and $d.HardwareDeviceName) {
+                    "$($d.HardwareDeviceName) ($($d.HardwareId))"
+                } else {
+                    "$($d.HardwareId)"
+                }
+                "<div><strong>Blamed Hardware:</strong> <span class='badge-module'>" + (& $enc $hwLabel) + "</span></div>"
+            } else { "" }
+
             $card = "<div class='card-item'>" +
                 "<div class='card-header-row'>" +
-                    "<span class='file-name'>" + (& $enc $d.FileName) + "</span>" +
+                    "<span><span class='file-name'>" + (& $enc $d.FileName) + "</span>$liveBadgeHtml</span>" +
                     "<span class='timestamp'>$($d.Timestamp.ToString('yyyy-MM-dd HH:mm:ss')) | $($d.SizeMb) MB | " + (& $enc $d.Architecture) + "</span>" +
                 "</div>" +
                 "<div class='card-body-row'>" +
                     "<div><strong>Exception:</strong> $excBadge " + (& $enc $d.ExceptionMeaning) + "</div>" +
                     "<div><strong>Faulting Module:</strong> $modBadge</div>" +
+                    $hwBadgeHtml +
                     $apiContextHtml +
                     $drvBadgeHtml +
                     $assertHtml +
@@ -95,7 +123,13 @@ function Export-DcHtmlReport {
 
     # Build System Telemetry HTML
     $telemRows = [System.Collections.Generic.List[string]]::new()
-    $telem = $ReportData.SystemTelemetry
+    $telem = if ($ReportData.PSObject.Properties['SystemTelemetry'] -and $ReportData.SystemTelemetry) {
+        $ReportData.SystemTelemetry
+    } elseif ($ReportData.PSObject.Properties['Telemetry'] -and $ReportData.Telemetry) {
+        $ReportData.Telemetry
+    } else {
+        $null
+    }
     $hasTelemIssue = $false
     if ($telem) {
         if ($telem.FastStartup.FastStartupEnabled) {
@@ -192,9 +226,6 @@ function Export-DcHtmlReport {
         $telemRows.Add("<div class='empty-state'>&#x2705; No WHEA errors, GPU TDR resets, network drops, or hardware errors found in event telemetry.</div>")
     }
 
-    # Build Hardware HTML
-    $hw = $ReportData.HardwareHealth
-
     # Build Motherboard & Chipset HTML
     $mbRows = [System.Collections.Generic.List[string]]::new()
     if ($hw -and $hw.Motherboard) {
@@ -225,8 +256,21 @@ function Export-DcHtmlReport {
     if ($hw -and $hw.Gpus) {
         foreach ($g in $hw.Gpus) {
             $gpuBadge = if ($g.IsGeneric) { "<span class='badge-critical'>GENERIC ADAPTER</span>" } else { "<span class='badge-healthy'>ACTIVE</span>" }
-            $installInfo = if ($g.AmdInstallType) { "<br><span style='font-size: 0.8rem; color: var(--text-muted);'>Type: $($g.AmdInstallType)</span>" } else { "" }
-            $gpuRows.Add("<tr><td><strong>$($g.Name)</strong>$installInfo</td><td>$($g.Vendor)</td><td>$($g.DriverVersion)</td><td>$($g.DriverDate)</td><td>$gpuBadge</td></tr>")
+            $installInfo = if ($g.AmdInstallType) { "<br><span style='font-size: 0.8rem; color: var(--text-muted);'>Type: " + (& $enc $g.AmdInstallType) + "</span>" } else { "" }
+            $dispVer = if ($g.PSObject.Properties['DisplayVersion'] -and $g.DisplayVersion) { $g.DisplayVersion } else { $g.DriverVersion }
+            $pkgDate = if ($g.PSObject.Properties['DriverPackageDate'] -and $g.DriverPackageDate -is [datetime]) {
+                $g.DriverPackageDate.ToString('yyyy-MM-dd')
+            } elseif ($g.DriverDate -is [datetime]) {
+                $g.DriverDate.ToString('yyyy-MM-dd')
+            } else {
+                "$($g.DriverDate)"
+            }
+            $dateCell = if ($g.PSObject.Properties['DriverInstallDate'] -and $g.DriverInstallDate -is [datetime]) {
+                "Installed: " + $g.DriverInstallDate.ToString('yyyy-MM-dd HH:mm') + "<br><span style='font-size: 0.8rem; color: var(--text-muted);'>Package: " + (& $enc $pkgDate) + "</span>"
+            } else {
+                (& $enc $pkgDate)
+            }
+            $gpuRows.Add("<tr><td><strong>" + (& $enc $g.Name) + "</strong>$installInfo</td><td>" + (& $enc $g.Vendor) + "</td><td>" + (& $enc $dispVer) + "</td><td>$dateCell</td><td>$gpuBadge</td></tr>")
         }
     }
 
@@ -312,7 +356,20 @@ function Export-DcHtmlReport {
 
     $cpuVal = if ($hw -and $hw.Motherboard -and $hw.Motherboard.CpuName) { $hw.Motherboard.CpuName } else { "Standard CPU" }
     $ramVal = if ($hw -and $hw.Memory -and $hw.Memory.Summary) { $hw.Memory.Summary } else { "Audited via System" }
-    $gpuVal = if ($hw -and $hw.Gpus -and $hw.Gpus.Count -gt 0) { "$($hw.Gpus[0].Name) (v$($hw.Gpus[0].DriverVersion))" } else { "Standard Display Adapter" }
+    $primaryDispGpu = if ($hw -and $hw.Gpus -and @($hw.Gpus).Count -gt 0) {
+        (@($hw.Gpus) | Where-Object { -not $_.IsGeneric } | Sort-Object @{ Expression = {
+            $sc = 0
+            if ($_.PSObject.Properties['IsHighBoostCard'] -and $_.IsHighBoostCard) { $sc += 20 }
+            if ($_.Name -match '(?i)\b(RX\s*\d|RTX\s*\d|GTX\s*\d|Radeon\s+PRO|Quadro|Arc\s+[AB]\d|XT\b|XTX\b|Ti\b)') { $sc += 20 }
+            if ($_.Name -match '(?i)^AMD Radeon\(TM\) Graphics$|^AMD Radeon Graphics$|Intel\(R\) UHD|Intel\(R\) HD Graphics|Intel\(R\) Iris') { $sc -= 10 }
+            $sc
+        }; Descending = $true } | Select-Object -First 1)
+    } else { $null }
+    if (-not $primaryDispGpu -and $hw -and $hw.Gpus -and @($hw.Gpus).Count -gt 0) { $primaryDispGpu = @($hw.Gpus)[0] }
+    $gpuVal = if ($primaryDispGpu) {
+        $gv = if ($primaryDispGpu.PSObject.Properties['DisplayVersion'] -and $primaryDispGpu.DisplayVersion) { $primaryDispGpu.DisplayVersion } else { "v$($primaryDispGpu.DriverVersion)" }
+        "$($primaryDispGpu.Name) ($gv)"
+    } else { "Standard Display Adapter" }
     $rebarVal = if ($hw -and $hw.RebarStatus -and $hw.RebarStatus.Details) { $hw.RebarStatus.Details } else { "N/A" }
     $mbVal = if ($hw -and $hw.Motherboard) { "$($hw.Motherboard.MotherboardManufacturer) $($hw.Motherboard.MotherboardProduct)" } else { "Standard Motherboard" }
     $biosVal = if ($hw -and $hw.Motherboard -and $hw.Motherboard.BiosVersion) { " | BIOS: $($hw.Motherboard.BiosVersion)" } else { "" }
@@ -329,8 +386,10 @@ function Export-DcHtmlReport {
     } else { 'Unknown' }
     $gpuNamesStr = if ($hw -and $hw.Gpus -and $hw.Gpus.Count -gt 0) {
         ($hw.Gpus | ForEach-Object {
+            $gv = if ($_.PSObject.Properties['DisplayVersion'] -and $_.DisplayVersion) { $_.DisplayVersion } else { "v$($_.DriverVersion)" }
             $instTag = if ($_.AmdInstallType) { ", $($_.AmdInstallType)" } else { "" }
-            "$($_.Name) (v$($_.DriverVersion)$instTag)"
+            $instDtTag = if ($_.PSObject.Properties['DriverInstallDate'] -and $_.DriverInstallDate -is [datetime]) { ", installed $($_.DriverInstallDate.ToString('yyyy-MM-dd HH:mm'))" } else { "" }
+            "$($_.Name) ($gv$instTag$instDtTag)"
         }) -join ' | '
     } else { 'None' }
     $multiGpuNoticeHtml = ""
@@ -612,6 +671,21 @@ function Export-DcHtmlReport {
         .badge-module { background: rgba(56, 189, 248, 0.14); color: var(--cyan); border: 1px solid rgba(56,189,248,0.25); padding: 2px 7px; border-radius: 6px; font-family: 'Cascadia Code', Consolas, monospace; font-size: 0.8rem; font-weight: 600; }
         .badge-neutral { background: var(--surface-2); color: var(--text-muted); border: 1px solid var(--border); padding: 2px 8px; border-radius: 6px; font-size: 0.78rem; font-weight: 600; }
         .badge-thirdparty { background: rgba(251, 191, 36, 0.18); color: var(--yellow); border: 1px solid rgba(251,191,36,0.4); padding: 1px 7px; border-radius: 999px; font-size: 0.7rem; font-weight: 700; margin-left: 4px; }
+        .badge-scope { background: var(--surface-2); color: var(--cyan); border: 1px solid rgba(56,189,248,0.32); padding: 5px 12px; border-radius: 9999px; font-size: 0.74rem; font-weight: 600; letter-spacing: 0.02em; }
+        .layer-badge { display: inline-flex; align-items: center; padding: 3px 10px; border-radius: 999px; font-size: 0.73rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+        .layer-app { background: rgba(56, 189, 248, 0.15); color: var(--cyan); border: 1px solid rgba(56, 189, 248, 0.38); }
+        .layer-shader { background: rgba(192, 132, 252, 0.16); color: var(--magenta); border: 1px solid rgba(192, 132, 252, 0.38); }
+        .layer-os { background: rgba(251, 191, 36, 0.16); color: var(--yellow); border: 1px solid rgba(251, 191, 36, 0.38); }
+        .layer-hw { background: rgba(249, 115, 22, 0.15); color: #f97316; border: 1px solid rgba(249, 115, 22, 0.38); }
+        .layer-gpu { background: rgba(248, 113, 113, 0.16); color: var(--red); border: 1px solid rgba(248, 113, 113, 0.40); }
+        .layer-unattr { background: var(--surface-2); color: var(--text-muted); border: 1px solid var(--border-strong); }
+        .attr-grid { display: grid; gap: 10px; }
+        .attr-row { background: var(--surface-2); border: 1px solid var(--border); border-radius: 11px; padding: 13px 15px; display: flex; flex-direction: column; gap: 6px; }
+        .attr-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .attr-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 0.92rem; }
+        .attr-blamed { font-size: 0.85rem; color: var(--text-muted); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+        .attr-verdict { font-size: 0.9rem; color: var(--text); line-height: 1.5; }
+        .attr-ev { font-size: 0.8rem; color: var(--text-muted); background: var(--code-bg); border: 1px solid var(--border); border-radius: 7px; padding: 6px 10px; font-family: 'Cascadia Code', Consolas, monospace; word-break: break-word; }
 
         /* Sticky nav & search */
         .sticky-bar {
@@ -839,8 +913,11 @@ function Export-DcHtmlReport {
     $parts.Add("                    <p>$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss')) &middot; " + (& $enc $scanInfo) + $(if ($mbHeaderInfo) { " &middot; " + (& $enc $mbHeaderInfo) } else { "" }) + "</p>")
     $parts.Add("                </div>")
     $parts.Add("            </div>")
+    $isElevatedReport = ($telem -and $telem.PSObject.Properties['IsElevated'] -and $telem.IsElevated)
+    $scopeText = if ($isElevatedReport) { "Elevated Scan (Admin)" } else { "Standard User Scan (No Admin)" }
     $parts.Add("            <div class='header-actions'>")
     $parts.Add("                <span class='badge $statusClass'>$statusText</span>")
+    $parts.Add("                <span class='badge-scope'>" + (& $enc $scopeText) + "</span>")
     $parts.Add("                <button type='button' class='btn' onclick='toggleTheme()' id='themeBtn'>Light Mode</button>")
     $parts.Add("                <button type='button' class='btn btn-primary' onclick='copyDiscordSummary()'>Copy Summary</button>")
     $parts.Add("                <button type='button' class='btn' onclick='window.print()'>Print / PDF</button>")
@@ -961,6 +1038,43 @@ function Export-DcHtmlReport {
             $parts.Add("                        </ul>")
         }
         $parts.Add("                    </div>")
+        $parts.Add("                </div>")
+        $parts.Add("            </section>")
+    }
+
+    # Cause Separation Card (Driver vs App/Overlay vs Shader/Workload vs Windows/Hardware vs Unattributed)
+    $attrItems = @()
+    if ($cf -and $cf.PSObject.Properties['IncidentAttributions'] -and $cf.IncidentAttributions) {
+        $attrItems = @($cf.IncidentAttributions)
+    } elseif ($ps -and $ps.PSObject.Properties['Attributions'] -and $ps.Attributions) {
+        $attrItems = @($ps.Attributions)
+    }
+    if ($attrItems.Count -gt 0) {
+        $parts.Add("            <section class='card-item' id='cause-separation' style='margin-top:14px;'>")
+        $parts.Add("                <div class='section-heading'><h2>Timeout &amp; Crash Cause Separation</h2><span class='section-sub'>Separating GPU driver bugs from app/overlay faults, shader workloads, Windows events, and hardware links</span></div>")
+        $parts.Add("                <div class='attr-grid'>")
+        foreach ($at in $attrItems) {
+            $layerCls = switch ($at.Classification) {
+                'APP_OR_OVERLAY'     { 'layer-app' }
+                'SHADER_OR_WORKLOAD' { 'layer-shader' }
+                'OS_OR_SYSTEM_EVENT' { 'layer-os' }
+                'DEVICE_OR_HARDWARE' { 'layer-hw' }
+                'GPU_DRIVER'         { 'layer-gpu' }
+                default              { 'layer-unattr' }
+            }
+            $atWhen = if ($at.Timestamp -is [datetime]) { $at.Timestamp.ToString('yyyy-MM-dd HH:mm:ss') } else { 'unknown time' }
+            $atFkHtml = if ($at.FaultKey) { " <span class='badge-code'>" + (& $enc $at.FaultKey) + "</span>" } else { "" }
+            $atEvHtml = if (@($at.Evidence).Count -gt 0) { "<div class='attr-ev'>" + ((@($at.Evidence) | ForEach-Object { & $enc $_ }) -join ' &middot; ') + "</div>" } else { "" }
+            $parts.Add("                    <div class='attr-row'>")
+            $parts.Add("                        <div class='attr-top'>")
+            $parts.Add("                            <div class='attr-title'><span class='layer-badge $layerCls'>" + (& $enc $at.LayerBadge) + "</span> <span class='badge-neutral'>" + (& $enc $at.Confidence) + "</span> <strong>" + (& $enc $at.SurfaceSymptom) + "</strong></div>")
+            $parts.Add("                            <span class='badge-neutral'>" + (& $enc $atWhen) + "</span>")
+            $parts.Add("                        </div>")
+            $parts.Add("                        <div class='attr-blamed'>Blamed component: <span class='badge-module'>" + (& $enc $at.BlamedComponent) + "</span>$atFkHtml</div>")
+            $parts.Add("                        <div class='attr-verdict'>" + (& $enc $at.PlainVerdict) + "</div>")
+            $parts.Add("                        $atEvHtml")
+            $parts.Add("                    </div>")
+        }
         $parts.Add("                </div>")
         $parts.Add("            </section>")
     }
@@ -1130,7 +1244,15 @@ function Export-DcHtmlReport {
             foreach ($pd in @($pdObj.Disks)) {
                 $wearS = if ($null -ne $pd.Wear) { "$($pd.Wear)%" } else { "n/a" }
                 $tempS = if ($null -ne $pd.TemperatureC) { "$($pd.TemperatureC) C" } else { "n/a" }
-                $errS  = if ($pd.ReliabilityAvailable) { "$($pd.ReadErrorsUncorrected) / $($pd.WriteErrorsUncorrected)" } else { "n/a" }
+                $errS  = if ($pd.ReliabilityAvailable) {
+                    if ($null -eq $pd.ReadErrorsUncorrected -and $null -eq $pd.WriteErrorsUncorrected) {
+                        "n/a (NVMe)"
+                    } else {
+                        $rS = if ($null -ne $pd.ReadErrorsUncorrected) { $pd.ReadErrorsUncorrected } else { "n/a" }
+                        $wS = if ($null -ne $pd.WriteErrorsUncorrected) { $pd.WriteErrorsUncorrected } else { "n/a" }
+                        "$rS / $wS"
+                    }
+                } else { "n/a" }
                 $hlthB = if ($pd.HealthStatus -eq 'Healthy') { "<span class='badge-healthy'>Healthy</span>" } else { "<span class='badge-critical'>" + (& $enc $pd.HealthStatus) + "</span>" }
                 $parts.Add("                    <tr><td>" + (& $enc $pd.FriendlyName) + "</td><td>$($pd.SizeGb) GB</td><td>" + (& $enc $pd.BusType) + "</td><td>$hlthB</td><td>$wearS / $tempS</td><td>$errS</td></tr>")
             }
@@ -1153,7 +1275,7 @@ function Export-DcHtmlReport {
     $parts.Add("                </div>")
     $parts.Add("            </div>")
 
-    $parts.Add("            <div class='card-item'><strong>Active Graphics Hardware</strong><table><thead><tr><th>Device Name</th><th>Vendor</th><th>Driver Version</th><th>Driver Date</th><th>Status</th></tr></thead><tbody>" + ($gpuRows -join "`n") + "</tbody></table>$multiGpuNoticeHtml</div>")
+    $parts.Add("            <div class='card-item'><strong>Active Graphics Hardware</strong><table><thead><tr><th>Device Name</th><th>Vendor</th><th>Driver Version</th><th>Installed / Package Date</th><th>Status</th></tr></thead><tbody>" + ($gpuRows -join "`n") + "</tbody></table>$multiGpuNoticeHtml</div>")
     if ($mbRows.Count -gt 0) { $parts.Add("            <div style='margin-top:10px;'>" + ($mbRows -join "`n") + "</div>") }
     $parts.Add("            <div class='hw-grid' style='margin-top:10px;'>")
     $parts.Add("                <div>" + ($displayRows -join "`n") + "</div>")
@@ -1176,7 +1298,7 @@ function Export-DcHtmlReport {
     # Share box & Toast
     $parts.Add("        <div class='discord-copy-box'>")
     $parts.Add("            <div style='display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;'><strong>Share Summary for Discord / Reddit / Tech Support</strong><button type='button' class='btn btn-primary' onclick='copyDiscordSummary()'>Copy to Clipboard</button></div>")
-    $parts.Add("            <textarea id='discordSummaryBox' readonly onclick='this.select()'>$discordText</textarea>")
+    $parts.Add("            <textarea id='discordSummaryBox' readonly onclick='this.select()'>" + (& $enc $discordText) + "</textarea>")
     $parts.Add("        </div>")
     $parts.Add("        <footer>DriverCheck Diagnostic Suite v4.5.0 &middot; Evidence-Based Crash &amp; Driver Analysis</footer>")
     $parts.Add("    </div>")
@@ -1336,7 +1458,11 @@ function Export-DcSupportBundle {
             }
             if ($localLogPath -and (Test-Path $localLogPath)) {
                 $dest = Join-Path $logsDir "$($el.Engine)_$($el.LogName)"
-                $tailLines = Get-Content $localLogPath -Tail 500 -ErrorAction SilentlyContinue
+                $tailLines = if (Get-Command Read-DcSharedLogLines -ErrorAction SilentlyContinue) {
+                    Read-DcSharedLogLines -Path $localLogPath -Tail 500
+                } else {
+                    Get-Content $localLogPath -Tail 500 -ErrorAction SilentlyContinue
+                }
                 if ($tailLines) {
                     $sanitized = $tailLines | ForEach-Object {
                         if (Get-Command Protect-DcLogText -ErrorAction SilentlyContinue) {

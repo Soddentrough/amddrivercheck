@@ -450,20 +450,21 @@ if (-not $Quiet) {
 $dumpFiles = Get-DcCrashDumps -Cutoff $cutoff -EndTime $endTime
 $parsedDumps = [System.Collections.Generic.List[PSCustomObject]]::new()
 
-# Report evidence sources that exist but cannot be read, instead of silently skipping them.
-$unreadableSources = [System.Collections.Generic.List[string]]::new()
+$isCurrentAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$blockedDumpFolders = [System.Collections.Generic.List[string]]::new()
 foreach ($probe in @((Join-Path $env:SystemRoot "Minidump"), (Join-Path $env:SystemRoot "LiveKernelReports"))) {
     if (Test-Path -LiteralPath $probe -ErrorAction SilentlyContinue) {
         try {
             [void](Get-ChildItem -LiteralPath $probe -Force -ErrorAction Stop | Select-Object -First 1)
         } catch {
-            $unreadableSources.Add("$probe - Windows crash dump location found (requires Administrator privileges). Install WinDbg from the Microsoft Store ('winget install Microsoft.WinDbg') and re-run DriverCheck from an Administrator PowerShell to analyze these dumps.")
+            $blockedDumpFolders.Add($probe)
         }
     }
 }
-if (-not $Quiet) {
-    foreach ($u in $unreadableSources) { Write-Host "  [i] $u" -ForegroundColor Cyan }
+if (-not $Quiet -and -not $isCurrentAdmin -and $blockedDumpFolders.Count -gt 0) {
+    Write-Host "  [i] Standard User mode: analyzing user-accessible Event Logs, WER archives, Steam sessions, and engine logs (no Admin required)." -ForegroundColor Cyan
 }
+$unreadableSources = [System.Collections.Generic.List[string]]::new()
 
 if ($dumpFiles.Count -gt 0) {
     $dumpIdx = 0
@@ -478,12 +479,15 @@ if ($dumpFiles.Count -gt 0) {
         if ($dumpObj) {
             $parsedDumps.Add($dumpObj)
             if (-not $Quiet) {
+                $isLiveDump = ($dumpObj.PSObject.Properties['IsLiveKernelReport'] -and $dumpObj.IsLiveKernelReport)
+                $liveTag = if ($isLiveDump) { " [NON-FATAL LIVE KERNEL DUMP]" } else { "" }
+                $excColor = if ($isLiveDump) { [ConsoleColor]::Yellow } else { [ConsoleColor]::Red }
                 Write-Host "------------------------------------------------------------------------" -ForegroundColor Gray
-                Write-Host "Dump File:     $($dumpObj.FileName)" -ForegroundColor Yellow
+                Write-Host "Dump File:     $($dumpObj.FileName)$liveTag" -ForegroundColor Yellow
                 Write-Host "Location:      $($dumpObj.FullName)" -ForegroundColor White
                 Write-Host "Timestamp:     $($dumpObj.Timestamp.ToString('yyyy-MM-dd HH:mm:ss')) | $($dumpObj.SizeMb) MB | $($dumpObj.Architecture)" -ForegroundColor DarkGray
                 if ($dumpObj.ExceptionCode) {
-                    Write-Host "  +- Exception:        $($dumpObj.ExceptionCode) ($($dumpObj.ExceptionMeaning))" -ForegroundColor Red
+                    Write-Host "  +- Exception:        $($dumpObj.ExceptionCode) ($($dumpObj.ExceptionMeaning))" -ForegroundColor $excColor
                     Write-Host "  +- Faulting Module:  $($dumpObj.FaultingIP)" -ForegroundColor White
                 }
                 if ($dumpObj.ApiContext) {
@@ -500,6 +504,10 @@ if ($dumpFiles.Count -gt 0) {
                 }
                 if ($dumpObj.DebuggerImageName -or $dumpObj.DebuggerModuleName) {
                     Write-Host "  +- Debugger Module:  $($dumpObj.DebuggerModuleName) ($($dumpObj.DebuggerImageName)) $($dumpObj.DebuggerSymbolName)" -ForegroundColor White
+                }
+                if ($dumpObj.PSObject.Properties['HardwareId'] -and $dumpObj.HardwareId) {
+                    $hwDisplay = if ($dumpObj.PSObject.Properties['HardwareDeviceName'] -and $dumpObj.HardwareDeviceName) { "$($dumpObj.HardwareDeviceName) [$($dumpObj.HardwareId)]" } else { "$($dumpObj.HardwareId)" }
+                    Write-Host "  +- Blamed Hardware:  $hwDisplay" -ForegroundColor Cyan
                 }
                 if ($dumpObj.RawAnalysisPath) {
                     Write-Host "  +- Raw cdb output:   $($dumpObj.RawAnalysisPath)" -ForegroundColor DarkGray
@@ -738,7 +746,15 @@ if (-not $Quiet) {
     foreach ($pd in $diskHealth.Disks) {
         $wearTxt = if ($null -ne $pd.Wear) { "Wear $($pd.Wear)%" } else { "Wear n/a" }
         $tempTxt = if ($null -ne $pd.TemperatureC) { "$($pd.TemperatureC) C" } else { "temp n/a" }
-        $errTxt = if ($pd.ReliabilityAvailable) { "Uncorrected errors R/W: $($pd.ReadErrorsUncorrected)/$($pd.WriteErrorsUncorrected)" } else { "SMART counters unavailable" }
+        $errTxt = if ($pd.ReliabilityAvailable) {
+            if ($null -eq $pd.ReadErrorsUncorrected -and $null -eq $pd.WriteErrorsUncorrected) {
+                "Uncorrected errors: not reported by NVMe/driver"
+            } else {
+                $rErr = if ($null -ne $pd.ReadErrorsUncorrected) { $pd.ReadErrorsUncorrected } else { "n/a" }
+                $wErr = if ($null -ne $pd.WriteErrorsUncorrected) { $pd.WriteErrorsUncorrected } else { "n/a" }
+                "Uncorrected errors R/W: $rErr/$wErr"
+            }
+        } else { "SMART counters unavailable" }
         $pdColor = if ($pd.HealthStatus -eq 'Healthy' -and $diskHealth.Findings.Count -eq 0) { [ConsoleColor]::White } else { [ConsoleColor]::Yellow }
         Write-Host "  Disk        : $($pd.FriendlyName) ($($pd.SizeGb) GB $($pd.BusType)) | Health: $($pd.HealthStatus) | $wearTxt | $tempTxt | $errTxt" -ForegroundColor $pdColor
     }
@@ -764,7 +780,10 @@ if (-not $Quiet) {
 
     foreach ($g in $gpuHealth.Gpus) {
         Write-Host "  GPU: $($g.Name) ($($g.Vendor))" -ForegroundColor Yellow
-        Write-Host "    +- Driver Version: $($g.DriverVersion) | Date: $($g.DriverDate)" -ForegroundColor DarkGray
+        $dispVer = if ($g.PSObject.Properties['DisplayVersion'] -and $g.DisplayVersion) { $g.DisplayVersion } else { $g.DriverVersion }
+        $instDateStr = if ($g.PSObject.Properties['DriverInstallDate'] -and $g.DriverInstallDate -is [datetime]) { " | Installed: $($g.DriverInstallDate.ToString('yyyy-MM-dd HH:mm'))" } else { "" }
+        $pkgDateStr = if ($g.PSObject.Properties['DriverPackageDate'] -and $g.DriverPackageDate -is [datetime]) { $g.DriverPackageDate.ToString('yyyy-MM-dd') } elseif ($g.DriverDate -is [datetime]) { $g.DriverDate.ToString('yyyy-MM-dd') } else { "$($g.DriverDate)" }
+        Write-Host "    +- Driver Version: $dispVer$instDateStr | Package Date: $pkgDateStr" -ForegroundColor DarkGray
         $installTypeStr = if ($g.AmdInstallType) { " | Install: $($g.AmdInstallType)" } else { "" }
         Write-Host "    +- Provider:       $($g.Provider) | Status: $($g.Status)$installTypeStr" -ForegroundColor DarkGray
         if ($g.CrashDefenderActive) {
@@ -830,6 +849,10 @@ if (-not $Quiet) {
 # -------------------------------------------------------------------------
 # EXECUTIVE ROOT CAUSE DETERMINATION (MULTI-FINDING RULE ENGINE)
 # -------------------------------------------------------------------------
+if ($blockedDumpFolders -and $blockedDumpFolders.Count -gt 0 -and $telemetry -and (@($telemetry.KernelBugChecks).Count -gt 0 -or @($telemetry.TdrEvents).Count -gt 0)) {
+    $unreadableSources.Add("$($blockedDumpFolders -join ', ') - Protected Windows kernel dump folder(s) require Administrator privileges to decode kernel call stacks.")
+}
+
 $findingResult = Resolve-DcDiagnosticFindings `
     -ParsedDumps $parsedDumps `
     -Telemetry $telemetry `
@@ -868,11 +891,12 @@ $forensics = $null
 $forensicsFile = $null
 try {
     $hwForSummary = [PSCustomObject]@{
+        Gpus          = @($gpuHealth.Gpus)
         Memory        = $memHealth
         PhysicalDisks = $diskHealth
         WheaEvents    = $wheaEvents
     }
-    $forensics = Get-DcCrashForensics -Dumps @($parsedDumps) -Telemetry $telemetry -Hardware $hwForSummary -UnreadableSources @($unreadableSources)
+    $forensics = Get-DcCrashForensics -Dumps @($parsedDumps) -Telemetry $telemetry -Hardware $hwForSummary -UnreadableSources @($unreadableSources) -EngineLogs @($engineLogs) -SteamLogs @($steamLogs) -SteamGameSessions @($steamGameSessions)
 } catch {
     if (-not $Quiet) {
         Write-Host "  [!] Crash forensics failed: $($_.Exception.Message)" -ForegroundColor Yellow

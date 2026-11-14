@@ -170,12 +170,151 @@ public static class DcNativeRegResourceReader {
     return $rebarStatus
 }
 
+function ConvertTo-DcFriendlyGpuVersion {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$Vendor = "",
+
+        [Parameter(Mandatory = $false)]
+        [string]$WddmVersion = "",
+
+        [Parameter(Mandatory = $false)]
+        [string]$MarketingVersion = "",
+
+        [Parameter(Mandatory = $false)]
+        [string]$Edition = "",
+
+        [Parameter(Mandatory = $false)]
+        [bool]$IsGeneric = $false
+    )
+
+    $wddm = if ($WddmVersion) { ($WddmVersion.Trim() -replace '^(?i)v', '').Trim() } else { "" }
+    $mkt = if ($MarketingVersion) { $MarketingVersion.Trim() } else { "" }
+    $ed = if ($Edition) { $Edition.Trim() } else { "" }
+
+    $normVendor = if ($Vendor -match '(?i)^amd$|advanced micro devices') {
+        "AMD"
+    } elseif ($Vendor -match '(?i)^nvidia$') {
+        "NVIDIA"
+    } elseif ($Vendor -match '(?i)^intel') {
+        "Intel"
+    } elseif ($Vendor) {
+        $Vendor.Trim()
+    } else {
+        ""
+    }
+
+    if (-not $IsGeneric) {
+        if ($normVendor -eq "NVIDIA" -and -not $mkt -and $wddm -match '^(\d+)\.(\d+)\.(\d+)\.(\d+)$') {
+            # NVIDIA WDDM AA.BB.1X.YYYY encodes the public GeForce/Studio release in the last 5 digits (XXX.XX)
+            $combined = "{0}{1:D4}" -f [int]$Matches[3], [int]$Matches[4]
+            if ($combined.Length -ge 5) {
+                $last5 = $combined.Substring($combined.Length - 5)
+                $maj = [int]$last5.Substring(0, 3)
+                $minStr = $last5.Substring(3, 2)
+                if ($maj -ge 300 -and $maj -le 999) {
+                    $mkt = "$maj.$minStr"
+                }
+            }
+        } elseif ($normVendor -eq "Intel" -and $mkt -ieq $wddm) {
+            $mkt = ""
+        }
+    } else {
+        $mkt = ""
+    }
+
+    $displayVer = if ($mkt -and $wddm -and $mkt -ine $wddm) {
+        "$mkt ($wddm)"
+    } elseif ($wddm) {
+        $wddm
+    } elseif ($mkt) {
+        $mkt
+    } else {
+        "Unknown"
+    }
+
+    $verSuffix = if ($displayVer -ne "Unknown") { " $displayVer" } else { "" }
+    $friendlyLabel = if ($IsGeneric) {
+        if ($wddm) { "Microsoft Basic Display Driver ($wddm)" } else { "Microsoft Basic Display Driver" }
+    } elseif ($normVendor -in @('AMD', 'NVIDIA', 'Intel')) {
+        "$normVendor GPU driver$verSuffix"
+    } else {
+        "GPU driver$verSuffix"
+    }
+
+    return [PSCustomObject]@{
+        Vendor              = $normVendor
+        WddmVersion         = if ($wddm) { $wddm } else { $null }
+        MarketingVersion    = if ($mkt) { $mkt } else { $null }
+        Edition             = if ($ed) { $ed } else { $null }
+        DisplayVersion      = $displayVer
+        FriendlyDriverLabel = $friendlyLabel
+    }
+}
+
 function Get-DcGpuDriverHealth {
     [CmdletBinding()]
     param()
 
     $gpus = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue)
     $signedDrivers = @(Get-CimInstance Win32_PnPSignedDriver -Filter "DeviceClass = 'DISPLAY'" -ErrorAction SilentlyContinue)
+
+    $parseDateValue = {
+        param($Val)
+        if ($null -eq $Val) { return $null }
+        if ($Val -is [datetimeoffset]) { return $Val.LocalDateTime }
+        if ($Val -is [datetime]) { return $Val }
+        $s = [string]$Val
+        if ([string]::IsNullOrWhiteSpace($s)) { return $null }
+        if ($s -match '^\d{14}\.\d+[\+\-]\d+$') {
+            try { return [System.Management.ManagementDateTimeConverter]::ToDateTime($s) } catch {}
+        }
+        $dtOut = [datetime]::MinValue
+        if ([datetime]::TryParse($s, [ref]$dtOut)) { return $dtOut }
+        return $null
+    }
+
+    # Pre-load Display Class registry subkeys once (used for friendly driver versions, INF paths, and ULPS state)
+    $classSubkeysById = @{}
+    $classSubkeyList = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $ulpsActive = $false
+    try {
+        $classKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+        if (Test-Path $classKey) {
+            $subkeys = Get-ChildItem -Path $classKey -ErrorAction SilentlyContinue
+            foreach ($sk in $subkeys) {
+                $p = Get-ItemProperty -Path $sk.PSPath -ErrorAction SilentlyContinue
+                if (-not $p) { continue }
+                if (($p.DriverDesc -match '(?i)Radeon|AMD' -or $null -ne $p.EnableUlps) -and $p.EnableUlps -eq 1) {
+                    $ulpsActive = $true
+                }
+                if ($sk.PSChildName -match '^\d{4}$') {
+                    $entry = [PSCustomObject]@{
+                        SubkeyId              = $sk.PSChildName
+                        DriverDesc            = [string]$p.DriverDesc
+                        DriverVersion         = [string]$p.DriverVersion
+                        InfPath               = [string]$p.InfPath
+                        RadeonSoftwareVersion = [string]$p.RadeonSoftwareVersion
+                        RadeonSoftwareEdition = [string]$p.RadeonSoftwareEdition
+                        ReleaseVersion        = [string]$p.ReleaseVersion
+                    }
+                    $classSubkeysById[$sk.PSChildName] = $entry
+                    $classSubkeyList.Add($entry)
+                }
+            }
+        }
+    } catch {}
+
+    $amdCnReg = $null
+    try {
+        $amdCnReg = Get-ItemProperty -Path "HKLM:\SOFTWARE\AMD\CN" -ErrorAction SilentlyContinue
+    } catch {}
+
+    $pnpCfgEvents = @()
+    try {
+        $pnpCfgEvents = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Kernel-PnP/Configuration'; Id = 400; StartTime = (Get-Date).AddDays(-60) } -ErrorAction SilentlyContinue)
+    } catch {}
 
     $gpuList = [System.Collections.Generic.List[PSCustomObject]]::new()
     foreach ($vc in $gpus) {
@@ -188,6 +327,90 @@ function Get-DcGpuDriverHealth {
         $isAMD = ($prov -match '(?i)Advanced Micro Devices|AMD' -or $vc.Name -match '(?i)Radeon')
         $isNvidia = ($prov -match '(?i)NVIDIA' -or $vc.Name -match '(?i)GeForce|RTX|GTX')
         $isIntel = ($prov -match '(?i)Intel' -or $vc.Name -match '(?i)Arc|Iris|UHD|HD Graphics')
+        $vendorName = if ($isAMD) { "AMD" } elseif ($isNvidia) { "NVIDIA" } elseif ($isIntel) { "Intel" } else { "Other" }
+
+        # Query PnP device properties without -KeyName array (array filtering is unreliable on PowerShell 5.1)
+        $pnpMap = @{}
+        if ($vc.PNPDeviceID) {
+            try {
+                $props = @(Get-PnpDeviceProperty -InstanceId $vc.PNPDeviceID -ErrorAction SilentlyContinue)
+                foreach ($pp in $props) {
+                    if ($pp -and $pp.KeyName) { $pnpMap[$pp.KeyName] = $pp.Data }
+                }
+            } catch {}
+        }
+
+        # Match Display Class registry key (via DEVPKEY_Device_Driver, falling back to DriverDesc + DriverVersion)
+        $matchedClass = $null
+        if ($pnpMap.ContainsKey('DEVPKEY_Device_Driver') -and $pnpMap['DEVPKEY_Device_Driver'] -match '(\d{4})$') {
+            $subId = $Matches[1]
+            if ($classSubkeysById.ContainsKey($subId)) {
+                $matchedClass = $classSubkeysById[$subId]
+            }
+        }
+        if (-not $matchedClass -and $ver) {
+            $matchedClass = $classSubkeyList | Where-Object { $_.DriverVersion -eq $ver -and $_.DriverDesc -eq $vc.Name } | Select-Object -First 1
+            if (-not $matchedClass) {
+                $matchedClass = $classSubkeyList | Where-Object { $_.DriverVersion -eq $ver } | Select-Object -First 1
+            }
+        }
+
+        $marketingVer = $null
+        $driverEdition = $null
+        $releaseVer = $null
+        if ($matchedClass) {
+            if ($matchedClass.RadeonSoftwareVersion) { $marketingVer = $matchedClass.RadeonSoftwareVersion.Trim() }
+            if ($matchedClass.RadeonSoftwareEdition) { $driverEdition = $matchedClass.RadeonSoftwareEdition.Trim() }
+            if ($matchedClass.ReleaseVersion) { $releaseVer = $matchedClass.ReleaseVersion.Trim() }
+        }
+        if ($isAMD -and -not $marketingVer -and $amdCnReg -and $amdCnReg.DriverVersion -eq $ver -and $amdCnReg.PSObject.Properties['RadeonSoftwareVersion'] -and $amdCnReg.RadeonSoftwareVersion) {
+            $marketingVer = [string]$amdCnReg.RadeonSoftwareVersion
+        }
+
+        $driverInfPath = $null
+        if ($pnpMap.ContainsKey('DEVPKEY_Device_DriverInfPath') -and $pnpMap['DEVPKEY_Device_DriverInfPath']) {
+            $driverInfPath = [string]$pnpMap['DEVPKEY_Device_DriverInfPath']
+        } elseif ($matchedClass -and $matchedClass.InfPath) {
+            $driverInfPath = $matchedClass.InfPath
+        } elseif ($sd -and $sd.InfName) {
+            $driverInfPath = [string]$sd.InfName
+        }
+
+        $pkgDate = & $parseDateValue $(if ($pnpMap.ContainsKey('DEVPKEY_Device_DriverDate') -and $pnpMap['DEVPKEY_Device_DriverDate']) { $pnpMap['DEVPKEY_Device_DriverDate'] } else { $rawDate })
+        if (-not $rawDate -and $pkgDate) { $rawDate = $pkgDate }
+
+        $instDate = $null
+        if ($pnpMap.ContainsKey('DEVPKEY_Device_InstallDate') -and $pnpMap['DEVPKEY_Device_InstallDate']) {
+            $instDate = & $parseDateValue $pnpMap['DEVPKEY_Device_InstallDate']
+        }
+
+        $prevDriverInf = $null
+        if ($vc.PNPDeviceID -and $pnpCfgEvents.Count -gt 0) {
+            $idEsc = [regex]::Escape($vc.PNPDeviceID)
+            $matchingCfgEv = $pnpCfgEvents | Where-Object { $_.Message -match $idEsc } | Sort-Object TimeCreated -Descending | Select-Object -First 1
+            if ($matchingCfgEv) {
+                if (-not $instDate) { $instDate = [datetime]$matchingCfgEv.TimeCreated }
+                if ($matchingCfgEv.Message -match '(?i)Outranked Drivers:\s*(oem\d+\.inf)') {
+                    $prevDriverInf = $Matches[1]
+                }
+            }
+        }
+        if (-not $instDate -and $driverInfPath -and ($driverInfPath -match '^oem\d+\.inf$') -and $env:SystemRoot) {
+            $infFull = Join-Path $env:SystemRoot "INF\$driverInfPath"
+            if (Test-Path -LiteralPath $infFull -ErrorAction SilentlyContinue) {
+                try {
+                    $infItem = Get-Item -LiteralPath $infFull -ErrorAction Stop
+                    $instDate = $infItem.LastWriteTime
+                } catch {}
+            }
+        }
+
+        $friendlyVerInfo = ConvertTo-DcFriendlyGpuVersion `
+            -Vendor $vendorName `
+            -WddmVersion $(if ($ver) { [string]$ver } else { "" }) `
+            -MarketingVersion $(if ($marketingVer) { $marketingVer } else { "" }) `
+            -Edition $(if ($driverEdition) { $driverEdition } else { "" }) `
+            -IsGeneric $isGeneric
 
         # Detect AMD Software Install Type (Driver Only vs Adrenalin Full Install) and Crash Defender
         $amdInstallType = $null
@@ -210,11 +433,20 @@ function Get-DcGpuDriverHealth {
             Name                = $vc.Name
             PNPDeviceID         = $vc.PNPDeviceID
             DriverVersion       = $ver
+            MarketingVersion    = $friendlyVerInfo.MarketingVersion
+            DriverEdition       = $friendlyVerInfo.Edition
+            ReleaseVersion      = $releaseVer
+            DisplayVersion      = $friendlyVerInfo.DisplayVersion
+            FriendlyDriverLabel = $friendlyVerInfo.FriendlyDriverLabel
             DriverDate          = $rawDate
+            DriverPackageDate   = $pkgDate
+            DriverInstallDate   = $instDate
+            DriverInfPath       = $driverInfPath
+            PreviousDriverInf   = $prevDriverInf
             Provider            = $prov
             Status              = $vc.Status
             IsGeneric           = $isGeneric
-            Vendor              = if ($isAMD) { "AMD" } elseif ($isNvidia) { "NVIDIA" } elseif ($isIntel) { "Intel" } else { "Other" }
+            Vendor              = $vendorName
             AmdInstallType      = $amdInstallType
             CrashDefenderActive = $crashDefenderActive
             IsHighBoostCard     = $isHighBoost
@@ -230,7 +462,7 @@ function Get-DcGpuDriverHealth {
     $activeGpus = @($gpuList | Where-Object { -not $_.IsGeneric })
     if ($activeGpus.Count -ge 2) {
         $hybridMultiGpu = $true
-        $gpuSummaryNames = ($activeGpus | ForEach-Object { "$($_.Name) ($($_.Vendor) v$($_.DriverVersion))" }) -join ' + '
+        $gpuSummaryNames = ($activeGpus | ForEach-Object { "$($_.Name) ($($_.Vendor) $($_.DisplayVersion))" }) -join ' + '
         $vendors = @($activeGpus.Vendor | Select-Object -Unique)
         if ($vendors.Count -gt 1) {
             $hybridMultiGpuDetails = "Hybrid cross-vendor multi-GPU configuration active: $gpuSummaryNames. Cross-vendor iGPU + dGPU setups can experience DXGI adapter enumeration or HAGS / DWM presentation deadlocks (LiveKernelEvent 0x193 / 0x141) in D3D12 titles."
@@ -245,7 +477,8 @@ function Get-DcGpuDriverHealth {
             $versions = @($amdGpus.DriverVersion | Select-Object -Unique)
             if ($versions.Count -gt 1) {
                 $dualGpuConflict = $true
-                $dualGpuDetails = "Discrete GPU and integrated GPU report different driver versions ($($versions -join ' vs '))."
+                $dispVersions = @($amdGpus.DisplayVersion | Select-Object -Unique)
+                $dualGpuDetails = "Discrete GPU and integrated GPU report different driver versions ($($dispVersions -join ' vs '))."
             }
         }
     }
@@ -274,21 +507,6 @@ function Get-DcGpuDriverHealth {
 
     $wuReg = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -ErrorAction SilentlyContinue
     $excludeWUDrivers = if ($wuReg) { $wuReg.ExcludeWUDriversInQualityUpdate } else { $null }
-
-    $ulpsActive = $false
-    try {
-        $classKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
-        if (Test-Path $classKey) {
-            $subkeys = Get-ChildItem -Path $classKey -ErrorAction SilentlyContinue
-            foreach ($sk in $subkeys) {
-                $p = Get-ItemProperty -Path $sk.PSPath -ErrorAction SilentlyContinue
-                if ($p -and ($p.DriverDesc -match '(?i)Radeon|AMD' -or $null -ne $p.EnableUlps) -and $p.EnableUlps -eq 1) {
-                    $ulpsActive = $true
-                    break
-                }
-            }
-        }
-    } catch {}
 
     return [PSCustomObject]@{
         Gpus                  = @($gpuList)
@@ -1119,7 +1337,7 @@ function Get-DcPhysicalDiskHealth {
         if ($null -ne $disk.Wear -and $disk.Wear -ge 80) { $result.Findings.Add("$name wear is $($disk.Wear)% (SSD nearing end of life).") }
         if ($null -ne $disk.TemperatureC -and $disk.TemperatureC -ge 70) { $result.Findings.Add("$name temperature is $($disk.TemperatureC) C (max recorded: $($disk.TemperatureMaxC) C).") }
         if ($disk.ReadErrorsUncorrected -gt 0 -or $disk.WriteErrorsUncorrected -gt 0) { $result.Findings.Add("$name has uncorrected I/O errors (read: $($disk.ReadErrorsUncorrected), write: $($disk.WriteErrorsUncorrected)).") }
-        if (-not $disk.ReliabilityAvailable) { $result.Notes.Add("$($pd.FriendlyName): SMART/reliability counters not available (may require Administrator or driver support).") }
+        if (-not $disk.ReliabilityAvailable) { $result.Notes.Add("$($pd.FriendlyName): Overall drive status is $($disk.HealthStatus) (detailed NVMe SMART wear/temperature counters require Administrator).") }
     }
 
     # Storage-related errors from the System log (disk, filesystem, NVMe/SATA controller)
@@ -1165,4 +1383,4 @@ function Get-DcWheaEvents {
     } catch {}
     return $events
 }
-Export-ModuleMember -Function Get-DcPnpHealth, Get-DcGpuDriverHealth, Get-DcRebarStatus, Get-DcMemoryHealth, Get-DcStorageHealth, Get-DcPhysicalDiskHealth, Get-DcWheaEvents, Get-DcBluetoothHealth, Get-DcNetworkHealth, Get-DcDisplayDiagnostics, Get-DcProblematicKernelDrivers, Get-DcMotherboardAndChipsetHealth
+Export-ModuleMember -Function Get-DcPnpHealth, Get-DcGpuDriverHealth, ConvertTo-DcFriendlyGpuVersion, Get-DcRebarStatus, Get-DcMemoryHealth, Get-DcStorageHealth, Get-DcPhysicalDiskHealth, Get-DcWheaEvents, Get-DcBluetoothHealth, Get-DcNetworkHealth, Get-DcDisplayDiagnostics, Get-DcProblematicKernelDrivers, Get-DcMotherboardAndChipsetHealth

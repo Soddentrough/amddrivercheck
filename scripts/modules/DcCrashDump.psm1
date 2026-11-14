@@ -151,11 +151,52 @@ function Get-DcCrashDumps {
         }
     }
 
-    $sorted = $uniqueByIdentity.Values | Sort-Object LastWriteTime -Descending
+    # Windows writes LiveKernelReports pairs with the same filename: a small triage dump in a component
+    # subfolder (e.g. LiveKernelReports\NDIS\NDIS-*.dmp) and a multi-GB full dump in LiveKernelReports\NDIS-*.dmp.
+    # Deduplicate by filename, preferring the subdirectory mini live dump over the root companion dump.
+    $finalDumps = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+    $liveByName = @{}
+    foreach ($f in $uniqueByIdentity.Values) {
+        if ($f.FullName -match '(?i)(?:^|[\\/])LiveKernelReports(?:[\\/]|$)') {
+            $lkKey = $f.Name.ToLowerInvariant()
+            if (-not $liveByName.ContainsKey($lkKey)) {
+                $liveByName[$lkKey] = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+            }
+            $liveByName[$lkKey].Add($f)
+        } else {
+            $finalDumps.Add($f)
+        }
+    }
+    foreach ($lkKey in $liveByName.Keys) {
+        $group = @($liveByName[$lkKey])
+        if ($group.Count -eq 1) {
+            $finalDumps.Add($group[0])
+        } else {
+            $preferred = $group | Sort-Object `
+                @{ Expression = { if ($_.DirectoryName -notmatch '(?i)[\\/]LiveKernelReports$') { 0 } else { 1 } }; Ascending = $true }, `
+                @{ Expression = { if ($_.Length -gt 0) { $_.Length } else { [long]::MaxValue } }; Ascending = $true }, `
+                @{ Expression = { $_.LastWriteTime }; Descending = $true } |
+                Select-Object -First 1
+            if ($preferred) { $finalDumps.Add($preferred) }
+        }
+    }
+
+    $sorted = $finalDumps | Sort-Object LastWriteTime -Descending
     if ($LatestOnly -and $sorted) {
         return @($sorted | Select-Object -First 1)
     }
     return @($sorted)
+}
+
+function Test-DcLiveKernelReportFile {
+    param($FileOrPath)
+    $full = if ($FileOrPath -is [System.IO.FileInfo]) { $FileOrPath.FullName } else { [string]$FileOrPath }
+    if (-not $full) { return $false }
+    $name = [System.IO.Path]::GetFileName($full)
+    return [bool](
+        ($full -match '(?i)(?:^|[\\/])LiveKernelReports(?:[\\/]|$)') -or
+        ($name -match '^(?i)(WATCHDOG|NDIS|USBHUB3|PDC|PoW32kWatchdog|win32kbase|AMD_WATCHDOG|AMD_REPORT_UM)-')
+    )
 }
 
 function Get-DcLatestDumpFile {
@@ -165,11 +206,22 @@ function Get-DcLatestDumpFile {
         [int]$LookbackDays = 30,
 
         [Parameter(Mandatory = $false)]
-        [string[]]$CustomDirectories
+        [string[]]$CustomDirectories,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$ExcludeLiveKernelReports,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$LiveKernelReportsOnly
     )
 
     $cutoff = (Get-Date).AddDays(-$LookbackDays)
-    $dumps = Get-DcCrashDumps -Cutoff $cutoff -CustomDirectories $CustomDirectories
+    $dumps = @(Get-DcCrashDumps -Cutoff $cutoff -CustomDirectories $CustomDirectories)
+    if ($ExcludeLiveKernelReports) {
+        $dumps = @($dumps | Where-Object { -not (Test-DcLiveKernelReportFile $_) })
+    } elseif ($LiveKernelReportsOnly) {
+        $dumps = @($dumps | Where-Object { Test-DcLiveKernelReportFile $_ })
+    }
     if ($dumps -and $dumps.Count -gt 0) {
         return ($dumps | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
     }
@@ -194,7 +246,9 @@ function Get-DcExceptionMeaning {
         "0x00000141" { "LiveKernelEvent 0x141 (VIDEO_ENGINE_TDR_TIMEOUT)" }
         "0x00000117" { "LiveKernelEvent 0x117 (VIDEO_TDR_TIMEOUT_DETECTED)" }
         "0x00000193" { "LiveKernelEvent 0x193 (VIDEO_DXGKRNL_LIVEDUMP)" }
+        "0x0000015E" { "LiveKernelEvent 0x15E (BUGCODE_NDIS_DRIVER_LIVE_DUMP - Non-Fatal Network Recovery)" }
         "0xA1000001" { "LiveKernelEvent 0xA1000001 (AMD_WATCHDOG)" }
+        "0xA2000002" { "LiveKernelEvent 0xA2000002 (AMD_REPORT_UM)" }
         "0x000001B8" { "LiveKernelEvent 0x1B8 (VIDEO_DXGKRNL_BLACK_SCREEN_LIVEDUMP)" }
         "0x000001A8" { "LiveKernelEvent 0x1A8 (VIDEO_DXGKRNL_SYSMM_FATAL_ERROR)" }
         "0x00000000" { "exit code 0 recorded by crash handler" }
@@ -205,6 +259,126 @@ function Get-DcExceptionMeaning {
 }
 
 $script:CachedCdbPath = $null
+$script:CachedPnpEntities = $null
+
+function Resolve-DcHardwareIdName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$HardwareId,
+
+        [Parameter(Mandatory = $false)]
+        [object[]]$PnpEntities = $null
+    )
+
+    if ([string]::IsNullOrWhiteSpace($HardwareId)) { return $null }
+    $cleanId = $HardwareId.Trim()
+
+    $entities = $PnpEntities
+    if ($null -eq $entities) {
+        if ($null -eq $script:CachedPnpEntities) {
+            try {
+                $script:CachedPnpEntities = @(Get-CimInstance -ClassName Win32_PnPEntity -Property Name, Caption, Description, PNPDeviceID, HardwareID -ErrorAction SilentlyContinue)
+            } catch {
+                $script:CachedPnpEntities = @()
+            }
+        }
+        $entities = $script:CachedPnpEntities
+    }
+
+    $ven = $null
+    $dev = $null
+    $subsys = $null
+    if ($cleanId -match '(?i)VEN_([0-9A-Fa-f]{4})&DEV_([0-9A-Fa-f]{4})(?:&SUBSYS_([0-9A-Fa-f]{8}))?') {
+        $ven = $Matches[1].ToUpperInvariant()
+        $dev = $Matches[2].ToUpperInvariant()
+        if ($Matches[3]) { $subsys = $Matches[3].ToUpperInvariant() }
+    } elseif ($cleanId -match '(?i)VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})') {
+        $ven = $Matches[1].ToUpperInvariant()
+        $dev = $Matches[2].ToUpperInvariant()
+    }
+
+    $matchedEntity = $null
+    if ($entities -and $entities.Count -gt 0) {
+        # 1. Exact or prefix match on PNPDeviceID or HardwareID
+        foreach ($ent in $entities) {
+            if (-not $ent) { continue }
+            $pnpId = if ($ent.PSObject.Properties['PNPDeviceID'] -and $ent.PNPDeviceID) { [string]$ent.PNPDeviceID } else { '' }
+            $hwIds = if ($ent.PSObject.Properties['HardwareID'] -and $ent.HardwareID) { @($ent.HardwareID | ForEach-Object { [string]$_ }) } else { @() }
+            if ($pnpId -and ($pnpId -ieq $cleanId -or $pnpId.StartsWith($cleanId, [System.StringComparison]::OrdinalIgnoreCase) -or $cleanId.StartsWith($pnpId, [System.StringComparison]::OrdinalIgnoreCase))) {
+                $matchedEntity = $ent; break
+            }
+            foreach ($h in $hwIds) {
+                if ($h -and ($h -ieq $cleanId -or $cleanId.StartsWith($h, [System.StringComparison]::OrdinalIgnoreCase))) {
+                    $matchedEntity = $ent; break
+                }
+            }
+            if ($matchedEntity) { break }
+        }
+
+        # 2. Match VEN_xxxx&DEV_yyyy&SUBSYS_zzzzzzzz if present
+        if (-not $matchedEntity -and $ven -and $dev -and $subsys) {
+            $subPat = "(?i)(?:VEN_${ven}&DEV_${dev}&SUBSYS_${subsys})"
+            foreach ($ent in $entities) {
+                if (-not $ent) { continue }
+                $allIds = @($ent.PNPDeviceID) + @($ent.HardwareID)
+                if (($allIds -join "`n") -match $subPat) { $matchedEntity = $ent; break }
+            }
+        }
+
+        # 3. Match VEN_xxxx&DEV_yyyy (or VID_xxxx&PID_yyyy)
+        if (-not $matchedEntity -and $ven -and $dev) {
+            $vdPat = "(?i)(?:VEN_${ven}&DEV_${dev}|VID_${ven}&PID_${dev})\b"
+            foreach ($ent in $entities) {
+                if (-not $ent) { continue }
+                $allIds = @($ent.PNPDeviceID) + @($ent.HardwareID)
+                if (($allIds -join "`n") -match $vdPat) { $matchedEntity = $ent; break }
+            }
+        }
+    }
+
+    if ($matchedEntity) {
+        $rawName = if ($matchedEntity.PSObject.Properties['Name'] -and $matchedEntity.Name) { [string]$matchedEntity.Name } elseif ($matchedEntity.PSObject.Properties['Caption'] -and $matchedEntity.Caption) { [string]$matchedEntity.Caption } elseif ($matchedEntity.PSObject.Properties['Description'] -and $matchedEntity.Description) { [string]$matchedEntity.Description } else { '' }
+        $rawName = $rawName.Trim() -replace "^[^']+?'s\s+", ""
+        if ($env:USERPROFILE) { $rawName = $rawName.Replace($env:USERPROFILE, "%USERPROFILE%") }
+        $rawName = $rawName -replace '(?i)[a-zA-Z]:\\Users\\[^\\]+', '%USERPROFILE%'
+        if ($rawName) { return $rawName }
+    }
+
+    # Offline fallback when the dump originates from another machine or Win32_PnPEntity had no match
+    if ($ven -and $dev) {
+        $knownDevices = @{
+            '14C3&0616' = 'MediaTek Wi-Fi 6E MT7922 (RZ616) Wireless LAN Card'
+            '14C3&7925' = 'MediaTek Wi-Fi 7 MT7925 Wireless LAN Card'
+            '8086&15F3' = 'Intel Ethernet Controller I225-V'
+            '8086&125C' = 'Intel Ethernet Controller I226-V'
+            '8086&2725' = 'Intel Wi-Fi 6E AX210'
+            '10EC&8125' = 'Realtek PCIe 2.5GbE Family Controller'
+            '10EC&8168' = 'Realtek PCIe GbE Family Controller'
+        }
+        $vdKey = "$ven&$dev"
+        if ($knownDevices.ContainsKey($vdKey)) { return $knownDevices[$vdKey] }
+
+        $knownVendors = @{
+            '14C3' = 'MediaTek'
+            '8086' = 'Intel'
+            '10EC' = 'Realtek'
+            '1002' = 'AMD'
+            '10DE' = 'NVIDIA'
+            '14E4' = 'Broadcom'
+            '17CB' = 'Qualcomm'
+            '1B21' = 'ASMedia'
+            '15B7' = 'WD / SanDisk'
+            '144D' = 'Samsung'
+            '1987' = 'Phison'
+        }
+        if ($knownVendors.ContainsKey($ven)) {
+            return "$($knownVendors[$ven]) PCI Device (DEV_$dev)"
+        }
+    }
+
+    return $null
+}
 
 function Find-DcCdbPath {
     if ($script:CachedCdbPath -and (Test-Path -LiteralPath $script:CachedCdbPath)) {
@@ -250,45 +424,31 @@ function Invoke-DcDumpStackTrace {
         [string]$DumpPath,
         [string]$CdbPath = $null,
         [int]$TimeoutSeconds = 40,
-        [string]$RawOutputDir = $null
+        [string]$RawOutputDir = $null,
+        [string]$PreReadOutput = $null
     )
 
     $emptyResult = [PSCustomObject]@{
-        CallStack       = @()
-        ApiContext      = $null
-        BugcheckCode    = $null
-        BugcheckArgs    = @()
-        FailureBucket   = $null
-        CrashTime       = $null
-        Uptime          = $null
-        AnalysisDetail  = $null
-        ProbablyCausedBy = $null
-        ModuleName      = $null
-        ImageName       = $null
-        SymbolName      = $null
-        RawOutputPath   = $null
-        CdbInspected    = $false
-    }
-
-    $resolvedCdb = if ($CdbPath) { $CdbPath } else { Find-DcCdbPath }
-    if (-not $resolvedCdb -or -not (Test-Path -LiteralPath $resolvedCdb)) {
-        return $emptyResult
+        CallStack          = @()
+        ApiContext         = $null
+        BugcheckCode       = $null
+        BugcheckArgs       = @()
+        FailureBucket      = $null
+        CrashTime          = $null
+        Uptime             = $null
+        AnalysisDetail     = $null
+        ProbablyCausedBy   = $null
+        ModuleName         = $null
+        ImageName          = $null
+        SymbolName         = $null
+        RawOutputPath      = $null
+        CdbInspected       = $false
+        IsLiveKernelDump   = $false
+        HardwareId         = $null
+        HardwareDeviceName = $null
     }
 
     $isKernel = ($DumpPath -match '(?i)SystemRoot|Windows\\(Minidump|LiveKernelReports)|MEMORY\.DMP|WATCHDOG|\d{6}-\d{5}-\d{2}\.dmp')
-
-    # Symbols: local cache plus Microsoft symbol server. Set DRIVERCHECK_OFFLINE_SYMBOLS=1 to use the local cache only.
-    $localSym = Join-Path $PSScriptRoot "..\..\symcache"
-    if (-not (Test-Path $localSym)) { New-Item -ItemType Directory -Path $localSym -Force -ErrorAction SilentlyContinue | Out-Null }
-    $symPath = if ($env:DRIVERCHECK_OFFLINE_SYMBOLS -eq '1') { "cache*$localSym" } else { "srv*$localSym*https://msdl.microsoft.com/download/symbols" }
-    $symArg = "-y `"$symPath`""
-
-    $cdbCommands = if ($isKernel) {
-        ".bugcheck; .echo ===ANALYZE===; !analyze -v; .echo ===STACK===; k 25; .echo ===ENDSTACK===; q"
-    } else {
-        ".ecxr; .echo ===STACK===; k 25; .echo ===ENDSTACK===; q"
-    }
-    $cdbArgs = "-z `"$DumpPath`" $symArg -c `"$cdbCommands`""
 
     $frames = [System.Collections.Generic.List[string]]::new()
     $apiContext = $null
@@ -303,34 +463,61 @@ function Invoke-DcDumpStackTrace {
     $crashTime = $null
     $uptimeText = $null
     $analysisDetail = $null
+    $hardwareId = $null
+    $hardwareDeviceName = $null
+    $isLiveKernelDump = $false
     $out = ""
 
-    try {
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $resolvedCdb
-        $psi.Arguments = $cdbArgs
-        $psi.UseShellExecute = $false
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError = $true
-        $psi.CreateNoWindow = $true
-
-        $proc = [System.Diagnostics.Process]::Start($psi)
-        $outTask = $proc.StandardOutput.ReadToEndAsync()
-        $errTask = $proc.StandardError.ReadToEndAsync()
-        if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
-            try { $proc.Kill() } catch {}
+    if (-not [string]::IsNullOrEmpty($PreReadOutput)) {
+        $out = $PreReadOutput
+    } else {
+        $resolvedCdb = if ($CdbPath) { $CdbPath } else { Find-DcCdbPath }
+        if (-not $resolvedCdb -or -not (Test-Path -LiteralPath $resolvedCdb)) {
+            return $emptyResult
         }
-        $out = $outTask.GetAwaiter().GetResult()
-    } catch {}
+
+        # Symbols: local cache plus Microsoft symbol server. Set DRIVERCHECK_OFFLINE_SYMBOLS=1 to use the local cache only.
+        $localSym = Join-Path $PSScriptRoot "..\..\symcache"
+        if (-not (Test-Path $localSym)) { New-Item -ItemType Directory -Path $localSym -Force -ErrorAction SilentlyContinue | Out-Null }
+        $symPath = if ($env:DRIVERCHECK_OFFLINE_SYMBOLS -eq '1') { "cache*$localSym" } else { "srv*$localSym*https://msdl.microsoft.com/download/symbols" }
+        $symArg = "-y `"$symPath`""
+
+        $cdbCommands = if ($isKernel) {
+            ".bugcheck; .echo ===ANALYZE===; !analyze -v; .echo ===STACK===; k 25; .echo ===ENDSTACK===; q"
+        } else {
+            ".ecxr; .echo ===STACK===; k 25; .echo ===ENDSTACK===; q"
+        }
+        $cdbArgs = "-z `"$DumpPath`" $symArg -c `"$cdbCommands`""
+
+        try {
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $resolvedCdb
+            $psi.Arguments = $cdbArgs
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.CreateNoWindow = $true
+
+            $proc = [System.Diagnostics.Process]::Start($psi)
+            $outTask = $proc.StandardOutput.ReadToEndAsync()
+            $errTask = $proc.StandardError.ReadToEndAsync()
+            if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
+                try { $proc.Kill() } catch {}
+            }
+            $out = $outTask.GetAwaiter().GetResult()
+        } catch {}
+    }
 
     if ($out) {
-        # Persist raw debugger output so it can be shared / reviewed.
-        try {
-            if (-not $RawOutputDir) { $RawOutputDir = Join-Path $PSScriptRoot "..\..\dump-analysis" }
-            if (-not (Test-Path $RawOutputDir)) { New-Item -ItemType Directory -Path $RawOutputDir -Force | Out-Null }
-            $rawPath = Join-Path $RawOutputDir ("{0}.cdb.txt" -f [System.IO.Path]::GetFileName($DumpPath))
-            Set-Content -LiteralPath $rawPath -Value $out -Encoding UTF8
-        } catch { $rawPath = $null }
+        # Persist raw debugger output when produced by live CDB so it can be shared / reviewed.
+        if ([string]::IsNullOrEmpty($PreReadOutput)) {
+            try {
+                if (-not $RawOutputDir) { $RawOutputDir = Join-Path $PSScriptRoot "..\..\dump-analysis" }
+                if (-not (Test-Path $RawOutputDir)) { New-Item -ItemType Directory -Path $RawOutputDir -Force | Out-Null }
+                $rawPath = Join-Path $RawOutputDir ("{0}.cdb.txt" -f [System.IO.Path]::GetFileName($DumpPath))
+                Set-Content -LiteralPath $rawPath -Value $out -Encoding UTF8
+            } catch { $rawPath = $null }
+        }
 
         # Markers must be on their own line (cdb also echoes the command string containing them).
         $mkIdx = {
@@ -343,7 +530,7 @@ function Invoke-DcDumpStackTrace {
         $endIdx = & $mkIdx '===ENDSTACK==='
 
         $headText = if ($analyzeIdx -ge 0) { $out.Substring(0, $analyzeIdx) } elseif ($stackIdx -ge 0) { $out.Substring(0, $stackIdx) } else { $out }
-        $analyzeText = if ($analyzeIdx -ge 0 -and $stackIdx -gt $analyzeIdx) { $out.Substring($analyzeIdx, $stackIdx - $analyzeIdx) } else { "" }
+        $analyzeText = if ($analyzeIdx -ge 0 -and $stackIdx -gt $analyzeIdx) { $out.Substring($analyzeIdx, $stackIdx - $analyzeIdx) } elseif ($analyzeIdx -ge 0) { $out.Substring($analyzeIdx) } else { "" }
         $stackText = if ($stackIdx -ge 0) {
             if ($endIdx -gt $stackIdx) { $out.Substring($stackIdx, $endIdx - $stackIdx) } else { $out.Substring($stackIdx) }
         } else { "" }
@@ -367,6 +554,17 @@ function Invoke-DcDumpStackTrace {
             elseif (-not $moduleName -and $l -match '^MODULE_NAME:\s+(\S+)') { $moduleName = $Matches[1] }
             elseif (-not $imageName -and $l -match '^IMAGE_NAME:\s+(\S+)') { $imageName = $Matches[1] }
             elseif (-not $symbolName -and $l -match '^SYMBOL_NAME:\s+(.+?)\s*$') { $symbolName = $Matches[1] }
+            elseif (-not $hardwareId -and $l -match '^HARDWARE_ID:\s+(\S.+?)\s*$') { $hardwareId = $Matches[1].Trim() }
+        }
+        if (-not $hardwareId -and $analyzeText -match '(?m)^\s*Key\s*:\s*Hardware\.HardwareID\s*\r?\n\s*Value:\s*(\S.+?)\s*$') {
+            $hardwareId = $Matches[1].Trim()
+        }
+        if (-not $kernelBugcheck -and $analyzeText -match '(?m)^BUGCHECK_CODE:\s+([0-9a-fA-F]+)\s*$') {
+            $bcHex = $Matches[1].Trim().ToUpperInvariant().PadLeft(8, '0')
+            $kernelBugcheck = "0x$bcHex"
+        }
+        if ($hardwareId) {
+            $hardwareDeviceName = Resolve-DcHardwareIdName -HardwareId $hardwareId
         }
 
         # Bugcheck name/description, argument meanings and process context straight from the debugger's analysis.
@@ -394,6 +592,15 @@ function Invoke-DcDumpStackTrace {
             ArgList      = $argDescs.ToArray()
             ProcessName  = $procName
         }
+
+        $isLiveKernelDump = [bool](
+            (Test-DcLiveKernelReportFile $DumpPath) -or
+            ($headText -match '(?i)DUMP_FILE_ATTRIBUTES:.*\bLive Generated Dump\b') -or
+            ($analyzeText -match '(?i)never be used for a real BugCheck;\s*it is used to identify live dumps') -or
+            ($failureBucket -and $failureBucket -match '^LKD_') -or
+            ($kernelBugcheck -and $kernelBugcheck -match '(?i)^0x0*(141|117|193|15e|1b8|1a8|a1000001|a2000002)$')
+        )
+
         # If the kernel image/symbols could not be loaded, !analyze reports a bogus WRONG_SYMBOLS bucket. Don't present that as a finding.
         if ($failureBucket -match 'WRONG_SYMBOLS' -or $imageName -match 'wrong\.symbols') {
             $failureBucket = $null
@@ -442,20 +649,117 @@ function Invoke-DcDumpStackTrace {
     }
 
     return [PSCustomObject]@{
-        CallStack        = @($frames)
-        ApiContext       = $apiContext
-        BugcheckCode     = $kernelBugcheck
-        BugcheckArgs     = @($kernelBugcheckArgs)
-        FailureBucket    = $failureBucket
-        CrashTime        = $crashTime
-        Uptime           = $uptimeText
-        AnalysisDetail   = $analysisDetail
-        ProbablyCausedBy = $probablyCausedBy
-        ModuleName       = $moduleName
-        ImageName        = $imageName
-        SymbolName       = $symbolName
-        RawOutputPath    = $rawPath
-        CdbInspected     = ($frames.Count -gt 0 -or $null -ne $kernelBugcheck)
+        CallStack          = @($frames)
+        ApiContext         = $apiContext
+        BugcheckCode       = $kernelBugcheck
+        BugcheckArgs       = @($kernelBugcheckArgs)
+        FailureBucket      = $failureBucket
+        CrashTime          = $crashTime
+        Uptime             = $uptimeText
+        AnalysisDetail     = $analysisDetail
+        ProbablyCausedBy   = $probablyCausedBy
+        ModuleName         = $moduleName
+        ImageName          = $imageName
+        SymbolName         = $symbolName
+        RawOutputPath      = $rawPath
+        CdbInspected       = ($frames.Count -gt 0 -or $null -ne $kernelBugcheck)
+        IsLiveKernelDump   = $isLiveKernelDump
+        HardwareId         = $hardwareId
+        HardwareDeviceName = $hardwareDeviceName
+    }
+}
+
+function Update-DcMinidumpFromCdb {
+    param(
+        [Parameter(Mandatory = $true)]
+        $DumpResult,
+        [Parameter(Mandatory = $true)]
+        $StackInfo
+    )
+
+    if (-not $StackInfo -or -not $StackInfo.CdbInspected) { return }
+
+    $DumpResult.CallStack = @($StackInfo.CallStack)
+    $DumpResult.ApiContext = $StackInfo.ApiContext
+    $DumpResult.CdbInspected = $true
+    $DumpResult.FailureBucket = $StackInfo.FailureBucket
+    $DumpResult.CrashTime = $StackInfo.CrashTime
+    $DumpResult.Uptime = $StackInfo.Uptime
+    $DumpResult.AnalysisDetail = $StackInfo.AnalysisDetail
+    $DumpResult.ProbablyCausedBy = $StackInfo.ProbablyCausedBy
+    $DumpResult.DebuggerModuleName = $StackInfo.ModuleName
+    $DumpResult.DebuggerImageName = $StackInfo.ImageName
+    $DumpResult.DebuggerSymbolName = $StackInfo.SymbolName
+    $DumpResult.RawAnalysisPath = $StackInfo.RawOutputPath
+    if ($StackInfo.PSObject.Properties['HardwareId'] -and $StackInfo.HardwareId) {
+        $DumpResult.HardwareId = $StackInfo.HardwareId
+        $DumpResult.HardwareDeviceName = $StackInfo.HardwareDeviceName
+    }
+    if ($StackInfo.PSObject.Properties['IsLiveKernelDump'] -and $StackInfo.IsLiveKernelDump) {
+        $DumpResult.IsLiveKernelReport = $true
+    }
+
+    if ($StackInfo.BugcheckCode) {
+        $DumpResult.BugcheckArgs = @($StackInfo.BugcheckArgs)
+        $DumpResult.ExceptionCode = $StackInfo.BugcheckCode
+        $DumpResult.IsKernelDump = $true
+        $liveMeaning = if ($DumpResult.IsLiveKernelReport) { Get-DcExceptionMeaning $StackInfo.BugcheckCode } else { $null }
+        if ($liveMeaning -and $liveMeaning -ne 'Unhandled Exception') {
+            $DumpResult.ExceptionMeaning = $liveMeaning
+        } elseif (Get-Command Get-DcBugCheckMeaning -ErrorAction SilentlyContinue) {
+            $DumpResult.ExceptionMeaning = Get-DcBugCheckMeaning $StackInfo.BugcheckCode
+        } else {
+            $DumpResult.ExceptionMeaning = Get-DcExceptionMeaning $StackInfo.BugcheckCode
+        }
+        $DumpResult.IsGraphicsCrash = [bool]($DumpResult.ExceptionCode -match '(?i)^0x0*(119|116|141|117|193|1b8|1a8|a1000001|a2000002)$')
+    }
+
+    if ($DumpResult.IsKernelDump -or -not $DumpResult.FaultingModule -or $DumpResult.FaultingModule -eq 'Unknown') {
+        if ($StackInfo.ImageName -and $StackInfo.ImageName -notmatch '^(?i)wrong\.symbols') {
+            $DumpResult.FaultingModule = $StackInfo.ImageName
+        } elseif ($StackInfo.ModuleName -and $StackInfo.ModuleName -notmatch '^(?i)wrong\.symbols') {
+            $DumpResult.FaultingModule = $StackInfo.ModuleName
+        }
+    }
+
+    $shouldResolveIp = $DumpResult.IsKernelDump -or (-not $DumpResult.FaultingIP) -or ($DumpResult.FaultingIP -match '^0x[0-9a-fA-F]+$')
+    if ($shouldResolveIp) {
+        $wrapperFrameRegex = '^(?i)(nt!(KeBugCheckEx|KiBugCheck\w*|IopLiveDump\w*|MmDuplicateMemory\w*|IoCaptureLiveDump\w*|Dbgkp?Wer\w*)|watchdog!WdLog\w*|ndis!ndisMLiveBugCheck\w*)(?:[+!]|$)'
+        $osGenericModRegex = '^(?i)(nt|ntkrnlmp|ntoskrnl|watchdog|dxgmms2|dxgkrnl)(\.(exe|sys))?$'
+
+        $nonWrapperFrame = @($StackInfo.CallStack | Where-Object { $_ -and $_ -notmatch $wrapperFrameRegex } | Select-Object -First 1)[0]
+        $modSpecificFrame = if ($StackInfo.ModuleName) {
+            @($StackInfo.CallStack | Where-Object { $_ -and $_ -match "^(?i)$([regex]::Escape($StackInfo.ModuleName))(?:!|\+)" } | Select-Object -First 1)[0]
+        } else { $null }
+
+        $resolvedIp = $null
+        if ($StackInfo.SymbolName -and $StackInfo.SymbolName -notmatch $wrapperFrameRegex) {
+            if ($StackInfo.ModuleName -and ($StackInfo.SymbolName -ieq $StackInfo.ModuleName) -and $StackInfo.ImageName) {
+                $resolvedIp = $StackInfo.ImageName
+            } elseif ($StackInfo.ModuleName -and ($StackInfo.ModuleName -notmatch $osGenericModRegex) -and ($StackInfo.SymbolName -notmatch "^(?i)$([regex]::Escape($StackInfo.ModuleName))(?:!|\+|\.|$)")) {
+                if ($modSpecificFrame) {
+                    $resolvedIp = $modSpecificFrame
+                } elseif ($StackInfo.ImageName) {
+                    $resolvedIp = "$($StackInfo.ImageName) ($($StackInfo.SymbolName))"
+                } else {
+                    $resolvedIp = $StackInfo.SymbolName
+                }
+            } else {
+                $resolvedIp = $StackInfo.SymbolName
+            }
+        } elseif ($modSpecificFrame -and ($StackInfo.ModuleName -notmatch $osGenericModRegex)) {
+            $resolvedIp = $modSpecificFrame
+        } elseif ($StackInfo.ImageName -and $StackInfo.ImageName -notmatch '^(?i)wrong\.symbols') {
+            $resolvedIp = if ($nonWrapperFrame) { "$($StackInfo.ImageName) ($nonWrapperFrame)" } else { $StackInfo.ImageName }
+        } elseif ($nonWrapperFrame) {
+            $resolvedIp = $nonWrapperFrame
+        } elseif ($StackInfo.CallStack.Count -gt 0) {
+            $resolvedIp = $StackInfo.CallStack[0]
+        }
+
+        if ($resolvedIp) {
+            $DumpResult.FaultingIP = $resolvedIp
+        }
     }
 }
 
@@ -463,7 +767,13 @@ function Read-DcMinidump {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Path
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$SkipCdb,
+
+        [Parameter(Mandatory = $false)]
+        [string]$PreReadCdbOutput = $null
     )
 
     if (-not (Test-Path $Path)) { return $null }
@@ -475,6 +785,7 @@ function Read-DcMinidump {
     }
     $cleanFullName = $cleanFullName -replace '(?i)[a-zA-Z]:\\Users\\[^\\]+', '%USERPROFILE%'
 
+    $isLiveByPath = Test-DcLiveKernelReportFile $fileInfo
     $result = [PSCustomObject]@{
         FileName              = $fileInfo.Name
         FullName              = $cleanFullName
@@ -488,14 +799,21 @@ function Read-DcMinidump {
         IsGraphicsCrash       = $false
         IsShaderCompiler      = $false
         IsRogueKernelDriver   = $false
+        IsOverlayFault        = $false
+        OverlayName           = $null
+        LoadedOverlays        = @()
         ThreadCount           = 0
         Modules               = @()
+        UnloadedModules       = @()
         DriverModuleVersions  = @{}
         GpuDriverVersion      = $null
         MainExecutable        = $null
         MainExecutableVersion = $null
         Assertions            = @()
-        IsKernelDump          = ($fileInfo.DirectoryName -match '(?i)SystemRoot|Windows\\(Minidump|LiveKernelReports)' -or $fileInfo.Name -match '(?i)MEMORY\.DMP|WATCHDOG|^\d{6}-\d{5}-\d{2}\.dmp$')
+        IsKernelDump          = ($fileInfo.DirectoryName -match '(?i)SystemRoot|Windows\\(Minidump|LiveKernelReports)' -or $fileInfo.Name -match '(?i)MEMORY\.DMP|WATCHDOG|^\d{6}-\d{5}-\d{2}\.dmp$' -or $isLiveByPath)
+        IsLiveKernelReport    = $isLiveByPath
+        HardwareId            = $null
+        HardwareDeviceName    = $null
         CallStack             = @()
         ApiContext            = $null
         BugcheckArgs          = @()
@@ -531,6 +849,8 @@ function Read-DcMinidump {
 
     $fs = $null
     $br = $null
+    $isMdmp = $false
+    $hasThreadOrMemoryStream = $false
     try {
         $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
         $br = New-Object System.IO.BinaryReader($fs)
@@ -538,41 +858,18 @@ function Read-DcMinidump {
         $sig = $br.ReadUInt32() # 'MDMP' = 0x504D444D
         if ($sig -ne 0x504D444D) {
             # Check for Windows Kernel Dump signature ('PAGE' = 0x45474150 / PAGEDU64) or generic kernel dump
-            if ($sig -eq 0x45474150 -or $fileInfo.Name -match '(?i)\.dmp$') {
+            if (-not $SkipCdb -and ($sig -eq 0x45474150 -or $fileInfo.Name -match '(?i)\.dmp$' -or -not [string]::IsNullOrEmpty($PreReadCdbOutput))) {
                 $result.IsKernelDump = $true
                 $result.Architecture = "64-bit (x64)"
                 try {
-                    $stackInfo = Invoke-DcDumpStackTrace -DumpPath $Path
-                    if ($stackInfo -and $stackInfo.CdbInspected) {
-                        $result.CallStack = @($stackInfo.CallStack)
-                        $result.ApiContext = $stackInfo.ApiContext
-                        $result.CdbInspected = $true
-                        $result.FailureBucket = $stackInfo.FailureBucket
-                        $result.CrashTime = $stackInfo.CrashTime
-                        $result.Uptime = $stackInfo.Uptime
-                        $result.AnalysisDetail = $stackInfo.AnalysisDetail
-                        $result.ProbablyCausedBy = $stackInfo.ProbablyCausedBy
-                        $result.DebuggerModuleName = $stackInfo.ModuleName
-                        $result.DebuggerImageName = $stackInfo.ImageName
-                        $result.DebuggerSymbolName = $stackInfo.SymbolName
-                        $result.RawAnalysisPath = $stackInfo.RawOutputPath
-                        if ($stackInfo.BugcheckCode) {
-                            $result.ExceptionCode = $stackInfo.BugcheckCode
-                            $result.ExceptionMeaning = Get-DcBugCheckMeaning $stackInfo.BugcheckCode
-                            $result.BugcheckArgs = $stackInfo.BugcheckArgs
-                        }
-                        if ($stackInfo.CallStack.Count -gt 0) {
-                            $result.FaultingIP = $stackInfo.CallStack[0]
-                        }
-                        if ($result.ExceptionCode -in @('0x00000119', '0x00000116', '0x00000141', '0x00000117')) {
-                            $result.IsGraphicsCrash = $true
-                        }
-                    }
+                    $stackInfo = Invoke-DcDumpStackTrace -DumpPath $Path -PreReadOutput $PreReadCdbOutput
+                    Update-DcMinidumpFromCdb -DumpResult $result -StackInfo $stackInfo
                 } catch {}
             }
             return $result
         }
 
+        $isMdmp = $true
         $ver = $br.ReadUInt32()
         $numStreams = $br.ReadUInt32()
         $streamDirRva = $br.ReadUInt32()
@@ -585,6 +882,7 @@ function Read-DcMinidump {
             $rva = $br.ReadUInt32()
             $streams += [PSCustomObject]@{ Type = $type; Size = $size; Rva = $rva }
         }
+        $hasThreadOrMemoryStream = (@($streams | Where-Object { $_.Type -in @(3, 5, 9) }).Count -gt 0)
 
         # 1. SystemInfoStream (Type 7) -> Determine x86 vs x64
         $sysInfoStream = $streams | Where-Object { $_.Type -eq 7 } | Select-Object -First 1
@@ -691,6 +989,60 @@ function Read-DcMinidump {
             }
         }
 
+        $overlayRegex = '(?i)^(NahimicOSD|NahimicV3DevProps|AudioDevProps2|ProductInfo|RTSSHooks64|RTSSHooks|DiscordHook64|DiscordHook|Overwolf[^\\]*|owclient|ow-graphics-vulkan|RzChromaSDK[^\\]*|medal-hook[^\\]*|obs-vulkan64|graphics-hook64|ReShade[^\\]*|SpecialK[^\\]*|fpsmon[^\\]*|fraps[^\\]*|MangoHud[^\\]*)\.dll$'
+        $detectedOverlays = [System.Collections.Generic.List[string]]::new()
+        foreach ($m in $mods) {
+            if ($m.ShortName -and $m.ShortName -match $overlayRegex -and -not $detectedOverlays.Contains($m.ShortName)) {
+                $detectedOverlays.Add($m.ShortName)
+            }
+        }
+        $result.LoadedOverlays = @($detectedOverlays)
+
+        # 2b. Unloaded Module List (Type 14 - MINIDUMP_UNLOADED_MODULE_LIST)
+        $unloadedMods = [System.Collections.Generic.List[PSCustomObject]]::new()
+        $unloadedStream = $streams | Where-Object { $_.Type -eq 14 } | Select-Object -First 1
+        if ($unloadedStream -and $unloadedStream.Size -ge 12 -and ($unloadedStream.Rva + 12) -le $fs.Length) {
+            $fs.Position = $unloadedStream.Rva
+            $ulHeaderSize = $br.ReadUInt32()
+            $ulEntrySize = $br.ReadUInt32()
+            $ulCount = $br.ReadUInt32()
+            if ($ulEntrySize -ge 24 -and $ulCount -gt 0 -and $ulCount -le 512) {
+                for ($ui = 0; $ui -lt $ulCount; $ui++) {
+                    $entryPos = [int64]$unloadedStream.Rva + [int64]$ulHeaderSize + ([int64]$ui * [int64]$ulEntrySize)
+                    if (($entryPos + 24) -gt $fs.Length) { break }
+                    $fs.Position = $entryPos
+                    $uBase = $br.ReadUInt64()
+                    $uSize = $br.ReadUInt32()
+                    $null = $br.ReadUInt32() # CheckSum
+                    $null = $br.ReadUInt32() # TimeDateStamp
+                    $uNameRva = $br.ReadUInt32()
+                    $uName = ""
+                    $uShort = ""
+                    if ($uNameRva -gt 0 -and ($uNameRva + 4) -lt $fs.Length) {
+                        $fs.Position = $uNameRva
+                        $uLen = $br.ReadUInt32()
+                        if ($uLen -gt 0 -and $uLen -lt 2048 -and ($uNameRva + 4 + $uLen) -le $fs.Length) {
+                            $uBytes = $br.ReadBytes($uLen)
+                            $uRawName = [System.Text.Encoding]::Unicode.GetString($uBytes).TrimEnd([char]0)
+                            $uShort = [System.IO.Path]::GetFileName($uRawName)
+                            $uName = $uRawName
+                            if ($env:USERPROFILE) { $uName = $uName.Replace($env:USERPROFILE, "%USERPROFILE%") }
+                            $uName = $uName -replace '(?i)[a-zA-Z]:\\Users\\[^\\]+', '%USERPROFILE%'
+                        }
+                    }
+                    if ($uShort) {
+                        $unloadedMods.Add([PSCustomObject]@{
+                            Base      = $uBase
+                            Size      = $uSize
+                            Name      = $uName
+                            ShortName = $uShort
+                        })
+                    }
+                }
+            }
+        }
+        $result.UnloadedModules = @($unloadedMods)
+
         function Resolve-DumpAddress([UInt64]$addr, $moduleList) {
             foreach ($m in $moduleList) {
                 if ($addr -ge $m.Base -and $addr -lt ($m.Base + $m.Size)) {
@@ -717,53 +1069,84 @@ function Read-DcMinidump {
             $result.ExceptionCode = $codeHex
             $result.ExceptionMeaning = Get-DcExceptionMeaning $codeHex
             $result.FaultingIP = Resolve-DumpAddress $excAddr $mods
-            $result.FaultingModule = if ($result.FaultingIP -match '^([^\+]+)\+') { $Matches[1] } else { "Unknown" }
+            if ($result.FaultingIP -match '^0x' -and $unloadedMods.Count -gt 0) {
+                foreach ($um in $unloadedMods) {
+                    if ($excAddr -ge $um.Base -and $excAddr -lt ($um.Base + $um.Size)) {
+                        $uOff = $excAddr - $um.Base
+                        $result.FaultingIP = ('<Unloaded_{0}>+0x{1:X}' -f $um.ShortName, $uOff)
+                        $result.FaultingModule = "<Unloaded_$($um.ShortName)>"
+                        break
+                    }
+                }
+            }
+            if (-not $result.FaultingModule) {
+                $result.FaultingModule = if ($result.FaultingIP -match '^([^\+]+)\+') { $Matches[1] } else { "Unknown" }
+            }
 
-            $isShaderCompiler = ($result.FaultingModule -match '(?i)amdxc|amdxx|nvwgf2|oo2core')
-            $isGfxDriver = ($result.FaultingModule -match '(?i)amdkmdag|nvlddmkm|igdkmd|dxgi|d3d12|d3d11|vulkan|atidxx')
-            $isRogueKernel = ($result.FaultingModule -match '(?i)inpoutx64|inpout32|winring0|ene\.sys|asromgdrv|asrdrv|gdrv' -or $result.ExceptionCode -eq '0x00000093')
+            $cleanFaultMod = ($result.FaultingModule -replace '^<Unloaded_', '' -replace '>$', '' -replace '_unloaded$', '')
+            if ($cleanFaultMod -match $overlayRegex) {
+                $result.IsOverlayFault = $true
+                $result.OverlayName = $cleanFaultMod
+                if (-not $detectedOverlays.Contains($cleanFaultMod)) {
+                    $detectedOverlays.Add($cleanFaultMod)
+                    $result.LoadedOverlays = @($detectedOverlays)
+                }
+            }
+
+            $isShaderCompiler = ($cleanFaultMod -match '(?i)amdxc|amdxx|nvwgf2|oo2core')
+            $isGfxDriver = ($cleanFaultMod -match '(?i)amdkmdag|nvlddmkm|igdkmd|dxgi|d3d12|d3d11|vulkan|atidxx|amdvlk|atiadlxx')
+            $isRogueKernel = ($cleanFaultMod -match '(?i)inpoutx64|inpout32|winring0|ene\.sys|asromgdrv|asrdrv|gdrv' -or $result.ExceptionCode -eq '0x00000093')
             $result.IsShaderCompiler = $isShaderCompiler
             $result.IsRogueKernelDriver = $isRogueKernel
             $result.IsGraphicsCrash = ($isShaderCompiler -or $isGfxDriver -or ($result.ExceptionCode -match '0x887A000[156]'))
         }
 
-        # Handle LiveKernelReports Watchdog Dumps (GPU TDR / DXGKRNL Live Dumps without user exception stream)
-        if (-not $result.ExceptionCode -and ($fileInfo.DirectoryName -match '(?i)LiveKernelReports' -or $fileInfo.Name -match '(?i)WATCHDOG')) {
+        # Handle LiveKernelReports Watchdog & NDIS Live Dumps (Live Kernel Reports without user exception stream)
+        if (-not $result.ExceptionCode -and ($isLiveByPath -or $fileInfo.DirectoryName -match '(?i)LiveKernelReports' -or $fileInfo.Name -match '(?i)WATCHDOG')) {
             $result.IsKernelDump = $true
-            $result.IsGraphicsCrash = $true
+            $result.IsLiveKernelReport = $true
             $hasDxgkrnlMod = ($result.Modules | Where-Object { $_.Name -match '(?i)dxgkrnl\.sys|watchdog\.sys' } | Select-Object -First 1)
             $gfxMod = $result.Modules | Where-Object { $_.Name -match '(?i)amdkmdag|nvlddmkm|igdkmd' } | Select-Object -First 1
 
             # Determine specific LiveKernelEvent code from filename/path or loaded modules
-            if ($fileInfo.FullName -match '(?i)(?:^|[^0-9a-f])0*193(?:[^0-9a-f]|$)|VIDEO_DXGKRNL_LIVEDUMP|ProcessDeadlockThread' -or ($hasDxgkrnlMod -and -not $gfxMod)) {
-                $result.ExceptionCode = "0x00000193"
-            } elseif ($fileInfo.FullName -match '(?i)(?:^|[^0-9a-f])0*117(?:[^0-9a-f]|$)') {
-                $result.ExceptionCode = "0x00000117"
-            } elseif ($fileInfo.FullName -match '(?i)a1000001') {
-                $result.ExceptionCode = "0xA1000001"
-            } elseif ($fileInfo.FullName -match '(?i)(?:^|[^0-9a-f])0*1b8(?:[^0-9a-f]|$)') {
-                $result.ExceptionCode = "0x000001B8"
-            } elseif ($fileInfo.FullName -match '(?i)(?:^|[^0-9a-f])0*1a8(?:[^0-9a-f]|$)') {
-                $result.ExceptionCode = "0x000001A8"
+            if ($fileInfo.FullName -match '(?i)(?:[\\/]|^)NDIS(?:[\\/]|-)|(?:^|[^0-9a-f])0*15e(?:[^0-9a-f]|$)') {
+                $result.IsGraphicsCrash = $false
+                $result.ExceptionCode = "0x0000015E"
+                $result.ExceptionMeaning = Get-DcExceptionMeaning "0x0000015E"
+                if (-not $result.FaultingModule) { $result.FaultingModule = "ndis.sys" }
+                if (-not $result.FaultingIP) { $result.FaultingIP = "ndis.sys (Live Kernel Dump)" }
             } else {
-                $result.ExceptionCode = "0x00000141"
-            }
-            $result.ExceptionMeaning = Get-DcExceptionMeaning $result.ExceptionCode
-
-            if (-not $result.FaultingModule) {
-                if ($gfxMod) {
-                    $result.FaultingModule = [System.IO.Path]::GetFileName($gfxMod.Name)
-                } elseif ($hasDxgkrnlMod) {
-                    $result.FaultingModule = [System.IO.Path]::GetFileName($hasDxgkrnlMod.Name)
+                $result.IsGraphicsCrash = $true
+                if ($fileInfo.FullName -match '(?i)(?:^|[^0-9a-f])0*193(?:[^0-9a-f]|$)|VIDEO_DXGKRNL_LIVEDUMP|ProcessDeadlockThread' -or ($hasDxgkrnlMod -and -not $gfxMod)) {
+                    $result.ExceptionCode = "0x00000193"
+                } elseif ($fileInfo.FullName -match '(?i)(?:^|[^0-9a-f])0*117(?:[^0-9a-f]|$)') {
+                    $result.ExceptionCode = "0x00000117"
+                } elseif ($fileInfo.FullName -match '(?i)a1000001') {
+                    $result.ExceptionCode = "0xA1000001"
+                } elseif ($fileInfo.FullName -match '(?i)(?:^|[^0-9a-f])0*1b8(?:[^0-9a-f]|$)') {
+                    $result.ExceptionCode = "0x000001B8"
+                } elseif ($fileInfo.FullName -match '(?i)(?:^|[^0-9a-f])0*1a8(?:[^0-9a-f]|$)') {
+                    $result.ExceptionCode = "0x000001A8"
                 } else {
-                    $result.FaultingModule = "dxgkrnl.sys"
+                    $result.ExceptionCode = "0x00000141"
                 }
-            }
-            if (-not $result.FaultingIP) {
-                $result.FaultingIP = if ($result.ExceptionCode -eq "0x00000193") {
-                    if ($gfxMod) { "dxgkrnl.sys / $($result.FaultingModule) (Kernel Watchdog)" } else { "dxgkrnl.sys (DirectX Graphics Kernel Watchdog)" }
-                } else {
-                    "$($result.FaultingModule) (Kernel Watchdog Live Dump)"
+                $result.ExceptionMeaning = Get-DcExceptionMeaning $result.ExceptionCode
+
+                if (-not $result.FaultingModule) {
+                    if ($gfxMod) {
+                        $result.FaultingModule = [System.IO.Path]::GetFileName($gfxMod.Name)
+                    } elseif ($hasDxgkrnlMod) {
+                        $result.FaultingModule = [System.IO.Path]::GetFileName($hasDxgkrnlMod.Name)
+                    } else {
+                        $result.FaultingModule = "dxgkrnl.sys"
+                    }
+                }
+                if (-not $result.FaultingIP) {
+                    $result.FaultingIP = if ($result.ExceptionCode -eq "0x00000193") {
+                        if ($gfxMod) { "dxgkrnl.sys / $($result.FaultingModule) (Kernel Watchdog)" } else { "dxgkrnl.sys (DirectX Graphics Kernel Watchdog)" }
+                    } else {
+                        "$($result.FaultingModule) (Kernel Watchdog Live Dump)"
+                    }
                 }
             }
         }
@@ -880,39 +1263,15 @@ function Read-DcMinidump {
     }
 
     # 8. Automated Call Stack & API Stage Inspection via CDB (if available)
-    if ($fileInfo.Name -match '\.dmp$') {
+    $shouldRunCdb = (-not $SkipCdb) -and ($fileInfo.Name -match '\.dmp$') -and ((-not [string]::IsNullOrEmpty($PreReadCdbOutput)) -or -not ($isMdmp -and $fileInfo.Length -lt 32768 -and -not $hasThreadOrMemoryStream))
+    if ($shouldRunCdb) {
         try {
-            $stackInfo = Invoke-DcDumpStackTrace -DumpPath $Path
-            if ($stackInfo -and $stackInfo.CdbInspected) {
-                $result.CallStack = @($stackInfo.CallStack)
-                $result.ApiContext = $stackInfo.ApiContext
-                $result.CdbInspected = $true
-                $result.FailureBucket = $stackInfo.FailureBucket
-                        $result.CrashTime = $stackInfo.CrashTime
-                        $result.Uptime = $stackInfo.Uptime
-                        $result.AnalysisDetail = $stackInfo.AnalysisDetail
-                $result.ProbablyCausedBy = $stackInfo.ProbablyCausedBy
-                $result.DebuggerModuleName = $stackInfo.ModuleName
-                $result.DebuggerImageName = $stackInfo.ImageName
-                $result.DebuggerSymbolName = $stackInfo.SymbolName
-                $result.RawAnalysisPath = $stackInfo.RawOutputPath
-                if (-not $result.ExceptionCode -and $stackInfo.BugcheckCode) {
-                    $result.BugcheckArgs = $stackInfo.BugcheckArgs
-                    $result.ExceptionCode = $stackInfo.BugcheckCode
-                    $result.ExceptionMeaning = Get-DcBugCheckMeaning $stackInfo.BugcheckCode
-                    $result.IsKernelDump = $true
-                    if (-not $result.FaultingIP -and $stackInfo.CallStack.Count -gt 0) {
-                        $result.FaultingIP = $stackInfo.CallStack[0]
-                    }
-                    if ($result.ExceptionCode -in @('0x00000119', '0x00000116', '0x00000141', '0x00000117')) {
-                        $result.IsGraphicsCrash = $true
-                    }
-                }
-            }
+            $stackInfo = Invoke-DcDumpStackTrace -DumpPath $Path -PreReadOutput $PreReadCdbOutput
+            Update-DcMinidumpFromCdb -DumpResult $result -StackInfo $stackInfo
         } catch {}
     }
 
     return $result
 }
 
-Export-ModuleMember -Function Get-DcDumpDirectories, Get-DcCrashDumps, Get-DcLatestDumpFile, Read-DcMinidump, Get-DcExceptionMeaning, Find-DcCdbPath, Invoke-DcDumpStackTrace
+Export-ModuleMember -Function Get-DcDumpDirectories, Get-DcCrashDumps, Get-DcLatestDumpFile, Read-DcMinidump, Get-DcExceptionMeaning, Find-DcCdbPath, Invoke-DcDumpStackTrace, Resolve-DcHardwareIdName

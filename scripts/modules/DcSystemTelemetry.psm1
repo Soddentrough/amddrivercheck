@@ -44,6 +44,7 @@ function Get-DcBugCheckMeaning {
         '0x0*93'       { "INVALID_KERNEL_HANDLE" }
         '0x0*EF'       { "CRITICAL_PROCESS_DIED" }
         '0x0*154'      { "UNEXPECTED_STORE_EXCEPTION" }
+        '0x0*15E'      { "BUGCODE_NDIS_DRIVER_LIVE_DUMP" }
         default        { "Kernel BugCheck ($CodeHex)" }
     }
 }
@@ -135,6 +136,9 @@ function Get-DcBugCheckExplanation {
         }
         '0x0*154' {
             return "The kernel memory store caught an unexpected I/O or page decompression error (UNEXPECTED_STORE_EXCEPTION), often pointing to an NVMe/SSD wake issue or storage driver hiccup."
+        }
+        '0x0*15e' {
+            return "Non-fatal NDIS network miniport live kernel dump (BUGCODE_NDIS_DRIVER_LIVE_DUMP): Windows detected a network buffer (NBL) leak or miniport stall, captured a diagnostic live dump, and continued running without rebooting."
         }
         default {
             $m = Get-DcBugCheckMeaning $CodeHex
@@ -423,9 +427,17 @@ function Get-DcSystemTelemetry {
         [datetime]$EndTime = (Get-Date)
     )
 
+    $isElevated = $false
+    try {
+        $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = [System.Security.Principal.WindowsPrincipal]::new($id)
+        $isElevated = $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch {}
+
     $results = [PSCustomObject]@{
         CutoffTime             = $Cutoff
         EndTime                = $EndTime
+        IsElevated             = $isElevated
         FastStartup            = Get-DcFastStartupStatus
         PciePowerManagement    = Get-DcPciePowerManagementStatus
         GraphicsDriverSettings = Get-DcGraphicsDriverSettings
@@ -440,6 +452,8 @@ function Get-DcSystemTelemetry {
         StorageErrors          = [System.Collections.Generic.List[PSCustomObject]]::new()
         AppCrashes             = [System.Collections.Generic.List[PSCustomObject]]::new()
         AppHangs               = [System.Collections.Generic.List[PSCustomObject]]::new()
+        WerAppReports          = [System.Collections.Generic.List[PSCustomObject]]::new()
+        WerKernelEvents        = [System.Collections.Generic.List[PSCustomObject]]::new()
         NetworkDrops           = [System.Collections.Generic.List[PSCustomObject]]::new()
         UdpPortExhaustions     = [System.Collections.Generic.List[PSCustomObject]]::new()
         TopUdpConsumers        = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -558,6 +572,7 @@ function Get-DcSystemTelemetry {
                     Provider      = $e.ProviderName
                     Code          = $bugcheckCode
                     Meaning       = Get-DcBugCheckMeaning $bugcheckCode
+                    WatsonBucket  = $null
                     Message       = $msgText
                 })
             }
@@ -664,11 +679,26 @@ function Get-DcSystemTelemetry {
     }
     if ($memEvents) {
         foreach ($me in ($memEvents | Select-Object -First 5)) {
+            $rawMsg = if ($me.Message) { $me.Message.Trim() } else { "" }
+            $topConsumers = [System.Collections.Generic.List[string]]::new()
+            foreach ($cm in [regex]::Matches($rawMsg, '([^\r\n,;:(]+\.exe)\s*\(\d+\)\s*consumed\s*(\d+)\s*bytes')) {
+                $pName = Split-Path ($cm.Groups[1].Value.Trim()) -Leaf
+                $bytes = [double]$cm.Groups[2].Value
+                $gb = [math]::Round($bytes / 1GB, 1)
+                if ($gb -lt 0.1) {
+                    $mb = [math]::Round($bytes / 1MB, 0)
+                    $topConsumers.Add("$pName ($mb MB)")
+                } else {
+                    $topConsumers.Add("$pName ($gb GB)")
+                }
+                if ($topConsumers.Count -ge 3) { break }
+            }
             $results.MemoryExhaustion.Add([PSCustomObject]@{
-                TimeCreated = $me.TimeCreated
-                Id          = $me.Id
-                Provider    = $me.ProviderName
-                Message     = $me.Message.Trim()
+                TimeCreated  = $me.TimeCreated
+                Id           = $me.Id
+                Provider     = $me.ProviderName
+                TopConsumers = @($topConsumers)
+                Message      = (Protect-DcTelemetryText $rawMsg)
             })
         }
     }
@@ -716,7 +746,7 @@ function Get-DcSystemTelemetry {
         }
     }
 
-    # Query Microsoft-Windows-WerKernel/Operational (Events 1001, 1002) for exact second-level live dump timestamps
+    # Query Microsoft-Windows-WerKernel/Operational (Events 1001, 1002) for exact second-level live dump timestamps & component names
     $werKernelByFile = @{}
     $werKernelByMinute = @{}
     try {
@@ -725,8 +755,12 @@ function Get-DcSystemTelemetry {
         $wkEvents = Get-WinEvent -FilterHashtable $wkFilter -ErrorAction SilentlyContinue
         if ($wkEvents) {
             foreach ($wke in $wkEvents) {
-                if ($wke.Message -match '(?<file>[A-Za-z0-9_]+-(?<tag>\d{8}-\d{4})\.dmp)') {
-                    $dmpFileKey = $Matches['file'].ToLower()
+                $wkMsg = if ($wke.Message) { [string]$wke.Message } else { "" }
+                $wkComp = if ($wkMsg -match 'Component\s+([A-Za-z0-9_.\-]+)') { $Matches[1].Trim() } else { $null }
+                $wkFile = $null
+                if ($wkMsg -match '(?<file>[A-Za-z0-9_]+-(?<tag>\d{8}-\d{4})\.dmp)') {
+                    $wkFile = $Matches['file']
+                    $dmpFileKey = $wkFile.ToLower()
                     $minTagKey = $Matches['tag']
                     if (-not $werKernelByFile.ContainsKey($dmpFileKey)) {
                         $werKernelByFile[$dmpFileKey] = $wke.TimeCreated
@@ -735,14 +769,61 @@ function Get-DcSystemTelemetry {
                         $werKernelByMinute[$minTagKey] = $wke.TimeCreated
                     }
                 }
+                if ($wkComp -or $wkFile) {
+                    $wkCode = ""
+                    if ($wkMsg -match '(?i)BugCheck(?:Code)?\s*[:=]\s*(?:0x)?([0-9a-fA-F]+)') {
+                        $wkCode = ($Matches[1].ToLower() -replace '^0+(?=.)', '')
+                    } elseif ($wkFile -match '(?i)^WATCHDOG-' -or $wkComp -match '(?i)^WATCHDOG') {
+                        $wkCode = "141"
+                    } elseif ($wkFile -match '(?i)^AMD_WATCHDOG-' -or $wkComp -match '(?i)^AMD_WATCHDOG') {
+                        $wkCode = "a1000001"
+                    } elseif ($wkFile -match '(?i)^AMD_REPORT_UM-' -or $wkComp -match '(?i)^AMD_REPORT_UM') {
+                        $wkCode = "a2000002"
+                    } elseif ($wkFile -match '(?i)DXGKRNL' -or $wkComp -match '(?i)ProcessDeadlockThread' -or $wkMsg -match '(?i)\b0x193\b') {
+                        $wkCode = "193"
+                    }
+                    $results.WerKernelEvents.Add([PSCustomObject]@{
+                        TimeCreated = $wke.TimeCreated
+                        Id          = $wke.Id
+                        Code        = $wkCode
+                        Component   = $wkComp
+                        DumpFile    = $wkFile
+                        Message     = (Protect-DcTelemetryText $wkMsg.Trim())
+                    })
+                }
             }
         }
     } catch {}
 
-    # Query Application Events for LiveKernelEvent TDRs, AMD Watchdog Hangs & RADAR_PRE_LEAK (Event 1001)
+    # Query Application Events for LiveKernelEvent TDRs, BlueScreen Watson buckets, AMD Watchdog Hangs & RADAR_PRE_LEAK (Event 1001)
     $werFilter = @{LogName='Application'; ProviderName='Windows Error Reporting'; Id=1001; StartTime=$Cutoff}
     if ($EndTime -and $EndTime -lt (Get-Date)) { $werFilter['EndTime'] = $EndTime }
     $werEvents1001 = @(Get-WinEvent -FilterHashtable $werFilter -ErrorAction SilentlyContinue)
+
+    # Correlate Watson cloud buckets from WER Event 1001 BlueScreen entries onto KernelBugChecks (non-admin friendly!)
+    if ($werEvents1001.Count -gt 0 -and $results.KernelBugChecks.Count -gt 0) {
+        $werBlueScreens = @($werEvents1001 | Where-Object { $_.Message -match 'Event Name:\s*BlueScreen' })
+        foreach ($wbs in $werBlueScreens) {
+            $wbMsg = [string]$wbs.Message
+            $bucket = $null
+            if ($wbMsg -match 'Fault bucket\s+([^\r\n,]+?)\s*,\s*type\s+\d+') {
+                $candBucket = $Matches[1].Trim()
+                if ($candBucket -and $candBucket -ne '0') { $bucket = $candBucket }
+            }
+            if (-not $bucket) { continue }
+            $bsCode = if ($wbMsg -match 'P1:\s*([a-fA-F0-9]+)') { $Matches[1].ToLower() -replace '^0+', '' } else { '' }
+            foreach ($bc in $results.KernelBugChecks) {
+                if ($bc.WatsonBucket) { continue }
+                $bcNorm = ($bc.Code -replace '^0x', '').ToLower() -replace '^0+', ''
+                $codeMatches = (-not $bsCode) -or (-not $bcNorm) -or ($bsCode -eq $bcNorm)
+                if ($codeMatches -and [math]::Abs(($bc.TimeCreated - $wbs.TimeCreated).TotalMinutes) -le 15) {
+                    $bc.WatsonBucket = $bucket
+                    break
+                }
+            }
+        }
+    }
+
     $werLiveEvents = @($werEvents1001 | Where-Object { $_.Message -match 'LiveKernelEvent' })
     if ($werLiveEvents.Count -gt 0) {
         $tdrPriority = @{
@@ -759,6 +840,11 @@ function Get-DcSystemTelemetry {
         foreach ($we in $werLiveEvents) {
             $p1 = ""
             if ($we.Message -match 'P1:\s*([a-fA-F0-9]+)') { $p1 = $Matches[1].ToLower() }
+            $watsonBucket = $null
+            if ($we.Message -match 'Fault bucket\s+([^\r\n,]+?)\s*,\s*type\s+\d+') {
+                $cand = $Matches[1].Trim()
+                if ($cand -and $cand -ne '0') { $watsonBucket = $cand }
+            }
 
             if ($p1 -in @('141', '117', '193', 'a1000001', 'a2000002', '1b8', '1a8')) {
                 $attachedFile = ""
@@ -814,7 +900,7 @@ function Get-DcSystemTelemetry {
                         '117'      { "LiveKernelEvent 0x117 (VIDEO_TDR_TIMEOUT_DETECTED)" }
                         '193'      {
                             if ($we.Message -match 'P2:\s*(?:0x)?0*810\b') {
-                                "LiveKernelEvent 0x193 (VIDEO_DXGKRNL_LIVEDUMP, parameter 2 = 0x810)"
+                                "LiveKernelEvent 0x193 (VIDEO_DXGKRNL_LIVEDUMP, P2=0x810 ProcessDeadlockThread)"
                             } else {
                                 "LiveKernelEvent 0x193 (VIDEO_DXGKRNL_LIVEDUMP)"
                             }
@@ -833,6 +919,7 @@ function Get-DcSystemTelemetry {
                             Code           = $p1
                             CompanionCodes = [System.Collections.Generic.List[string]]::new()
                             DumpPath       = $attachedFile
+                            WatsonBucket   = $watsonBucket
                             Meaning        = $meaning
                             Message        = "$meaning [Dump: $attachedFile]"
                         })
@@ -850,6 +937,7 @@ function Get-DcSystemTelemetry {
                             $companionMatch.Code = $p1
                             $companionMatch.Meaning = $meaning
                             if ($attachedFile) { $companionMatch.DumpPath = $attachedFile }
+                            if ($watsonBucket) { $companionMatch.WatsonBucket = $watsonBucket }
                             $companionMatch.TimeCreated = $dumpTime
                         } else {
                             $newTag = "0x$($p1.ToUpper())"
@@ -857,13 +945,44 @@ function Get-DcSystemTelemetry {
                                 $companionMatch.CompanionCodes.Add($newTag)
                             }
                         }
-                        $compNote = if ($companionMatch.CompanionCodes.Count -gt 0) { " [Additional live dumps within 60s: $($companionMatch.CompanionCodes -join ', ')]" } else { "" }
+                        $compNote = if ($companionMatch.CompanionCodes.Count -gt 0) { " [Companion dumps: $($companionMatch.CompanionCodes -join ', ')]" } else { "" }
                         $companionMatch.Message = "$($companionMatch.Meaning)$compNote [Dump: $($companionMatch.DumpPath)]"
                     }
                 }
             }
         }
     }
+
+    # Populate readable WER AppCrash / AppHang archives (works WITHOUT Admin) and backfill AppCrashes
+    try {
+        $werArch = @(Get-DcWerReportArchive -Cutoff $Cutoff -EndTime $EndTime)
+        foreach ($wr in $werArch) {
+            if (-not $wr.MetadataOnly -and $wr.EventType -match '(?i)APPCRASH|BEX|CLR20r3|AppHang|MoAppHang|MoAppCrash') {
+                $results.WerAppReports.Add($wr)
+                if ($wr.EventType -match '(?i)APPCRASH|BEX|CLR20r3|MoAppCrash' -and $wr.AppName) {
+                    $dupApp = @($results.AppCrashes | Where-Object {
+                        $_.Application -ieq $wr.AppName -and [math]::Abs(($_.TimeCreated - $wr.Timestamp).TotalSeconds) -le 15
+                    })
+                    if ($dupApp.Count -eq 0 -and $results.AppCrashes.Count -lt 25) {
+                        $modLabel = if ($wr.FaultModule) { $wr.FaultModule } elseif ($wr.Parameter4) { $wr.Parameter4 } else { "Unknown" }
+                        $excVal = if ($wr.ExceptionCode) { $wr.ExceptionCode } else { "Unknown" }
+                        $results.AppCrashes.Add([PSCustomObject]@{
+                            TimeCreated       = $wr.Timestamp
+                            Application       = $wr.AppName
+                            FaultingModule    = $modLabel
+                            FaultModuleOffset = $wr.ExceptionOffset
+                            ExceptionCode     = $excVal
+                            ExceptionMeaning  = Get-DcBugCheckMeaning $excVal
+                            IsOverlayFault    = [bool]$wr.IsOverlayFault
+                            IsUnloadedModule  = [bool]$wr.IsUnloadedModule
+                            WatsonBucket      = $wr.Bucket
+                            Message           = "WER Archive $($wr.EventType): $($wr.AppName) faulted in $modLabel$(if ($wr.ExceptionOffset) { "+0x$($wr.ExceptionOffset -replace '^0x','')" }) ($excVal)"
+                        })
+                    }
+                }
+            }
+        }
+    } catch {}
 
     if ($results.TdrEvents.Count -gt 1) {
         $sortedTdrs = @($results.TdrEvents | Sort-Object TimeCreated -Descending)
@@ -1188,25 +1307,132 @@ function Get-DcWerReportArchive {
         }
     }
 
-    foreach ($baseDir in $searchDirs) {
-        $werFiles = Get-ChildItem -Path $baseDir -Recurse -Filter "Report.wer" -File -ErrorAction SilentlyContinue
-        if (-not $werFiles) { continue }
+    $overlayWerRegex = '(?i)^(NahimicOSD|A-Volute|SonicStudio|RTSSHooks|RTSSVkLayer|DiscordHook|GameOverlayRenderer|obs-vulkan|obs-graphics|Overwolf|OWClient|ReShade|SpecialK|MedalHook|MedalEncoder|nvspcap|bdcam|fraps|dxtory|playclaw|Action_x64)'
 
-        foreach ($wf in $werFiles) {
+    foreach ($baseDir in $searchDirs) {
+        $candidateFolders = [System.Collections.Generic.List[System.IO.DirectoryInfo]]::new()
+        $directWer = Join-Path $baseDir "Report.wer"
+        if (Test-Path -LiteralPath $directWer -ErrorAction SilentlyContinue) {
             try {
-                $parentName = if ($wf.Directory) { $wf.Directory.Name } else { "" }
-                if ($parentName -and $parentName -notmatch '(?i)^(Kernel_|LiveKernel|AppCrash_|AppHang_|Critical_)') {
+                $baseInfo = [System.IO.DirectoryInfo]::new($baseDir)
+                $candidateFolders.Add($baseInfo)
+            } catch {}
+        }
+
+        $topDirs = Get-ChildItem -LiteralPath $baseDir -Directory -ErrorAction SilentlyContinue
+        if ($topDirs) {
+            foreach ($d in $topDirs) {
+                if ($d.Name -match '(?i)^(Kernel_|LiveKernel|AppCrash_|AppHang_|Critical_)') {
+                    $candidateFolders.Add($d)
+                } elseif ($CustomArchivePaths) {
+                    $nestedDirs = Get-ChildItem -LiteralPath $d.FullName -Directory -Recurse -ErrorAction SilentlyContinue
+                    if ($nestedDirs) {
+                        foreach ($nd in $nestedDirs) {
+                            if ($nd.Name -match '(?i)^(Kernel_|LiveKernel|AppCrash_|AppHang_|Critical_)') {
+                                $candidateFolders.Add($nd)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        foreach ($dirObj in $candidateFolders) {
+            try {
+                $parentName = $dirObj.Name
+                if ($parentName -notmatch '(?i)^(Kernel_|LiveKernel|AppCrash_|AppHang_|Critical_)') {
                     continue
                 }
 
-                $lines = Get-Content -Path $wf.FullName -ErrorAction SilentlyContinue
+                if (-not $CustomArchivePaths -and $dirObj.LastWriteTime -lt $Cutoff.AddDays(-1)) {
+                    continue
+                }
+
+                $werFullPath = Join-Path $dirObj.FullName "Report.wer"
+                $lines = $null
+                $aclBlocked = $false
+
+                try {
+                    $fs = [System.IO.FileStream]::new(
+                        $werFullPath,
+                        [System.IO.FileMode]::Open,
+                        [System.IO.FileAccess]::Read,
+                        ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
+                    )
+                    try {
+                        $sr = [System.IO.StreamReader]::new($fs, $true)
+                        $lineList = [System.Collections.Generic.List[string]]::new()
+                        while ($null -ne ($rawLn = $sr.ReadLine())) {
+                            $lineList.Add($rawLn)
+                        }
+                        $lines = $lineList.ToArray()
+                    } finally {
+                        $fs.Dispose()
+                    }
+                } catch [System.UnauthorizedAccessException] {
+                    $aclBlocked = $true
+                } catch [System.Security.SecurityException] {
+                    $aclBlocked = $true
+                } catch [System.IO.FileNotFoundException] {
+                    continue
+                } catch [System.IO.DirectoryNotFoundException] {
+                    continue
+                } catch {
+                    if ($_.Exception -is [System.UnauthorizedAccessException] -or $_.Exception.Message -match '(?i)denied|unauthorized') {
+                        $aclBlocked = $true
+                    } else {
+                        continue
+                    }
+                }
+
+                if ($aclBlocked) {
+                    if ($dirObj.LastWriteTime -lt $Cutoff -or $dirObj.LastWriteTime -gt $EndTime) {
+                        continue
+                    }
+                    $codeFromName = if ($parentName -match '(?i)^(?:Live)?Kernel_([0-9a-fA-F]+)_') { $Matches[1].ToLower() } else { "" }
+                    $isTdrMeta = ($codeFromName -in @('141', '117', '193', 'a1000001', 'a2000002', '1b8', '1a8'))
+                    $metaType = if ($codeFromName) { "LiveKernelEvent" } else { "CriticalEvent" }
+                    $metaFriendly = if ($codeFromName) { "Live Kernel Event 0x$codeFromName (ACL metadata only)" } else { "Critical System WER Folder (ACL metadata only)" }
+
+                    $reports.Add([PSCustomObject]@{
+                        ReportPath         = (Protect-DcTelemetryText $dirObj.FullName)
+                        FolderName         = $parentName
+                        Timestamp          = $dirObj.LastWriteTime
+                        EventType          = $metaType
+                        FriendlyEventName  = $metaFriendly
+                        AppName            = ""
+                        AppPath            = ""
+                        BugCheckOrCode     = $codeFromName
+                        Parameter1         = $codeFromName
+                        Parameter2         = ""
+                        Parameter3         = ""
+                        Parameter4         = ""
+                        Bucket             = ""
+                        FaultModule        = ""
+                        FaultModuleVersion = ""
+                        ExceptionCode      = ""
+                        ExceptionOffset    = ""
+                        IsOverlayFault     = $false
+                        OverlayName        = ""
+                        IsUnloadedModule   = $false
+                        MetadataOnly       = $true
+                        GpuDriverVersion   = $null
+                        Signatures         = @{}
+                        SignatureNames     = @{}
+                        LoadedModules      = @()
+                        IsTdrOrGpu         = $isTdrMeta
+                    })
+                    continue
+                }
+
                 if (-not $lines) { continue }
 
                 $eventType = ""
                 $friendlyName = ""
                 $appName = ""
                 $appPath = ""
-                $eventTime = $wf.LastWriteTime
+                $bucket = ""
+                $eventTime = $dirObj.LastWriteTime
                 $sigs = @{}
                 $sigNames = @{}
                 $loadedMods = [System.Collections.Generic.List[string]]::new()
@@ -1222,6 +1448,12 @@ function Get-DcWerReportArchive {
                         $appName = $Matches[1].Trim()
                     } elseif ($line -match '^AppPath=(.+)$') {
                         $appPath = $Matches[1].Trim()
+                    } elseif ($line -match '^(?:Response\.BucketId|Bucket)=(.+)$') {
+                        $bVal = Protect-DcTelemetryText $Matches[1].Trim()
+                        if ($bVal -and $bVal -ne '0') { $bucket = $bVal }
+                    } elseif ($line -match '^HashedBucket=(.+)$' -and -not $bucket) {
+                        $hbVal = Protect-DcTelemetryText $Matches[1].Trim()
+                        if ($hbVal -and $hbVal -ne '0') { $bucket = $hbVal }
                     } elseif ($line -match '^EventTime=(\d+)$') {
                         try {
                             $ft = [int64]$Matches[1]
@@ -1248,42 +1480,100 @@ function Get-DcWerReportArchive {
                 $p3 = if ($sigs.ContainsKey('2')) { $sigs['2'] } else { "" }
                 $p4 = if ($sigs.ContainsKey('3')) { $sigs['3'] } else { "" }
 
-                if (-not $p1 -and $parentName -match '(?i)^Kernel_([0-9a-fA-F]+)_') {
+                if (-not $p1 -and $parentName -match '(?i)^(?:Live)?Kernel_([0-9a-fA-F]+)_') {
                     $p1 = $Matches[1].ToLower()
                 }
 
+                $faultModule = ""
+                $faultModuleVersion = ""
+                $exceptionCode = ""
+                $exceptionOffset = ""
+                foreach ($sk in $sigNames.Keys) {
+                    $sName = $sigNames[$sk]
+                    $sVal = if ($sigs.ContainsKey($sk)) { $sigs[$sk] } else { "" }
+                    if (-not $sVal) { continue }
+                    if ($sName -match '(?i)^Fault(?:ing)? Module Name$') {
+                        $faultModule = $sVal
+                    } elseif ($sName -match '(?i)^Fault(?:ing)? Module Version$') {
+                        $faultModuleVersion = $sVal
+                    } elseif ($sName -match '(?i)^Exception Code$') {
+                        $exceptionCode = $sVal
+                    } elseif ($sName -match '(?i)^Exception Offset$') {
+                        $exceptionOffset = $sVal
+                    } elseif ($sName -match '(?i)^Application Name$' -and -not $appName) {
+                        $appName = $sVal
+                    }
+                }
+                if (-not $faultModule -and ($eventType -match '(?i)APPCRASH|BEX') -and (-not $sigNames.ContainsKey('3')) -and $sigs.ContainsKey('3')) {
+                    $faultModule = $sigs['3']
+                    if ($sigs.ContainsKey('4')) { $faultModuleVersion = $sigs['4'] }
+                    if ($sigs.ContainsKey('6')) { $exceptionCode = $sigs['6'] }
+                    if ($sigs.ContainsKey('7')) { $exceptionOffset = $sigs['7'] }
+                }
+
+                $isUnloadedMod = [bool]($faultModule -match '(?i)_unloaded$|^<Unloaded_')
+                $faultModClean = $faultModule -replace '(?i)_unloaded$', '' -replace '^<Unloaded_|>$', ''
+                $isOverlay = $false
+                $overlayFriendly = ""
+                if ($faultModClean -match $overlayWerRegex) {
+                    $isOverlay = $true
+                    $overlayFriendly = switch -Regex ($faultModClean) {
+                        '(?i)NahimicOSD|A-Volute|SonicStudio' { "Nahimic / A-Volute OSD" }
+                        '(?i)RTSSHooks|RTSSVkLayer'          { "RivaTuner (RTSS) Overlay" }
+                        '(?i)DiscordHook'                    { "Discord In-Game Overlay" }
+                        '(?i)GameOverlayRenderer'            { "Steam Game Overlay" }
+                        '(?i)obs-vulkan|obs-graphics'        { "OBS Game Capture Hook" }
+                        '(?i)Overwolf|OWClient'              { "Overwolf Overlay" }
+                        '(?i)ReShade'                        { "ReShade Post-Processing" }
+                        '(?i)SpecialK'                       { "Special K Hook" }
+                        '(?i)Medal'                          { "Medal.tv Overlay" }
+                        '(?i)nvspcap'                        { "NVIDIA ShadowPlay Overlay" }
+                        default                              { $faultModClean }
+                    }
+                }
+
                 $werGpuDrvVer = $null
-                if ($sigs.ContainsKey('4') -and ($p4 -match '(?i)amdkmdag|amdxc|amdhdl|atidxx|nvlddmkm|nvwgf2|igdkmd') -and ($sigs['4'] -match '^\d+\.\d+\.\d+\.\d+$')) {
+                $drvModCheck = if ($faultModule) { $faultModule } else { $p4 }
+                if ($sigs.ContainsKey('4') -and ($drvModCheck -match '(?i)amdkmdag|amdxc|amdhdl|atidxx|nvlddmkm|nvwgf2|igdkmd|amdvlk') -and ($sigs['4'] -match '^\d+\.\d+\.\d+\.\d+$')) {
                     $werGpuDrvVer = $sigs['4']
                 }
 
                 $isTdrOrGpu = (
                     ($eventType -match '(?i)LiveKernelEvent' -and $p1 -in @('141', '117', '193', 'a1000001', 'a2000002', '1b8', '1a8')) -or
-                    ($parentName -match '(?i)^Kernel_(141|117|193|a1000001|a1000002|a2000002|1b8|1a8)_') -or
-                    ($eventType -match '(?i)APPCRASH|BEX64' -and ($p4 -match '(?i)amdkmdag|amdxc|amdhdl|atidxx|nvlddmkm|nvwgf2|igdkmd|dxgi|d3d12|d3d11'))
+                    ($parentName -match '(?i)^(?:Live)?Kernel_(141|117|193|a1000001|a1000002|a2000002|1b8|1a8)_') -or
+                    ($eventType -match '(?i)APPCRASH|BEX64' -and ($drvModCheck -match '(?i)amdkmdag|amdxc|amdhdl|atidxx|nvlddmkm|nvwgf2|igdkmd|amdvlk|dxgi|d3d12|d3d11'))
                 )
 
-                $cleanReportPath = Protect-DcTelemetryText $wf.FullName
+                $cleanReportPath = Protect-DcTelemetryText $werFullPath
                 $cleanAppPath = Protect-DcTelemetryText $appPath
 
                 $reports.Add([PSCustomObject]@{
-                    ReportPath        = $cleanReportPath
-                    FolderName        = $parentName
-                    Timestamp         = $eventTime
-                    EventType         = $eventType
-                    FriendlyEventName = $friendlyName
-                    AppName           = $appName
-                    AppPath           = $cleanAppPath
-                    BugCheckOrCode    = $p1
-                    Parameter1        = $p1
-                    Parameter2        = $p2
-                    Parameter3        = $p3
-                    Parameter4        = $p4
-                    GpuDriverVersion  = $werGpuDrvVer
-                    Signatures        = $sigs
-                    SignatureNames    = $sigNames
-                    LoadedModules     = @($loadedMods)
-                    IsTdrOrGpu        = $isTdrOrGpu
+                    ReportPath         = $cleanReportPath
+                    FolderName         = $parentName
+                    Timestamp          = $eventTime
+                    EventType          = $eventType
+                    FriendlyEventName  = $friendlyName
+                    AppName            = $appName
+                    AppPath            = $cleanAppPath
+                    BugCheckOrCode     = $p1
+                    Parameter1         = $p1
+                    Parameter2         = $p2
+                    Parameter3         = $p3
+                    Parameter4         = $p4
+                    Bucket             = $bucket
+                    FaultModule        = $faultModule
+                    FaultModuleVersion = $faultModuleVersion
+                    ExceptionCode      = $exceptionCode
+                    ExceptionOffset    = $exceptionOffset
+                    IsOverlayFault     = $isOverlay
+                    OverlayName        = $overlayFriendly
+                    IsUnloadedModule   = $isUnloadedMod
+                    MetadataOnly       = $false
+                    GpuDriverVersion   = $werGpuDrvVer
+                    Signatures         = $sigs
+                    SignatureNames     = $sigNames
+                    LoadedModules      = @($loadedMods)
+                    IsTdrOrGpu         = $isTdrOrGpu
                 })
             } catch {}
         }
@@ -1302,10 +1592,10 @@ function Find-DcLatestIncident {
     $lookbackCutoff = (Get-Date).AddDays(-$MaxLookbackDays)
     $candidates = [System.Collections.Generic.List[PSCustomObject]]::new()
 
-    # 1. Tier 1: Check newest crash dump file
+    # 1. Tier 1: Check newest fatal crash dump file (excluding non-fatal LiveKernelReports)
     try {
         if (Get-Command Get-DcLatestDumpFile -ErrorAction SilentlyContinue) {
-            $latestDump = Get-DcLatestDumpFile -LookbackDays $MaxLookbackDays
+            $latestDump = Get-DcLatestDumpFile -LookbackDays $MaxLookbackDays -ExcludeLiveKernelReports
             if ($latestDump) {
                 $candidates.Add([PSCustomObject]@{
                     Timestamp = $latestDump.LastWriteTime
@@ -1313,6 +1603,17 @@ function Find-DcLatestIncident {
                     Source    = "Minidump File"
                     Details   = "$($latestDump.Name) ($([math]::Round($latestDump.Length / 1MB, 2)) MB)"
                     Item      = $latestDump
+                })
+            }
+
+            $latestLiveDump = Get-DcLatestDumpFile -LookbackDays $MaxLookbackDays -LiveKernelReportsOnly
+            if ($latestLiveDump) {
+                $candidates.Add([PSCustomObject]@{
+                    Timestamp = $latestLiveDump.LastWriteTime
+                    Tier      = 2
+                    Source    = "Live Kernel Report (Non-Fatal)"
+                    Details   = "$($latestLiveDump.Name) ($([math]::Round($latestLiveDump.Length / 1MB, 2)) MB - non-fatal live dump)"
+                    Item      = $latestLiveDump
                 })
             }
         }
@@ -1601,7 +1902,7 @@ function Find-DcLatestIncident {
         $ranked = $candidates | ForEach-Object {
             $pri = if ($_.Source -match 'Network Adapter Link Drop|Network ARP Probe') {
                 3
-            } elseif ($_.Source -match 'Virtual Memory Exhaustion|Application Crash|PCI Bus Device Reset') {
+            } elseif ($_.Source -match 'Live Kernel Report \(Non-Fatal\)|Virtual Memory Exhaustion|Application Crash|PCI Bus Device Reset') {
                 2
             } else {
                 1
@@ -2742,12 +3043,52 @@ function Resolve-DcDiagnosticFindings {
     )
 
     $tel = $Telemetry
+    $isElevatedTel = [bool]($tel -and $tel.PSObject.Properties['IsElevated'] -and $tel.IsElevated)
     $getEvents = {
         param([string]$Name)
         if ($tel -and $tel.PSObject.Properties[$Name] -and $tel.$Name) { return @($tel.$Name) }
         return @()
     }
     $fmt = { param($t) if ($t -is [datetime]) { $t.ToString('yyyy-MM-dd HH:mm:ss') } else { 'unknown time' } }
+    $getGpuDriverNote = {
+        param($IncidentTime, [string]$ModuleHint = '')
+        if (-not $GpuHealth -or -not $GpuHealth.PSObject.Properties['Gpus'] -or -not $GpuHealth.Gpus) { return $null }
+        $gCands = @($GpuHealth.Gpus | Where-Object { $_ -and -not ($_.PSObject.Properties['IsGeneric'] -and $_.IsGeneric) })
+        if ($gCands.Count -eq 0) { $gCands = @($GpuHealth.Gpus | Where-Object { $_ }) }
+        if ($gCands.Count -eq 0) { return $null }
+        if ($ModuleHint) {
+            $vh = if ($ModuleHint -match '(?i)amd|ati') { 'AMD' } elseif ($ModuleHint -match '(?i)nvlddm|nvwgf|nvoglv|nvd3d|nvidia') { 'NVIDIA' } elseif ($ModuleHint -match '(?i)igdkmd|igd|igfx|intel') { 'Intel' } else { '' }
+            if ($vh) {
+                $vm = @($gCands | Where-Object { $_.Vendor -ieq $vh })
+                if ($vm.Count -gt 0) { $gCands = $vm }
+            }
+        }
+        $selGpu = ($gCands | Sort-Object @{ Expression = {
+            $s = 0
+            if ($_.PSObject.Properties['IsHighBoostCard'] -and $_.IsHighBoostCard) { $s += 20 }
+            if ($_.Name -match '(?i)\b(RX\s*\d|RTX\s*\d|GTX\s*\d|Radeon\s+PRO|Quadro|Arc\s+[AB]\d|XT\b|XTX\b|Ti\b)') { $s += 20 }
+            if ($_.Name -match '(?i)^AMD Radeon\(TM\) Graphics$|^AMD Radeon Graphics$|Intel\(R\) UHD|Intel\(R\) HD Graphics|Intel\(R\) Iris') { $s -= 10 }
+            $s
+        }; Descending = $true } | Select-Object -First 1)
+        if (-not $selGpu) { return $null }
+        $lbl = if ($selGpu.PSObject.Properties['FriendlyDriverLabel'] -and $selGpu.FriendlyDriverLabel) {
+            [string]$selGpu.FriendlyDriverLabel
+        } elseif (Get-Command ConvertTo-DcFriendlyGpuVersion -ErrorAction SilentlyContinue) {
+            (ConvertTo-DcFriendlyGpuVersion -Vendor ([string]$selGpu.Vendor) -WddmVersion ([string]$selGpu.DriverVersion) -MarketingVersion $(if ($selGpu.PSObject.Properties['MarketingVersion']) { [string]$selGpu.MarketingVersion } else { '' })).FriendlyDriverLabel
+        } else {
+            "$($selGpu.Vendor) GPU driver $($selGpu.DriverVersion)".Trim()
+        }
+        if ($IncidentTime -is [datetime] -and $selGpu.PSObject.Properties['DriverInstallDate'] -and $selGpu.DriverInstallDate -is [datetime]) {
+            if (Get-Command Format-DcDriverInstallTiming -ErrorAction SilentlyContinue) {
+                $tm = Format-DcDriverInstallTiming -IncidentTime $IncidentTime -InstallTime $selGpu.DriverInstallDate -DriverLabel $lbl
+                if ($tm) {
+                    return "$lbl (incident occurred $($tm.Phrase))"
+                }
+            }
+            return "$lbl (installed $($selGpu.DriverInstallDate.ToString('yyyy-MM-dd HH:mm')))"
+        }
+        return $lbl
+    }
     $observations = [System.Collections.Generic.List[PSCustomObject]]::new()
 
     $addObs = {
@@ -2785,14 +3126,14 @@ function Resolve-DcDiagnosticFindings {
         # Details: human explanation without raw hex strings
         $explanation = Get-DcBugCheckExplanation -CodeHex $bc.Code -Param1 $p1
 
-        # Correlate with parsed dumps
+        # Correlate with parsed dumps (never match a fatal BugCheck Event 1001 to a non-fatal LiveKernelReport)
         $matchedDump = $null
         $dumpFileName = if ($dumpPathFromLog) { Split-Path $dumpPathFromLog -Leaf } else { "" }
         if ($dumpFileName) {
-            $matchedDump = @($ParsedDumps | Where-Object { $_ -and $_.FileName -ieq $dumpFileName }) | Select-Object -First 1
+            $matchedDump = @($ParsedDumps | Where-Object { $_ -and -not ($_.PSObject.Properties['IsLiveKernelReport'] -and $_.IsLiveKernelReport) -and $_.FileName -ieq $dumpFileName }) | Select-Object -First 1
         }
         if (-not $matchedDump -and $bc.TimeCreated) {
-            $matchedDump = @($ParsedDumps | Where-Object { $_ -and $_.IsKernelDump -and [Math]::Abs(($_.Timestamp - $bc.TimeCreated).TotalSeconds) -le 120 }) | Select-Object -First 1
+            $matchedDump = @($ParsedDumps | Where-Object { $_ -and $_.IsKernelDump -and -not ($_.PSObject.Properties['IsLiveKernelReport'] -and $_.IsLiveKernelReport) -and [Math]::Abs(($_.Timestamp - $bc.TimeCreated).TotalSeconds) -le 120 }) | Select-Object -First 1
         }
 
         if ($matchedDump) {
@@ -2813,12 +3154,23 @@ function Resolve-DcDiagnosticFindings {
             $dumpLocationText = "No dump file path recorded in event log"
         }
 
+        $matchedHwLabel = if ($matchedDump -and $matchedDump.PSObject.Properties['HardwareId'] -and $matchedDump.HardwareId) {
+            if ($matchedDump.PSObject.Properties['HardwareDeviceName'] -and $matchedDump.HardwareDeviceName) {
+                "$($matchedDump.HardwareDeviceName) ($($matchedDump.HardwareId))"
+            } else {
+                $matchedDump.HardwareId
+            }
+        } else { $null }
+
         # Dump Diagnosis
         $diagnosisText = ""
         if ($matchedDump -and $matchedDump.CdbInspected) {
             $diagParts = [System.Collections.Generic.List[string]]::new()
             if ($matchedDump.FaultingIP) {
                 $diagParts.Add("Faulting instruction/module: $($matchedDump.FaultingIP)")
+            }
+            if ($matchedHwLabel) {
+                $diagParts.Add("Blamed hardware: $matchedHwLabel")
             }
             if ($matchedDump.ApiContext) {
                 $diagParts.Add("Active stage: $($matchedDump.ApiContext)")
@@ -2838,23 +3190,41 @@ function Resolve-DcDiagnosticFindings {
             }
             $diagnosisText = "Diagnosed via CDB: " + ($diagParts -join '; ') + "."
         } elseif ($dumpPathFromLog -and (Test-Path $dumpPathFromLog -ErrorAction SilentlyContinue)) {
-            $diagnosisText = "Dump file exists at $dumpPathFromLog, but reading requires Administrator privileges. Install WinDbg from the Microsoft Store (search 'WinDbg' or run 'winget install Microsoft.WinDbg') and re-run DriverCheck from an Administrator PowerShell prompt to inspect the call stack."
+            $watsonNote = if ($bc.PSObject.Properties['WatsonBucket'] -and $bc.WatsonBucket) { " Windows WER fault bucket: $($bc.WatsonBucket)." } else { "" }
+            if ($isElevatedTel) {
+                $diagnosisText = "Dump file exists at $dumpPathFromLog (install Windows SDK Debugging Tools / WinDbg to unwind kernel call stack symbols).$watsonNote"
+            } else {
+                $diagnosisText = "Dump file recorded at $dumpPathFromLog (decoding the full kernel call stack requires Administrator privileges).$watsonNote"
+            }
         } elseif ($dumpPathFromLog -and ($dumpPathFromLog -match '(?i)C:\\WINDOWS\\Minidump')) {
-            $diagnosisText = "Dump file located at $dumpPathFromLog. Diagnosis was not performed because accessing C:\WINDOWS\Minidump requires Administrator privileges. Install WinDbg from the Microsoft Store (search 'WinDbg' or run 'winget install Microsoft.WinDbg') and re-run DriverCheck from an Administrator PowerShell prompt to automatically unwind and diagnose this dump."
+            $watsonNote = if ($bc.PSObject.Properties['WatsonBucket'] -and $bc.WatsonBucket) { " Windows WER fault bucket: $($bc.WatsonBucket)." } else { "" }
+            if ($isElevatedTel) {
+                $diagnosisText = "Older minidump file ($dumpPathFromLog) is no longer present on disk; Windows Event Log stop code and parameters are shown.$watsonNote"
+            } else {
+                $diagnosisText = "Dump file recorded at $dumpPathFromLog (protected kernel dump folder requires Administrator to unwind call stack).$watsonNote"
+            }
         } else {
-            $diagnosisText = "Dump file was not found on disk or could not be accessed."
+            $watsonNote = if ($bc.PSObject.Properties['WatsonBucket'] -and $bc.WatsonBucket) { " Windows WER fault bucket: $($bc.WatsonBucket)." } else { "" }
+            $diagnosisText = "Dump file was not found on disk or could not be accessed.$watsonNote"
         }
 
         # Key Information from Logs
         $keyInfoParts = [System.Collections.Generic.List[string]]::new()
         $keyInfoParts.Add("Stop Code: $($bc.Code) ($($bc.Meaning))")
+        if ($matchedHwLabel) { $keyInfoParts.Add("Blamed Hardware: $matchedHwLabel") }
         if ($reportId) { $keyInfoParts.Add("Report ID: $reportId") }
+        if ($bc.PSObject.Properties['WatsonBucket'] -and $bc.WatsonBucket) { $keyInfoParts.Add("Fault Bucket: $($bc.WatsonBucket)") }
 
         # Correlate nearby events. Event 1001 is logged AFTER the reboot, so anchor on the dump's own crash time when known.
         $anchorTime = if ($matchedDump -and $matchedDump.CrashTime) { [datetime]$matchedDump.CrashTime } else { $bc.TimeCreated }
         if ($matchedDump -and $matchedDump.CrashTime) {
             $keyInfoParts.Add("Crash time (from dump): $($anchorTime.ToString('yyyy-MM-dd HH:mm:ss'))")
             if ($matchedDump.Uptime) { $keyInfoParts.Add("Uptime at crash: $($matchedDump.Uptime)") }
+        }
+        $bcModHint = if ($matchedDump -and $matchedDump.DebuggerModuleName) { [string]$matchedDump.DebuggerModuleName } elseif ($matchedDump -and $matchedDump.FaultingIP) { [string]$matchedDump.FaultingIP } elseif ($bc.PSObject.Properties['WatsonBucket']) { [string]$bc.WatsonBucket } else { '' }
+        if ($bc.Code -match '0x0*(116|119)\b' -or $bcModHint -match '(?i)amdkmd|nvlddm|igdkmd') {
+            $gpuNote = & $getGpuDriverNote $anchorTime $bcModHint
+            if ($gpuNote) { $keyInfoParts.Add("Active GPU Driver: $gpuNote") }
         }
         $preEvents = [System.Collections.Generic.List[string]]::new()
         $postEvents = [System.Collections.Generic.List[string]]::new()
@@ -2894,8 +3264,12 @@ function Resolve-DcDiagnosticFindings {
         & $addObs 'KERNEL_BUGCHECK' 'System' 'Crash' "Kernel bugcheck (BSOD) $($bc.Code) - $($bc.Meaning)" $formattedDesc $bc.TimeCreated "Windows kernel" 'System event log (BugCheck, Event 1001)'
     }
 
-    # ---- Crash dump files: group identical (process, exception, module) ----
-    $dumps = @($ParsedDumps | Where-Object { $_ -and $_.ExceptionCode -and -not ($_.IsKernelDump -and $matchedDumpFiles.Contains($_.FileName)) })
+    # ---- Crash dump files: separate fatal crash dumps from non-fatal LiveKernelReports ----
+    $dumps = @($ParsedDumps | Where-Object {
+        $_ -and $_.ExceptionCode -and
+        -not ($_.PSObject.Properties['IsLiveKernelReport'] -and $_.IsLiveKernelReport) -and
+        -not ($_.IsKernelDump -and $matchedDumpFiles.Contains($_.FileName))
+    })
     foreach ($grp in ($dumps | Group-Object { "$($_.FileName -replace '\.\d+\.dmp$','')|$($_.ExceptionCode)|$($_.FaultingIP)" })) {
         $items = @($grp.Group | Sort-Object Timestamp -Descending)
         $d = $items[0]
@@ -2913,6 +3287,29 @@ function Resolve-DcDiagnosticFindings {
             "Dump Diagnosis:  $($apiDesc.Trim()) $($stackDesc.Trim())"
 
         & $addObs 'CRASH_DUMP' 'Dump' 'Crash' "Crash dump ($kind): $($d.FileName)" $desc $d.Timestamp $d.FaultingIP "Dump file $($d.FullName)"
+    }
+
+    $liveDumps = @($ParsedDumps | Where-Object {
+        $_ -and $_.ExceptionCode -and ($_.PSObject.Properties['IsLiveKernelReport'] -and $_.IsLiveKernelReport)
+    })
+    $tdrEvList = @(& $getEvents 'TdrEvents')
+    foreach ($grp in ($liveDumps | Group-Object { "$($_.FileName -replace '-\d{8}-\d{4}.*','')|$($_.ExceptionCode)|$($_.FaultingIP)" })) {
+        $items = @($grp.Group | Sort-Object Timestamp -Descending)
+        $d = $items[0]
+        $coveredByTdr = $d.IsGraphicsCrash -and (@($tdrEvList | Where-Object { $_.TimeCreated -and [Math]::Abs(($_.TimeCreated - $d.Timestamp).TotalSeconds) -le 120 }).Count -gt 0)
+        if ($coveredByTdr) { continue }
+        $span = if ($items.Count -gt 1) { "$($items.Count) live dumps, $(& $fmt $items[-1].Timestamp) to $(& $fmt $d.Timestamp)" } else { "1 live dump" }
+        $where = if ($d.FaultingIP) { $d.FaultingIP } elseif ($d.FaultingModule) { $d.FaultingModule } else { 'module not resolved' }
+        $bucketTxt = if ($d.FailureBucket) { " Failure bucket: $($d.FailureBucket)." } else { '' }
+        $stackDesc = if ($d.CallStack -and $d.CallStack.Count -gt 0) { " Call stack: $(($d.CallStack | Select-Object -First 3) -join ' -> ')." } else { '' }
+
+        $desc = "Timestamp:       $(& $fmt $d.Timestamp)`n" +
+            "Type of Issue:   Non-Fatal Live Kernel Report (Windows did NOT crash or reboot)`n" +
+            "Details:         $($d.ExceptionCode) ($($d.ExceptionMeaning)) blaming $where. $span.`n" +
+            "Dump Location:   $($d.FullName)`n" +
+            "Dump Diagnosis:  $($bucketTxt.Trim()) $($stackDesc.Trim())"
+
+        & $addObs 'LIVE_KERNEL_DUMP' 'System' 'Event' "Non-fatal live kernel report: $($d.FileName) ($($d.ExceptionCode))" $desc $d.Timestamp $where "Live kernel dump $($d.FullName)"
     }
 
     # ---- GPU timeout events (TDR) ----
@@ -2934,6 +3331,13 @@ function Resolve-DcDiagnosticFindings {
         # Correlate active Steam game sessions
         $nearSteam = @($SteamGameSessions | Where-Object { $_.StartTime -le $t.TimeCreated -and $_.EndTime -ge $t.TimeCreated })
 
+        $nearWerApps = @(& $getEvents 'WerAppReports' | Where-Object { $_.Timestamp -and [Math]::Abs(($_.Timestamp - $t.TimeCreated).TotalSeconds) -le 120 -and $_.EventType -notmatch '(?i)LiveKernelEvent' })
+        $nearAppCrashes = @(& $getEvents 'AppCrashes' | Where-Object { $_.TimeCreated -and [Math]::Abs(($_.TimeCreated - $t.TimeCreated).TotalSeconds) -le 120 })
+        $nearDispHotplug = @(& $getEvents 'DisplayHotplugEvents' | Where-Object { $_.TimeCreated -and [Math]::Abs(($_.TimeCreated - $t.TimeCreated).TotalSeconds) -le 30 })
+        $nearOom = @(& $getEvents 'MemoryExhaustion' | Where-Object {
+            $_.TimeCreated -and (($t.TimeCreated - $_.TimeCreated).TotalSeconds -ge -30) -and (($t.TimeCreated - $_.TimeCreated).TotalSeconds -le 180)
+        })
+
         # 1. Determine process context
         $procDesc = ""
         $associatedProc = $null
@@ -2943,7 +3347,8 @@ function Resolve-DcDiagnosticFindings {
             $procName = $d.FileName -replace '\.\d+\.dmp$',''
             $associatedProc = $procName
             $associatedApiStage = $d.ApiContext
-            $procDesc = "Process '$procName' crashed at $(& $fmt $d.Timestamp) ($($d.ExceptionCode): $($d.ExceptionMeaning)) inside $($d.FaultingIP)."
+            $overlayTag = if ($d.PSObject.Properties['IsOverlayFault'] -and $d.IsOverlayFault -and $d.OverlayName) { " [Third-party overlay hook: $($d.OverlayName)]" } else { "" }
+            $procDesc = "Process '$procName' crashed at $(& $fmt $d.Timestamp) ($($d.ExceptionCode): $($d.ExceptionMeaning)) inside $($d.FaultingIP).$overlayTag"
             if ($d.ApiContext) {
                 $procDesc += " Thread was executing: $($d.ApiContext)."
             }
@@ -2957,6 +3362,9 @@ function Resolve-DcDiagnosticFindings {
             $associatedProc = $procName
             $cmd = if ($el.CommandLine) { " (command: '$($el.CommandLine)')" } else { "" }
             $procDesc = "Application engine log '$($el.LogName)' active at $(& $fmt $el.Timestamp) for $procName$cmd."
+            if ($el.PSObject.Properties['GpuErrorCode'] -and $el.GpuErrorCode) {
+                $procDesc += " GPU error code: $($el.GpuErrorCode)."
+            }
             if ($el.ErrorLines.Count -gt 0) {
                 $procDesc += " Engine error recorded: '$($el.ErrorLines[0])'."
             }
@@ -2967,44 +3375,74 @@ function Resolve-DcDiagnosticFindings {
             else { $procDesc = "Heavy GPU workload '$($w.ProcessName)' active near timeout (identified via $($w.Source))." }
         } elseif ($nearSteam.Count -gt 0) {
             $s = $nearSteam[0]
-            $associatedProc = "Steam AppID $($s.AppId)"
-            $procDesc = "Steam game session active at timeout: AppID $($s.AppId) (running since $($s.StartTime.ToString('HH:mm:ss')))."
+            $sLabel = if ($s.PSObject.Properties['GameName'] -and $s.GameName) { "$($s.GameName) (AppID $($s.AppId))" } else { "Steam AppID $($s.AppId)" }
+            $associatedProc = $sLabel
+            $exitNote = if ($s.PSObject.Properties['ExitedAbnormally'] -and $s.ExitedAbnormally) { " Game process exited abnormally (exit code $($s.ExitCode))." } else { "" }
+            $procDesc = "Steam game session active at timeout: $sLabel (running since $($s.StartTime.ToString('HH:mm:ss'))).$exitNote"
+        } elseif ($nearWerApps.Count -gt 0) {
+            $wa = $nearWerApps[0]
+            $associatedProc = if ($wa.AppName) { $wa.AppName } else { $wa.FolderName }
+            $modInfo = if ($wa.PSObject.Properties['IsOverlayFault'] -and $wa.IsOverlayFault -and $wa.OverlayName) { " inside overlay hook $($wa.OverlayName) ($($wa.FaultModule))" } elseif ($wa.PSObject.Properties['FaultModule'] -and $wa.FaultModule) { " inside $($wa.FaultModule)" } else { "" }
+            $procDesc = "Application '$associatedProc' recorded a WER crash report at $(& $fmt $wa.Timestamp)$modInfo."
+        } elseif ($nearAppCrashes.Count -gt 0) {
+            $ac = $nearAppCrashes[0]
+            $associatedProc = $ac.AppName
+            $modInfo = if ($ac.PSObject.Properties['FaultModule'] -and $ac.FaultModule) { " in $($ac.FaultModule)" } else { "" }
+            $procDesc = "Application Error 1000 logged for '$associatedProc'$modInfo at $(& $fmt $ac.TimeCreated)."
         } else {
-            $procDesc = "Not recorded in system logs. Checked Unreal Engine, Unity, idTech, Godot logs, Steam sessions, and WER process crash dumps within 2 minutes of timeout ($($t.TimeCreated.ToString('HH:mm:ss'))). No application crash dump or active game session was recorded."
+            $procDesc = "No crashed app dump or active engine log was found within 2 minutes of timeout ($($t.TimeCreated.ToString('HH:mm:ss'))). Checked Unreal/Unity/idTech/Godot/Steam logs, Steam sessions, WER app crashes, and user-mode dumps."
+        }
+
+        if ($nearDispHotplug.Count -gt 0) {
+            $dhList = @($nearDispHotplug | ForEach-Object { if ($_.PSObject.Properties['DeviceInstanceId'] -and $_.DeviceInstanceId) { $_.DeviceInstanceId } elseif ($_.Message) { $_.Message } else { "Display link event" } } | Select-Object -Unique)
+            $procDesc += " Correlated monitor/display hotplug (Kernel-PnP 1010) within 30s: $($dhList -join '; ')."
+        }
+        if ($nearOom.Count -gt 0) {
+            $oomTop = if ($nearOom[0].PSObject.Properties['TopConsumers'] -and $nearOom[0].TopConsumers) { " ($($nearOom[0].TopConsumers))" } else { "" }
+            $procDesc += " Windows virtual memory exhaustion (Event 2004) occurred within 3 minutes prior$oomTop."
         }
 
         # 2. Determine shader / pipeline info
+        $tdrDelayVal = if ($tel -and $tel.PSObject.Properties['GraphicsDriverSettings'] -and $tel.GraphicsDriverSettings -and $tel.GraphicsDriverSettings.TdrDelay) { $tel.GraphicsDriverSettings.TdrDelay } else { $null }
+        $tdrWindowTxt = if ($tdrDelayVal) { "$tdrDelayVal-second configured TdrDelay" } else { "2-second default TdrDelay" }
         $shaderNote = ""
         if ($associatedApiStage) {
-            $shaderNote = "Active graphics pipeline stage: $associatedApiStage."
-        } elseif ($nearEngine.Count -gt 0 -and $nearEngine[0].ShaderInfo) {
-            $shaderNote = "Active shader from engine log: $($nearEngine[0].ShaderInfo)."
-            if ($nearEngine[0].Breadcrumbs) { $shaderNote += " Breadcrumbs: $($nearEngine[0].Breadcrumbs)." }
+            $shaderNote = "Active graphics pipeline stage: $associatedApiStage (watchdog threshold: $tdrWindowTxt)."
+        } elseif ($nearEngine.Count -gt 0 -and ($nearEngine[0].ShaderInfo -or $nearEngine[0].Breadcrumbs)) {
+            $sParts = [System.Collections.Generic.List[string]]::new()
+            if ($nearEngine[0].ShaderInfo) { $sParts.Add("Active shader from engine log: $($nearEngine[0].ShaderInfo)") }
+            if ($nearEngine[0].Breadcrumbs) { $sParts.Add("DRED/GPU breadcrumbs: $($nearEngine[0].Breadcrumbs)") }
+            $shaderNote = ($sParts -join '; ') + " (watchdog threshold: $tdrWindowTxt)."
         } else {
-            $shaderNote = "The Windows kernel watchdog triggers when a GPU command queue fails to complete within 2 seconds. The kernel event log captures that the timeout occurred, but does not identify the specific shader instruction or dispatch executing on the GPU execution units."
+            $shaderNote = "Windows watchdog threshold is $tdrWindowTxt (triggers when a GPU queue does not respond in time). Kernel Event 1001 logs the reset itself rather than the individual shader instruction."
         }
 
         # 3. Dump status
+        $watsonTxt = if ($t.PSObject.Properties['WatsonBucket'] -and $t.WatsonBucket) { " WER bucket: $($t.WatsonBucket)." } else { "" }
         $dumpDesc = if ($hasDump) {
             $comp = if ($t.PSObject.Properties['CompanionCodes'] -and $t.CompanionCodes -and $t.CompanionCodes.Count -gt 0) { " Additional companion live dumps written within 60s: $($t.CompanionCodes -join ', ') (vendor-defined)." } else { '' }
-            "Live dump saved at: $($t.DumpPath). Live dumps capture driver hardware registers and command ringbuffers at the moment of timeout.$comp (Reading requires an Administrator shell)."
+            $elevNote = if ($isElevatedTel) { "(Use WinDbg/CDB to inspect the live hardware ringbuffer dump if deeper triage is needed.)" } else { "(Reading live hardware ringbuffer dumps directly requires an Administrator shell)." }
+            "Live dump saved at: $($t.DumpPath).$comp$watsonTxt $elevNote"
         } else {
-            "No live dump file path recorded in this event."
+            "No live dump file path recorded in this event.$watsonTxt"
         }
 
         # 4. Tailored Options
         $optionsDesc = ""
         if ($associatedApiStage -match 'Compute Pipeline|Graphics Pipeline|Shader Compilation') {
-            $modName = if ($nearDumps.Count -gt 0 -and $nearDumps[0].FaultingModule) { $nearDumps[0].FaultingModule } else { "the graphics driver" }
-            $optionsDesc = "(1) The fault occurred during pipeline compilation in $modName. If you are developing shaders, test compiling with standalone compilers (e.g. DXC or glslangValidator) or inspect SPIR-V/DXIL bytecode for unhandled intrinsics. (2) If developing on Vulkan/DirectX, enable API validation layers (VK_LAYER_KHRONOS_validation / D3D12 debug layer) to detect invalid descriptor sets or layout mismatches before dispatch. (3) If this is in a packaged game, verify game files in Steam/Epic or report the issue with the crash dump to the developer/driver vendor."
+            $modName = if ($nearDumps.Count -gt 0 -and $nearDumps[0].FaultingModule) { $nearDumps[0].FaultingModule } else { "the graphics pipeline" }
+            $optionsDesc = "(1) The fault occurred during pipeline compilation in $modName. If developing shaders, test with standalone compilers (DXC/glslangValidator) or enable API validation layers. (2) If this occurred in a game, clear the shader cache or verify game files rather than assuming a full GPU driver reinstall is required."
         } elseif ($associatedProc) {
-            $optionsDesc = "(1) Check application/engine logs for '$associatedProc' around $(& $fmt $t.TimeCreated) for hung draw calls, device removed errors, or memory allocation warnings. (2) For Unreal games, launch with '-gpucrashdebugging' to enable GPU crash breadcrumbs that log the exact draw call before a hang. (3) To inspect the driver kernel submission queue, run DriverCheck from an Administrator PowerShell or open '$($t.DumpPath)' in WinDbg with '!analyze -v'."
+            $optionsDesc = "(1) Inspect application, overlay, and engine logs for '$associatedProc' around $(& $fmt $t.TimeCreated) for hung draw calls, DRED device-removed errors, or third-party overlay conflicts. (2) For Unreal/DirectX games with GPU hangs, launch with '-gpucrashdebugging' to capture exact DRED draw breadcrumbs."
         } else {
-            $optionsDesc = "(1) To inspect the driver kernel submission ringbuffer and identify which hardware engine hung, run DriverCheck from an Administrator PowerShell or open '$($t.DumpPath)' in WinDbg (!analyze -v). (2) If running 3D games or GPU workloads, enable GPU crash breadcrumbs or API validation layers to isolate the dispatch exceeding the 2-second watchdog threshold."
+            $optionsDesc = "(1) Check running overlays/recording software and Windows memory/sleep logs around $(& $fmt $t.TimeCreated). (2) If running 3D/compute workloads or dev builds, enable API validation or DRED breadcrumbs to catch any dispatch exceeding the $tdrWindowTxt watchdog."
         }
 
+        $tdrGpuNote = & $getGpuDriverNote $t.TimeCreated ''
+        $tdrGpuLine = if ($tdrGpuNote) { "Active Driver:   $tdrGpuNote`n" } else { "" }
         $fullDesc = "Timestamp:       $(& $fmt $t.TimeCreated)`n" +
             "Type of Issue:   GPU Driver Timeout / Engine Reset (LiveKernelEvent 0x$($t.Code.ToUpper()))`n" +
+            $tdrGpuLine +
             "Details:         $($t.Meaning)`n" +
             "Process Context: $procDesc`n" +
             "Shader / Stage:  $shaderNote`n" +
@@ -3053,20 +3491,60 @@ function Resolve-DcDiagnosticFindings {
         if ($ev.Count -eq 0) { continue }
         $sorted = @($ev | Sort-Object TimeCreated -Descending)
         $sample = if ($sorted[0].PSObject.Properties['Message'] -and $sorted[0].Message) { " Most recent: $($sorted[0].Message)" } elseif ($sorted[0].PSObject.Properties['Application']) { " Most recent: $($sorted[0].Application)" } else { '' }
-        & $addObs $gd.Id $gd.Cat 'Event' $gd.Title "$($ev.Count) event(s), $(& $fmt $sorted[-1].TimeCreated) to $(& $fmt $sorted[0].TimeCreated).$sample" $sorted[0].TimeCreated '' $gd.Src
+        $extra = ""
+        if ($gd.Id -eq 'NET_LINK_DROP') {
+            $matchedSess = [System.Collections.Generic.List[string]]::new()
+            foreach ($dropEv in $sorted) {
+                $nearS = @($SteamGameSessions | Where-Object { $_.StartTime -le $dropEv.TimeCreated -and $_.EndTime -ge $dropEv.TimeCreated })
+                foreach ($ms in $nearS) {
+                    $lbl = if ($ms.PSObject.Properties['GameName'] -and $ms.GameName) { "$($ms.GameName) (AppID $($ms.AppId))" } else { "AppID $($ms.AppId)" }
+                    if (-not $matchedSess.Contains($lbl)) { $matchedSess.Add($lbl) }
+                }
+            }
+            if ($matchedSess.Count -gt 0) {
+                $extra += " Active Steam session during drop: $($matchedSess -join ', ')."
+            }
+            $pwrNotes = [System.Collections.Generic.List[string]]::new()
+            foreach ($nh in @($NetworkHealth)) {
+                if ($nh -and $nh.PSObject.Properties['PowerSavingSummary'] -and $nh.PowerSavingSummary) {
+                    $nLabel = if ($nh.PSObject.Properties['Name'] -and $nh.Name) { $nh.Name } else { "Adapter" }
+                    $pwrNotes.Add("${nLabel}: $($nh.PowerSavingSummary)")
+                }
+            }
+            if ($pwrNotes.Count -gt 0) {
+                $extra += " Adapter power settings: $($pwrNotes -join '; ')."
+            }
+        } elseif ($gd.Id -eq 'UDP_PORT_4266') {
+            if ($tel -and $tel.PSObject.Properties['TopUdpConsumers'] -and $tel.TopUdpConsumers) {
+                $topU = @($tel.TopUdpConsumers | Select-Object -First 3 | ForEach-Object { "$($_.ProcessName) ($($_.EndpointCount) endpoints)" })
+                if ($topU.Count -gt 0) {
+                    $extra += " Top UDP consumers: $($topU -join ', ')."
+                }
+            }
+        }
+        & $addObs $gd.Id $gd.Cat 'Event' $gd.Title "$($ev.Count) event(s), $(& $fmt $sorted[-1].TimeCreated) to $(& $fmt $sorted[0].TimeCreated).$sample$extra" $sorted[0].TimeCreated '' $gd.Src
+    }
+
+    foreach ($ss in (& $getEvents 'StuckServices')) {
+        $ssName = if ($ss.PSObject.Properties['Name'] -and $ss.Name) { [string]$ss.Name } else { "Background service" }
+        $ssState = if ($ss.PSObject.Properties['State'] -and $ss.State) { [string]$ss.State } else { "Stuck" }
+        $ssMsg = if ($ss.PSObject.Properties['Message'] -and $ss.Message) { [string]$ss.Message } else { "Service '$ssName' is stuck in '$ssState'." }
+        & $addObs 'STUCK_BACKGROUND_SERVICE' 'System' 'Event' "Background service stuck: $ssName ($ssState)" $ssMsg (Get-Date) $ssName 'Service Control Manager'
     }
 
     foreach ($z in $ZombieProcesses) {
         & $addObs 'STEAM_NOT_RESPONDING' 'Application' 'Event' "steam.exe (PID $($z.PID)) is currently not responding or has no window" "Observed live at scan time. Started $($z.StartTime)." (Get-Date) 'steam.exe' 'Live process inspection'
     }
 
-    # ---- Evidence the tool could not read ----
-    foreach ($u in $UnreadableSources) {
-        $folder = ($u -split ' - ')[0]
-        $refs = @((& $getEvents 'KernelBugChecks') | ForEach-Object { if ($_.Message -match 'A dump was saved in:\s*(\S+\.dmp)') { $Matches[1] } } | Where-Object { $_ -and $_.StartsWith($folder, [StringComparison]::OrdinalIgnoreCase) } | Select-Object -Unique)
-        $refTxt = if ($refs.Count -gt 0) { " Dumps saved there according to event logs: $($refs -join ', ')." } else { '' }
-        $elevDesc = "Crash dump folder located at $folder.$refTxt Reading files in this folder requires an Administrator shell. You can install WinDbg from the Microsoft Store (search 'WinDbg' or run 'winget install Microsoft.WinDbg'), then re-run DriverCheck from an Administrator PowerShell prompt to automatically inspect and diagnose these dumps."
-        & $addObs 'EVIDENCE_UNREADABLE' 'Evidence' 'Evidence' "Crash dump location found: $folder (Administrator shell required)" $elevDesc $null '' 'DriverCheck access check'
+    # ---- Evidence the tool could not read (single consolidated item when kernel/TDR dumps are protected) ----
+    $unreadList = @($UnreadableSources | Where-Object { $_ })
+    if ($unreadList.Count -gt 0) {
+        $folders = @($unreadList | ForEach-Object { ($_ -split ' - ')[0] } | Select-Object -Unique)
+        $folderLabel = $folders -join ', '
+        $refs = @((& $getEvents 'KernelBugChecks') | ForEach-Object { if ($_.Message -match 'A dump was saved in:\s*(\S+\.dmp)') { $Matches[1] } } | Select-Object -Unique)
+        $refTxt = if ($refs.Count -gt 0) { " Dumps referenced in event log: $($refs -join ', ')." } else { '' }
+        $elevDesc = "Protected kernel crash dump location(s) ($folderLabel) require Administrator privileges to open.$refTxt Standard-user analysis covered all Event Logs, WER reports, Steam logs, and engine logs instead."
+        & $addObs 'EVIDENCE_UNREADABLE' 'Evidence' 'Evidence' "Protected kernel dump folder(s): $folderLabel (requires Administrator to decode)" $elevDesc $null '' 'DriverCheck access check'
     }
 
     # ---- Next Investigation Leads ----
@@ -3114,12 +3592,25 @@ function Resolve-DcDiagnosticFindings {
         & $addLead "$($d.FileName): the fault address $($d.FaultingIP) was not resolved to a module. A debugger (WinDbg/cdb) with symbols can resolve it." "Dump $($d.FileName)" 'Incomplete'
     }
 
+    # (a2) Non-fatal live kernel dumps (separate from process/BSOD crashes)
+    foreach ($ld in ($liveDumps | Select-Object -First 4)) {
+        $ldMod = if ($ld.DebuggerImageName) { $ld.DebuggerImageName } elseif ($ld.DebuggerModuleName) { $ld.DebuggerModuleName } elseif ($ld.FaultingModule) { $ld.FaultingModule } elseif ($ld.FaultingIP) { (($ld.FaultingIP -split '[!+\s\(]')[0]).Trim() } else { 'unknown driver' }
+        $owner = & $moduleOwner $ldMod
+        $ownerTxt = if ($owner) { " On this machine that file reports: $owner." } else { "" }
+        $bktTxt = if ($ld.FailureBucket) { " (bucket: $($ld.FailureBucket))" } else { "" }
+        & $addLead "Non-fatal live kernel report $($ld.FileName) ($($ld.ExceptionCode)): flagged $ldMod$bktTxt — Windows captured diagnostic state and recovered without rebooting.$ownerTxt" "Live kernel dump $($ld.FileName)" 'Direct'
+    }
+
     # (b) Kernel bugchecks
     foreach ($bc in ((& $getEvents 'KernelBugChecks') | Select-Object -First 3)) {
         $dumpPath = if ($bc.Message -match 'A dump was saved in:\s*(\S+\.dmp)') { $Matches[1] } else { $null }
-        $matchedDump = if ($dumpPath) { $ParsedDumps | Where-Object { $_.FileName -ieq (Split-Path $dumpPath -Leaf) } | Select-Object -First 1 } else { $null }
+        $matchedDump = if ($dumpPath) { $ParsedDumps | Where-Object { $_ -and -not ($_.PSObject.Properties['IsLiveKernelReport'] -and $_.IsLiveKernelReport) -and $_.FileName -ieq (Split-Path $dumpPath -Leaf) } | Select-Object -First 1 } else { $null }
         if ($matchedDump -and $matchedDump.CdbInspected) {
             $diagLead = "Bugcheck $($bc.Code) ($($bc.Meaning)): Call stack identified $($matchedDump.FaultingIP)."
+            if ($matchedDump.PSObject.Properties['HardwareId'] -and $matchedDump.HardwareId) {
+                $hwL = if ($matchedDump.PSObject.Properties['HardwareDeviceName'] -and $matchedDump.HardwareDeviceName) { "$($matchedDump.HardwareDeviceName) ($($matchedDump.HardwareId))" } else { $matchedDump.HardwareId }
+                $diagLead += " Blamed hardware: $hwL."
+            }
             if ($matchedDump.ApiContext) { $diagLead += " Stage: $($matchedDump.ApiContext)." }
             if ($matchedDump.FailureBucket) { $diagLead += " Failure bucket: $($matchedDump.FailureBucket)." }
             if ($matchedDump.ProbablyCausedBy) { $diagLead += " Probably caused by: $($matchedDump.ProbablyCausedBy)." }
@@ -3127,7 +3618,15 @@ function Resolve-DcDiagnosticFindings {
             & $addLead $diagLead "Dump analysis of $($matchedDump.FileName)" 'Direct'
         } else {
             $where = if ($dumpPath) { "Dump saved at $dumpPath." } else { 'No dump file named in event log.' }
-            & $addLead "Bugcheck $($bc.Code) ($($bc.Meaning)): $where To inspect the call stack automatically, install WinDbg from the Microsoft Store ('winget install Microsoft.WinDbg') and re-run DriverCheck from an Administrator PowerShell prompt (or open the dump in WinDbg and run '!analyze -v')." "Bugcheck at $(& $fmt $bc.TimeCreated)" 'Direct'
+            $wb = if ($bc.PSObject.Properties['WatsonBucket'] -and $bc.WatsonBucket) { " WER fault bucket: $($bc.WatsonBucket)." } else { '' }
+            $adminSuffix = if (-not $isElevatedTel) {
+                " Optional: inspect with WinDbg/CDB from an Administrator shell if deeper kernel call-stack symbols are needed."
+            } elseif ($dumpPath -and (Test-Path $dumpPath -ErrorAction SilentlyContinue)) {
+                " Optional: install WinDbg/CDB if deeper kernel call-stack symbols are needed."
+            } else {
+                " Minidump file is no longer retained on disk; stop code and parameters come from Windows Event 1001."
+            }
+            & $addLead "Bugcheck $($bc.Code) ($($bc.Meaning)): $where$wb$adminSuffix" "Bugcheck at $(& $fmt $bc.TimeCreated)" 'Direct'
         }
     }
 
@@ -3138,7 +3637,7 @@ function Resolve-DcDiagnosticFindings {
         $contextLead = if ($nearD.Count -gt 0 -and $nearD[0].ApiContext) {
             " Correlated with crash of '$($nearD[0].FileName -replace '\.\d+\.dmp$','')' during $($nearD[0].ApiContext)."
         } else { "" }
-        & $addLead "GPU driver timeout live dump from $(& $fmt $t.TimeCreated) saved at $($t.DumpPath).$contextLead Options: (1) Install WinDbg from the Microsoft Store ('winget install Microsoft.WinDbg') and re-run DriverCheck from an Administrator PowerShell to automatically inspect the dump. (2) Open the live dump directly in WinDbg with '!analyze -v'. (3) If developing, enable API validation layers or GPU crash breadcrumbs to capture the hung dispatch." "GPU watchdog live dump (LiveKernelEvent 0x$($t.Code.ToUpper()))" 'Direct'
+        & $addLead "GPU driver timeout live dump from $(& $fmt $t.TimeCreated) saved at $($t.DumpPath).$contextLead Check app/overlay/engine logs first; enable API validation layers or GPU crash breadcrumbs (e.g. DRED / '-gpucrashdebugging') to isolate hung dispatches." "GPU watchdog live dump (LiveKernelEvent 0x$($t.Code.ToUpper()))" 'Direct'
     }
 
     # (c) Event 41 restarts that record no bugcheck
@@ -3147,10 +3646,11 @@ function Resolve-DcDiagnosticFindings {
         & $addLead "System rebooted without a clean shutdown at $(& $fmt $e.TimeCreated). No bugcheck stop code was generated, indicating an abrupt power interruption or freeze.$btn Check power supply, thermal levels, and events in the minutes prior to this timestamp." "Kernel-Power 41 with BugcheckCode 0" 'Direct'
     }
 
-    # (d) Evidence gaps
-    foreach ($u in $UnreadableSources) {
-        $folder = ($u -split ' - ')[0]
-        & $addLead "Install WinDbg from the Microsoft Store ('winget install Microsoft.WinDbg') and re-run DriverCheck from an Administrator PowerShell prompt to inspect crash dumps in $folder." "Crash dump location found ($folder)" 'Direct'
+    # (d) Evidence gaps (single consolidated lead when protected kernel dump folders exist)
+    $unreadLeadList = @($UnreadableSources | Where-Object { $_ })
+    if ($unreadLeadList.Count -gt 0) {
+        $folders = @($unreadLeadList | ForEach-Object { ($_ -split ' - ')[0] } | Select-Object -Unique) -join ', '
+        & $addLead "Optional deep kernel stack decoding: protected dump folder(s) ($folders) require an Administrator shell and WinDbg/CDB." "Crash dump location found ($folders)" 'Direct'
     }
 
     $leadRank = { param($l) if ($l.BasedOn -like 'Bugcheck at*') { 0 } elseif ($l.BasedOn -like 'Crash dump location*' -or $l.BasedOn -like 'GPU watchdog*') { 1 } elseif ($l.BasedOn -like 'Kernel-Power 41*') { 2 } else { 3 } }
@@ -3168,7 +3668,7 @@ function Resolve-DcDiagnosticFindings {
         param($o)
         if ($o.Id -eq 'KERNEL_BUGCHECK') { return 0 }
         if ($o.Id -eq 'CRASH_DUMP') { return 1 }
-        if ($o.Id -eq 'GPU_TIMEOUT_EVENT') { return 2 }
+        if ($o.Id -in @('GPU_TIMEOUT_EVENT', 'LIVE_KERNEL_DUMP')) { return 2 }
         if ($o.Id -in @('KERNEL_POWER_41', 'EVENTLOG_6008')) { return 3 }
         if ($o.Kind -eq 'Evidence') { return 5 }
         return 4
