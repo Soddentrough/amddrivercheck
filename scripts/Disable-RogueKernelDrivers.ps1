@@ -58,7 +58,7 @@ if ($activeDrivers.Count -eq 0) {
 Write-Host "`n[!] $($activeDrivers.Count) driver(s) are actively configured to load on boot." -ForegroundColor Red
 Write-Host "These drivers frequently conflict with modern anti-cheat systems and cause 0x93 BSODs or game freezes." -ForegroundColor Yellow
 
-if (-not (Test-DcIsAdmin)) {
+if (-not (Test-DcIsAdmin) -and -not $WhatIfPreference) {
     Write-Host "`n[ERROR] Administrator elevation is required to disable kernel driver services." -ForegroundColor Red
     Write-Host "Please re-run this tool in an elevated terminal (Run as Administrator) or run:" -ForegroundColor Yellow
     foreach ($ad in $activeDrivers) {
@@ -67,10 +67,15 @@ if (-not (Test-DcIsAdmin)) {
     return
 }
 
+$spArgs = @{ WhatIf = [bool]$WhatIfPreference }
+if ($PSBoundParameters.ContainsKey('Confirm')) { $spArgs['Confirm'] = [bool]$PSBoundParameters['Confirm'] }
+
 Write-Host ""
 foreach ($ad in $activeDrivers) {
     Write-Host "Disabling service '$($ad.ServiceName)' ($($ad.FileName))..." -ForegroundColor Yellow
-    Disable-DcProblematicKernelDriver -DriverName $ad.ServiceName
+    Disable-DcProblematicKernelDriver -DriverName $ad.ServiceName @spArgs
 }
 
-Write-Host "`n[DONE] Kernel driver remediation routine complete. Please restart Windows to finalize changes." -ForegroundColor Green
+if (-not $WhatIfPreference) {
+    Write-Host "`n[DONE] Kernel driver remediation routine complete. Please restart Windows to finalize changes." -ForegroundColor Green
+}

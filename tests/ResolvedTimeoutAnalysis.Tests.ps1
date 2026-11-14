@@ -2113,3 +2113,29 @@ Child-SP          RetAddr           Call Site
         }
     }
 }
+
+Describe "DcRemediation - Wrapper Script WhatIf Propagation" {
+    It "Propagates -WhatIf through Repair-EthernetSettings.ps1, Repair-GpuSleepSettings.ps1, and Repair-PciePowerSettings.ps1 without mutating state or creating backups" {
+        $repoRoot = Split-Path -Parent $PSScriptRoot
+        $logsDir = Join-Path $repoRoot "logs"
+        $beforeBackups = @()
+        if (Test-Path $logsDir) {
+            $beforeBackups = @(Get-ChildItem -Path $logsDir -Filter "Remediation-Backup-*.json" -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+        }
+
+        $ethRes = & (Join-Path $repoRoot "scripts\Repair-EthernetSettings.ps1") -WhatIf
+        $gpuRes = & (Join-Path $repoRoot "scripts\Repair-GpuSleepSettings.ps1") -WhatIf
+        $pcieRes = & (Join-Path $repoRoot "scripts\Repair-PciePowerSettings.ps1") -WhatIf
+
+        $ethRes | Should -Be $false
+        $gpuRes | Should -Be $false
+        ($pcieRes -eq $true) | Should -Be $false
+
+        $afterBackups = @()
+        if (Test-Path $logsDir) {
+            $afterBackups = @(Get-ChildItem -Path $logsDir -Filter "Remediation-Backup-*.json" -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+        }
+        $newBackups = @($afterBackups | Where-Object { $beforeBackups -notcontains $_ })
+        $newBackups.Count | Should -Be 0
+    }
+}

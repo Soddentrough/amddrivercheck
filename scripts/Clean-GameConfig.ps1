@@ -27,5 +27,8 @@ Write-Host "  GAME CONFIGURATION & CACHE CLEANER" -ForegroundColor Magenta
 Write-Host "========================================================================" -ForegroundColor Magenta
 Write-Host ""
 
-Clear-DcGameConfig -Game $Game -Backup
+$spArgs = @{ WhatIf = [bool]$WhatIfPreference }
+if ($PSBoundParameters.ContainsKey('Confirm')) { $spArgs['Confirm'] = [bool]$PSBoundParameters['Confirm'] }
+
+Clear-DcGameConfig -Game $Game -Backup @spArgs
 Write-Host ""

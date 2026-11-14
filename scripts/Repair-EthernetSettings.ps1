@@ -36,9 +36,12 @@ Write-Host "  NETWORK ADAPTER & SOCKET STABILITY OPTIMIZER" -ForegroundColor Cya
 Write-Host "========================================================================" -ForegroundColor Cyan
 Write-Host ""
 
+$spArgs = @{ WhatIf = [bool]$WhatIfPreference }
+if ($PSBoundParameters.ContainsKey('Confirm')) { $spArgs['Confirm'] = [bool]$PSBoundParameters['Confirm'] }
+
 if ($PSBoundParameters.ContainsKey('ExpandUdpPorts') -and -not $PSBoundParameters.ContainsKey('Speed')) {
-    Repair-DcUdpPortRange
+    Repair-DcUdpPortRange @spArgs
 } else {
-    Repair-DcEthernetSettings -Speed $Speed -ExpandUdpPorts:$ExpandUdpPorts
+    Repair-DcEthernetSettings -Speed $Speed -ExpandUdpPorts:$ExpandUdpPorts @spArgs
 }
 Write-Host ""

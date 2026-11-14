@@ -183,55 +183,57 @@ Import-Module (Join-Path $modulesDir "DcCrashForensics.psm1") -Force
 $isCustomHours = ($PSBoundParameters.ContainsKey('Hours') -and $Hours -gt 0)
 
 # Execute Dedicated Remediation or Audit Switches Immediately (Fast-Path before Event Log Scans)
+$spArgs = @{ WhatIf = [bool]$WhatIfPreference }
+if ($PSBoundParameters.ContainsKey('Confirm')) { $spArgs['Confirm'] = [bool]$PSBoundParameters['Confirm'] }
 $ranDedicatedSwitch = $false
 if ($KillHungSteam -and -not $CleanSteamCache) {
     Write-Host "`n=== HUNG / ZOMBIE PROCESS TERMINATOR ===" -ForegroundColor Magenta
-    Stop-DcZombieProcesses
+    Stop-DcZombieProcesses @spArgs
     Write-Host "`n[DONE] Process termination routine complete." -ForegroundColor Green
     $ranDedicatedSwitch = $true
 }
 if ($CleanSteamCache) {
     Write-Host "`n=== STEAM CEF HTML BROWSER CACHE CLEANER ===" -ForegroundColor Magenta
-    Clear-DcSteamCache -KillRunningSteam:$KillHungSteam
+    Clear-DcSteamCache -KillRunningSteam:$KillHungSteam @spArgs
     $ranDedicatedSwitch = $true
 }
 if ($CleanShaderCache) {
     Write-Host "`n=== DIRECTX & GPU SHADER CACHE PURGE ===" -ForegroundColor Magenta
-    Clear-DcShaderCache -Target $ShaderTarget
+    Clear-DcShaderCache -Target $ShaderTarget @spArgs
     Write-Host "`n[DONE] Shader cache cleaning complete." -ForegroundColor Green
     $ranDedicatedSwitch = $true
 }
 if ($CleanConfig) {
     Write-Host "`n=== GAME CONFIGURATION & CACHE CLEANER (WITH BACKUPS) ===" -ForegroundColor Magenta
-    Clear-DcGameConfig -Game $Game -Backup
+    Clear-DcGameConfig -Game $Game -Backup @spArgs
     Write-Host "`n[DONE] Game configuration cleaning complete." -ForegroundColor Green
     $ranDedicatedSwitch = $true
 }
 if ($DisablePciePowerSavings) {
-    & (Join-Path $PSScriptRoot "scripts\Repair-PciePowerSettings.ps1")
+    & (Join-Path $PSScriptRoot "scripts\Repair-PciePowerSettings.ps1") @spArgs
     $ranDedicatedSwitch = $true
 }
 if ($RepairNetwork) {
     Write-Host "`n=== NETWORK ADAPTER STABILITY OPTIMIZER ===" -ForegroundColor Magenta
-    Repair-DcEthernetSettings -Speed $Speed -ExpandUdpPorts:$ExpandUdpPorts
+    Repair-DcEthernetSettings -Speed $Speed -ExpandUdpPorts:$ExpandUdpPorts @spArgs
     $ranDedicatedSwitch = $true
 }
 if ($ExpandUdpPorts -and -not $RepairNetwork) {
     Write-Host "`n=== WINDOWS UDP EPHEMERAL PORT SPACE OPTIMIZER ===" -ForegroundColor Magenta
-    Repair-DcUdpPortRange
+    Repair-DcUdpPortRange @spArgs
     $ranDedicatedSwitch = $true
 }
 if ($RepairGpuSleep) {
-    & (Join-Path $PSScriptRoot "scripts\Repair-GpuSleepSettings.ps1") -DisableUlps:$DisableUlps
+    & (Join-Path $PSScriptRoot "scripts\Repair-GpuSleepSettings.ps1") -DisableUlps:$DisableUlps @spArgs
     $ranDedicatedSwitch = $true
 }
 if ($FixDrivers) {
     Write-Host "`n=== GPU DRIVER STORE ALIGNMENT & DOWNGRADE PROTECTION ===" -ForegroundColor Magenta
-    Repair-DcAmdDriverAlignment -BlockWindowsUpdateDrivers
+    Repair-DcAmdDriverAlignment -BlockWindowsUpdateDrivers @spArgs
     $ranDedicatedSwitch = $true
 }
 if ($DisableRogueDrivers) {
-    & (Join-Path $PSScriptRoot "scripts\Disable-RogueKernelDrivers.ps1")
+    & (Join-Path $PSScriptRoot "scripts\Disable-RogueKernelDrivers.ps1") @spArgs
     $ranDedicatedSwitch = $true
 }
 if ($ranDedicatedSwitch) {

@@ -79,6 +79,36 @@ function Backup-DcRemediationState {
             }
         }
 
+        $netClassBase = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}"
+        $regKeysToCapture = @(
+            "IdleTimeoutMs", "EnableD3ColdInS0", "LatencyToleranceReporting",
+            "*PMARPOffload", "*PMNSOffload", "*IdleRestriction", "ULPMode",
+            "ReduceSpeedOnPowerDown", "*ModernStandbyWoLMagicPacket",
+            "*EEE", "*SpeedDuplex", "*FlowControl"
+        )
+        if ($adapterSnapshot.Count -gt 0 -and (Test-Path $netClassBase)) {
+            $csks = Get-ChildItem -Path $netClassBase -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^\d{4}$' }
+            foreach ($adSnap in $adapterSnapshot) {
+                $adObj = $adapters | Where-Object { $_.Name -eq $adSnap.Name } | Select-Object -First 1
+                $classKeyPath = $null
+                $drvRegVals = [ordered]@{}
+                foreach ($csk in $csks) {
+                    $props = Get-ItemProperty -Path $csk.PSPath -ErrorAction SilentlyContinue
+                    if ($props -and (($adObj -and $adObj.InterfaceGuid -and $props.NetCfgInstanceId -eq $adObj.InterfaceGuid) -or ($props.DriverDesc -eq $adSnap.InterfaceDesc))) {
+                        $classKeyPath = $csk.PSPath
+                        foreach ($rk in $regKeysToCapture) {
+                            if ($props.PSObject.Properties.Name -contains $rk -and $null -ne $props.$rk) {
+                                $drvRegVals[$rk] = [string]$props.$rk
+                            }
+                        }
+                        break
+                    }
+                }
+                $adSnap | Add-Member -NotePropertyName ClassKeyPath -NotePropertyValue $classKeyPath -Force
+                $adSnap | Add-Member -NotePropertyName DriverRegistryValues -NotePropertyValue $drvRegVals -Force
+            }
+        }
+
         $dsKey = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching" -ErrorAction SilentlyContinue
         $wuKey = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -ErrorAction SilentlyContinue
         $gfxKey = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" -ErrorAction SilentlyContinue
@@ -132,6 +162,17 @@ function Restore-DcRemediationState {
                     }
                     if ($ad.PacketPriorityVlan) {
                         Set-NetAdapterAdvancedProperty -Name $ad.Name -DisplayName "Packet Priority & VLAN" -DisplayValue $ad.PacketPriorityVlan -ErrorAction SilentlyContinue
+                    }
+                }
+            }
+            if ($snap.NetworkAdapters) {
+                foreach ($ad in $snap.NetworkAdapters) {
+                    if ($ad.PSObject.Properties['ClassKeyPath'] -and $ad.ClassKeyPath -and $ad.PSObject.Properties['DriverRegistryValues'] -and $ad.DriverRegistryValues -and (Test-Path $ad.ClassKeyPath)) {
+                        foreach ($prop in $ad.DriverRegistryValues.PSObject.Properties) {
+                            if ($null -ne $prop.Value) {
+                                Set-ItemProperty -Path $ad.ClassKeyPath -Name $prop.Name -Value ([string]$prop.Value) -ErrorAction SilentlyContinue
+                            }
+                        }
                     }
                 }
             }
@@ -274,12 +315,18 @@ function Clear-DcSteamCache {
 
     $cachePath = Join-Path $env:LOCALAPPDATA "Steam\htmlcache"
     $runningSteam = Get-Process -Name steam, steamwebhelper -ErrorAction SilentlyContinue
+    if ($runningSteam -and $WhatIfPreference -and -not $KillRunningSteam) {
+        Write-Host "[WARNING] Steam / SteamWebHelper is currently running (dry-run preview continuing under -WhatIf)." -ForegroundColor Yellow
+        $runningSteam = $null
+    }
 
     if ($runningSteam) {
         if ($KillRunningSteam) {
-            Write-Host "Closing active Steam processes to unlock browser cache..." -ForegroundColor Yellow
+            if ($PSCmdlet.ShouldProcess("Active Steam processes", "Terminate Steam / SteamWebHelper to unlock browser cache")) {
+                Write-Host "Closing active Steam processes to unlock browser cache..." -ForegroundColor Yellow
             $runningSteam | Stop-Process -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 1
+                Start-Sleep -Seconds 1
+            }
         } else {
             Write-Host "[WARNING] Steam / SteamWebHelper is currently running." -ForegroundColor Yellow
             Write-Host "Please close Steam before clearing the browser cache, or specify -KillRunningSteam." -ForegroundColor Yellow
@@ -288,7 +335,9 @@ function Clear-DcSteamCache {
     }
 
     if (Test-Path $cachePath) {
-        if ($PSCmdlet.ShouldProcess($cachePath, "Purge Steam CEF HTML Browser Cache")) {
+        $steamCacheProceed = $PSCmdlet.ShouldProcess($cachePath, "Purge Steam CEF HTML Browser Cache")
+        if (-not $steamCacheProceed) { return $false }
+        if ($steamCacheProceed) {
             try {
                 Remove-Item -Path "$cachePath\*" -Recurse -Force -ErrorAction Stop
                 Write-Host "[SUCCESS] Steam HTML browser cache purged successfully." -ForegroundColor Green
@@ -658,6 +707,12 @@ function Repair-DcPciePowerSettings {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param()
 
+    if (-not (Test-DcIsAdmin) -and -not $WhatIfPreference) {
+        Write-Host "[ERROR] Administrator elevation is required to modify PCIe power plan settings." -ForegroundColor Red
+        Write-Host "Please re-run in an elevated terminal (Run as Administrator)." -ForegroundColor Yellow
+        return $false
+    }
+
     Write-Host "=== OPTIMIZING PCIE LINK STATE POWER MANAGEMENT (ASPM) ===" -ForegroundColor Magenta
     Write-Host "Disabling PCIe Link State Power Management on active power plan..." -ForegroundColor White
 
@@ -718,6 +773,7 @@ function Disable-DcProblematicKernelDriver {
             Write-Host "  [OK] Stop signal sent to '$DriverName'." -ForegroundColor DarkGray
 
             Write-Host "[SUCCESS] Driver '$DriverName' disabled. It will no longer load into kernel memory on boot." -ForegroundColor Green
+            return $true
         } catch {
             Write-Host "[FAILED] Could not disable service '$DriverName': $($_.Exception.Message)" -ForegroundColor Red
             return $false
@@ -749,6 +805,7 @@ function Repair-DcGpuSleepSettings {
     Write-Host "  Preserving GPU sleep and power-saving states by default (Zero Power Impact)." -ForegroundColor Cyan
 
     # 1. Increase TdrDelay and TdrDdiDelay in GraphicsDrivers registry (Zero Power Impact)
+    $appliedAny = $false
     $gfxKey = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
     if ($PSCmdlet.ShouldProcess($gfxKey, "Set TdrDelay = $TdrDelaySeconds and TdrDdiDelay = $TdrDelaySeconds")) {
         Backup-DcRemediationState -ActionName "GpuSleepSettings" | Out-Null
@@ -756,6 +813,7 @@ function Repair-DcGpuSleepSettings {
         Set-ItemProperty -Path $gfxKey -Name "TdrDelay" -Value $TdrDelaySeconds -Type DWord -Force
         Set-ItemProperty -Path $gfxKey -Name "TdrDdiDelay" -Value $TdrDelaySeconds -Type DWord -Force
         Write-Host "  [OK] Graphics watchdog timeout (TdrDelay / TdrDdiDelay) set to $TdrDelaySeconds seconds (Zero Power Impact)." -ForegroundColor Green
+        $appliedAny = $true
     }
 
     # 2. Ultra-Low Power State (ULPS) - ONLY modified if explicitly requested as a temporary diagnostic last resort
@@ -773,6 +831,7 @@ function Repair-DcGpuSleepSettings {
                         Set-ItemProperty -Path $sk.PSPath -Name "EnableUlps_NA" -Value "0" -Type String -Force -ErrorAction SilentlyContinue
                         Write-Host "  [OK] Disabled ULPS on $($prop.DriverDesc) ($($sk.PSChildName)) [Temporary Workaround]." -ForegroundColor Yellow
                         $ulpsFixed++
+                        $appliedAny = $true
                     }
                 }
             }
@@ -788,10 +847,12 @@ function Repair-DcGpuSleepSettings {
             if ($PSCmdlet.ShouldProcess($pwrKey, "Set HiberbootEnabled = 0")) {
                 Set-ItemProperty -Path $pwrKey -Name "HiberbootEnabled" -Value 0 -Type DWord -Force
                 Write-Host "  [OK] Windows Fast Startup disabled (ensures clean driver state on reboots)." -ForegroundColor Green
+                $appliedAny = $true
             }
         }
     }
 
+    if (-not $appliedAny) { return $false }
     Write-Host "[SUCCESS] GPU recovery settings optimized. A system reboot is recommended to apply changes." -ForegroundColor Green
     return $true
 }

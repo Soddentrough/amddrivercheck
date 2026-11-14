@@ -25,5 +25,8 @@ Write-Host "  STEAM CEF HTML BROWSER CACHE CLEANER" -ForegroundColor Magenta
 Write-Host "========================================================================" -ForegroundColor Magenta
 Write-Host ""
 
-Clear-DcSteamCache -KillRunningSteam:$Force
+$spArgs = @{ WhatIf = [bool]$WhatIfPreference }
+if ($PSBoundParameters.ContainsKey('Confirm')) { $spArgs['Confirm'] = [bool]$PSBoundParameters['Confirm'] }
+
+Clear-DcSteamCache -KillRunningSteam:$Force @spArgs
 Write-Host ""

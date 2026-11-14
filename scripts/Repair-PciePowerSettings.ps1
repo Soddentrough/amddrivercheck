@@ -36,7 +36,10 @@ if (-not $before.IsEnabled) {
     return
 }
 
-$success = Repair-DcPciePowerSettings
+$spArgs = @{ WhatIf = [bool]$WhatIfPreference }
+if ($PSBoundParameters.ContainsKey('Confirm')) { $spArgs['Confirm'] = [bool]$PSBoundParameters['Confirm'] }
+
+$success = Repair-DcPciePowerSettings @spArgs
 if ($success) {
     $after = Get-DcPciePowerManagementStatus
     Write-Host "`nUpdated Configuration:" -ForegroundColor Cyan

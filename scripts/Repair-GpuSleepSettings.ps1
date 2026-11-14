@@ -51,5 +51,8 @@ Write-Host "  GPU WATCHDOG TIMEOUT & DISPLAY WAKE OPTIMIZER" -ForegroundColor Ma
 Write-Host "========================================================================" -ForegroundColor Magenta
 Write-Host ""
 
-Repair-DcGpuSleepSettings -TdrDelaySeconds $TdrDelaySeconds -DisableUlps:$DisableUlps -DisableFastStartup:$DisableFastStartup
+$spArgs = @{ WhatIf = [bool]$WhatIfPreference }
+if ($PSBoundParameters.ContainsKey('Confirm')) { $spArgs['Confirm'] = [bool]$PSBoundParameters['Confirm'] }
+
+Repair-DcGpuSleepSettings -TdrDelaySeconds $TdrDelaySeconds -DisableUlps:$DisableUlps -DisableFastStartup:$DisableFastStartup @spArgs
 Write-Host ""

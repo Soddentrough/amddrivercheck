@@ -28,5 +28,8 @@ Write-Host "  DIRECTX & GPU SHADER CACHE PURGE TOOL" -ForegroundColor Magenta
 Write-Host "========================================================================" -ForegroundColor Magenta
 Write-Host ""
 
-Clear-DcShaderCache -Target $Target
+$spArgs = @{ WhatIf = [bool]$WhatIfPreference }
+if ($PSBoundParameters.ContainsKey('Confirm')) { $spArgs['Confirm'] = [bool]$PSBoundParameters['Confirm'] }
+
+Clear-DcShaderCache -Target $Target @spArgs
 Write-Host ""
